@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+import math
+
+from espresso_rl.domain.models import (
+    FollowThroughState,
+    Recommendation,
+    RecommendationDecision,
+    RecommendationMode,
+    RecommendationStatus,
+    ShotRecord,
+    new_id,
+)
+from espresso_rl.domain.optimization import OptimizationContext
+from espresso_rl.domain.safety import clamp_candidate_recipe, validate_recommendation
+
+
+class ConservativeBOOptimizer:
+    """
+    Small-step BO-style optimizer for cold start and fallback.
+
+    This intentionally uses a bounded candidate set and a conservative local
+    surrogate instead of allowing BoTorch to optimize a continuous space from a
+    handful of noisy espresso shots. It is machine-agnostic and only consumes
+    canonical shot records.
+    """
+
+    def recommend(self, context: OptimizationContext) -> Recommendation:
+        shots = list(context.shots)
+        current = context.current_recipe
+
+        if not shots:
+            recipe = current
+            mode = RecommendationMode.ZERO_OBSERVE
+            reason = "Use the current recipe for a baseline shot."
+            confidence = 0.25
+            source_shot_id = None
+        else:
+            radius_steps, radius_yield_g, dose_radius_g, mode = self._trust_region(shots)
+            center = self._center_recipe(shots)
+            recipe = self._choose_candidate(
+                shots=shots,
+                context=context,
+                center=center,
+                radius_steps=radius_steps,
+                radius_yield_g=radius_yield_g,
+                dose_radius_g=dose_radius_g,
+            )
+            reason = self._reason(shots, recipe.grind_steps - current.grind_steps, recipe.target_yield_g - current.target_yield_g)
+            confidence = self._confidence(shots)
+            source_shot_id = shots[-1].shot_id
+
+        recommendation = Recommendation(
+            recommendation_id=new_id("rec"),
+            created_at=context.now,
+            updated_at=context.now,
+            expires_at=context.now + 12 * 60 * 60,
+            install_id=context.install_id,
+            machine_id=context.machine_id,
+            bean_context_id=context.bean_context_id,
+            grind_delta_steps=round(recipe.grind_steps - current.grind_steps),
+            grind_delta_um=(recipe.grind_steps - current.grind_steps) * current.grinder_step_size_um,
+            next_grind_steps=recipe.grind_steps,
+            next_grind_um=recipe.grind_um,
+            next_dose_g=recipe.dose_g,
+            target_yield_g=recipe.target_yield_g,
+            target_ratio=recipe.target_ratio or recipe.target_yield_g / recipe.dose_g,
+            mode=mode,
+            confidence=confidence,
+            reason=reason,
+            status=RecommendationStatus.PENDING,
+            source_shot_id=source_shot_id,
+        )
+        validate_recommendation(current, recommendation, context.safety_bounds)
+        return recommendation
+
+    def _trust_region(self, shots: list[ShotRecord]) -> tuple[int, float, float, RecommendationMode]:
+        n = len(shots)
+        if n <= 4:
+            return 2, 4.0, 0.0, RecommendationMode.ZERO_IMMEDIATE_BO
+        if n <= 14:
+            return 3, 6.0, 0.5, RecommendationMode.LOCAL_BO
+        return 5, 8.0, 1.0, RecommendationMode.LOCAL_BO
+
+    def _eligible_shots(self, shots: list[ShotRecord]) -> list[ShotRecord]:
+        eligible = []
+        for shot in shots:
+            if shot.reward is None:
+                continue
+            if shot.recommendation_decision in {
+                RecommendationDecision.IGNORED,
+                RecommendationDecision.DISMISSED,
+            }:
+                continue
+            if shot.recommendation_followed == FollowThroughState.NOT_FOLLOWED:
+                continue
+            eligible.append(shot)
+        return eligible or [shot for shot in shots if shot.reward is not None] or shots
+
+    def _center_recipe(self, shots: list[ShotRecord]) -> ShotRecord:
+        eligible = self._eligible_shots(shots)
+
+        def score(shot: ShotRecord) -> float:
+            if shot.human_rating is not None:
+                return 10.0 + shot.human_rating + (shot.reward or 0.0)
+            if shot.reward is not None:
+                return shot.reward * max(shot.reward_confidence, 0.05)
+            return shot.profile_score or 0.0
+
+        return max(eligible, key=score)
+
+    def _choose_candidate(
+        self,
+        shots: list[ShotRecord],
+        context: OptimizationContext,
+        center: ShotRecord,
+        radius_steps: int,
+        radius_yield_g: float,
+        dose_radius_g: float,
+    ):
+        current = context.current_recipe
+        if len(shots) == 1:
+            grind_delta, yield_delta = self._single_point_probe(shots[0])
+            return clamp_candidate_recipe(
+                current=current,
+                candidate_grind_steps=current.grind_steps + grind_delta,
+                candidate_dose_g=current.dose_g,
+                candidate_target_yield_g=current.target_yield_g + yield_delta,
+                bounds=context.safety_bounds,
+            )
+
+        center_grind = center.grind_steps if center.grind_steps is not None else current.grind_steps
+        center_dose = center.dose_in_g
+        center_yield = center.target_yield_g
+        dose_offsets = [0.0] if dose_radius_g == 0 else [-dose_radius_g, 0.0, dose_radius_g]
+        yield_offsets = self._yield_offsets(radius_yield_g)
+
+        best_recipe = current
+        best_score = -math.inf
+        for step_offset in range(-radius_steps, radius_steps + 1):
+            for dose_offset in dose_offsets:
+                for yield_offset in yield_offsets:
+                    candidate = clamp_candidate_recipe(
+                        current=current,
+                        candidate_grind_steps=center_grind + step_offset,
+                        candidate_dose_g=center_dose + dose_offset,
+                        candidate_target_yield_g=center_yield + yield_offset,
+                        bounds=context.safety_bounds,
+                    )
+                    candidate_score = self._candidate_score(
+                        candidate,
+                        shots,
+                        context,
+                        radius_steps,
+                        radius_yield_g,
+                        max(dose_radius_g, 0.5),
+                    )
+                    if candidate_score > best_score:
+                        best_score = candidate_score
+                        best_recipe = candidate
+        return best_recipe
+
+    def _single_point_probe(self, shot: ShotRecord) -> tuple[int, float]:
+        tags = set(shot.taste_tags)
+        if {"sour", "weak", "too_fast"} & tags or (shot.shot_time_s is not None and shot.shot_time_s < 25):
+            return 1, 2.0
+        if {"bitter", "harsh", "too_slow"} & tags or (shot.shot_time_s is not None and shot.shot_time_s > 35):
+            return -1, -2.0
+        return 1, 0.0
+
+    def _yield_offsets(self, radius_yield_g: float) -> list[float]:
+        values: list[float] = []
+        step = 2.0
+        k = int(radius_yield_g / step)
+        for i in range(-k, k + 1):
+            values.append(i * step)
+        return values
+
+    def _candidate_score(
+        self,
+        candidate,
+        shots: list[ShotRecord],
+        context: OptimizationContext,
+        radius_steps: int,
+        radius_yield_g: float,
+        dose_radius_g: float,
+    ) -> float:
+        eligible = self._eligible_shots(shots)
+        weighted_reward = 0.0
+        weight_sum = 0.0
+        min_distance = math.inf
+        for shot in eligible:
+            if shot.grind_steps is None:
+                continue
+            distance = self._distance(candidate, shot, radius_steps, radius_yield_g, dose_radius_g)
+            min_distance = min(min_distance, distance)
+            weight = (shot.reward_confidence or 0.1) / (0.15 + distance)
+            weighted_reward += weight * (shot.reward if shot.reward is not None else (shot.profile_score or 0.0))
+            weight_sum += weight
+        predicted_reward = weighted_reward / weight_sum if weight_sum else 0.0
+
+        distance_from_current = abs(candidate.grind_steps - context.current_recipe.grind_steps) / max(radius_steps, 1)
+        distance_from_current += abs(candidate.target_yield_g - context.current_recipe.target_yield_g) / max(radius_yield_g, 1.0)
+        distance_from_current += abs(candidate.dose_g - context.current_recipe.dose_g) / max(dose_radius_g, 0.5)
+
+        exploration_bonus = 0.02 * min(min_distance if math.isfinite(min_distance) else 0.0, 1.0)
+        distance_penalty = 0.04 * distance_from_current
+        oscillation_penalty = self._oscillation_penalty(candidate, context)
+        return predicted_reward + exploration_bonus - distance_penalty - oscillation_penalty
+
+    def _distance(
+        self,
+        candidate,
+        shot: ShotRecord,
+        radius_steps: int,
+        radius_yield_g: float,
+        dose_radius_g: float,
+    ) -> float:
+        shot_grind = shot.grind_steps if shot.grind_steps is not None else candidate.grind_steps
+        grind_d = abs(candidate.grind_steps - shot_grind) / max(radius_steps, 1)
+        dose_d = abs(candidate.dose_g - shot.dose_in_g) / max(dose_radius_g, 0.5)
+        yield_d = abs(candidate.target_yield_g - shot.target_yield_g) / max(radius_yield_g, 1.0)
+        return math.sqrt(grind_d * grind_d + dose_d * dose_d + yield_d * yield_d)
+
+    def _oscillation_penalty(self, candidate, context: OptimizationContext) -> float:
+        last = context.last_recommendation
+        if last is None:
+            return 0.0
+        new_delta = candidate.grind_steps - context.current_recipe.grind_steps
+        if new_delta == 0 or last.grind_delta_steps == 0:
+            return 0.0
+        if (new_delta > 0) != (last.grind_delta_steps > 0):
+            return 0.03
+        return 0.0
+
+    def _reason(self, shots: list[ShotRecord], grind_delta_steps: float, yield_delta_g: float) -> str:
+        last = shots[-1]
+        tags = set(last.taste_tags)
+        if {"sour", "weak", "too_fast"} & tags:
+            return "Last shot looked under-extracted; try a small finer/longer adjustment."
+        if {"bitter", "harsh", "too_slow"} & tags:
+            return "Last shot looked over-extracted or slow; try a small coarser/shorter adjustment."
+        if grind_delta_steps == 0 and abs(yield_delta_g) < 0.1:
+            return "Hold near the best known recipe while more feedback is collected."
+        return "Small trust-region BO step near the best known recipe."
+
+    def _confidence(self, shots: list[ShotRecord]) -> float:
+        rated = sum(1 for shot in shots if shot.human_rating is not None)
+        followed = sum(
+            1
+            for shot in shots
+            if shot.recommendation_followed
+            in {FollowThroughState.FOLLOWED, FollowThroughState.PARTIALLY_FOLLOWED}
+        )
+        base = 0.25 + min(0.35, rated * 0.04) + min(0.25, followed * 0.03)
+        return max(0.0, min(0.85, base))
+

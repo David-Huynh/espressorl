@@ -1,0 +1,60 @@
+name: "EspressoRL"
+version: "0.1.0"
+slug: "espresso_rl"
+description: "Adaptive espresso grind optimisation for Gaggimate via Bayesian Optimisation (Phase 1) and DreamerV3 (Phase 2)."
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+init: false
+options:
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
+  install_id: "local_install"
+  machine_id: "gaggimate:local"
+  bean_context_id: null
+  grinder_step_size_um: 12.5
+  grinder_model: ""
+  machine_pressure_bar: 9.0
+  basket_size_ml: 18.0
+  initial_grind_steps: 0.0
+  initial_grind_um: 0.0
+  initial_dose_g: 18.0
+  initial_target_yield_g: 36.0
+  alpha: 0.5
+  training_mode: false
+  community_upload_enabled: false
+  supabase_ingest_url: ""
+  upload_secret: ""
+  upload_token_id: ""
+  upload_worker_interval_s: 30.0
+  upload_max_payload_bytes: 2000000
+schema:
+  mqtt_host: str
+  mqtt_port: int
+  mqtt_user: str
+  mqtt_password: str
+  install_id: str
+  machine_id: str
+  bean_context_id: str?
+  grinder_step_size_um: float
+  grinder_model: str?
+  machine_pressure_bar: float
+  basket_size_ml: float
+  initial_grind_steps: float
+  initial_grind_um: float
+  initial_dose_g: float
+  initial_target_yield_g: float
+  alpha: float
+  training_mode: bool
+  community_upload_enabled: bool
+  supabase_ingest_url: str?
+  upload_secret: password?
+  upload_token_id: str?
+  upload_worker_interval_s: float
+  upload_max_payload_bytes: int
+map:
+  - data:rw
