@@ -41,6 +41,14 @@ class RecommendationDecision(str, Enum):
     UNKNOWN = "unknown"
 
 
+class RecommendationApplyStatus(str, Enum):
+    UNKNOWN = "unknown"
+    APPLIED = "applied"
+    PARTIALLY_APPLIED = "partially_applied"
+    MANUAL_REQUIRED = "manual_required"
+    FAILED = "failed"
+
+
 class FollowThroughState(str, Enum):
     FOLLOWED = "followed"
     PARTIALLY_FOLLOWED = "partially_followed"
@@ -155,10 +163,16 @@ class Recommendation:
     used_at: int | None = None
     superseded_at: int | None = None
     source_shot_id: str | None = None
+    apply_status: RecommendationApplyStatus = RecommendationApplyStatus.UNKNOWN
+    apply_acknowledged_at: int | None = None
+    applied_fields: dict[str, Any] = field(default_factory=dict)
+    manual_fields: list[str] = field(default_factory=list)
+    apply_error: str | None = None
 
     def __post_init__(self) -> None:
         self.mode = RecommendationMode(self.mode)
         self.status = RecommendationStatus(self.status)
+        self.apply_status = RecommendationApplyStatus(self.apply_status)
         self.confidence = max(0.0, min(1.0, float(self.confidence)))
         if self.next_dose_g <= 0:
             raise ValueError("next_dose_g must be positive")

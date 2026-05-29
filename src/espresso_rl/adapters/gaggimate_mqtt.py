@@ -10,6 +10,7 @@ import paho.mqtt.client as mqtt
 from espresso_rl.config import Config
 from espresso_rl.domain.events import (
     MachineStateEvent,
+    RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotFeedbackEvent,
     ShotProfileEvent,
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 SHOT_TOPIC = "gaggimate/+/shot/profile"
 FEEDBACK_TOPIC = "gaggimate/+/rl/rating"
 DECISION_TOPIC = "gaggimate/+/rl/recommendation/decision"
+APPLY_TOPIC = "gaggimate/+/rl/recommendation/apply"
 MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
 
 
@@ -34,12 +36,14 @@ class GaggimateMQTTClient:
         on_shot: Callable[[ShotProfileEvent], None],
         on_feedback: Callable[[ShotFeedbackEvent], None],
         on_decision: Callable[[RecommendationDecisionEvent], None],
+        on_apply: Callable[[RecommendationApplyEvent], None],
         on_machine_state: Callable[[MachineStateEvent], None],
     ) -> None:
         self._config = config
         self._on_shot = on_shot
         self._on_feedback = on_feedback
         self._on_decision = on_decision
+        self._on_apply = on_apply
         self._on_machine_state = on_machine_state
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.mqtt_user:
@@ -82,6 +86,18 @@ class GaggimateMQTTClient:
         self._client.publish(topic, json.dumps(payload), qos=1, retain=True)
         logger.info("Published recommendation %s to %s", recommendation.recommendation_id, topic)
 
+    def publish_status(self, machine_id: str, status: dict[str, Any]) -> None:
+        machine_topic_id = machine_id.removeprefix("gaggimate:")
+        topic = f"gaggimate/{machine_topic_id}/rl/status"
+        payload = {
+            "event_type": "espresso_rl_status",
+            "schema_version": 1,
+            "machine_id": machine_id,
+            **status,
+        }
+        self._client.publish(topic, json.dumps(payload), qos=1, retain=True)
+        logger.info("Published EspressoRL status to %s", topic)
+
     def _on_connect(
         self,
         client: mqtt.Client,
@@ -94,12 +110,14 @@ class GaggimateMQTTClient:
             client.subscribe(SHOT_TOPIC)
             client.subscribe(FEEDBACK_TOPIC)
             client.subscribe(DECISION_TOPIC)
+            client.subscribe(APPLY_TOPIC)
             client.subscribe(MACHINE_STATE_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
                 FEEDBACK_TOPIC,
                 DECISION_TOPIC,
+                APPLY_TOPIC,
                 MACHINE_STATE_TOPIC,
             )
         else:
@@ -121,6 +139,8 @@ class GaggimateMQTTClient:
                 self._on_feedback(self.translate_feedback_payload(payload, mac))
             elif msg.topic.endswith("/rl/recommendation/decision"):
                 self._on_decision(self.translate_decision_payload(payload, mac))
+            elif msg.topic.endswith("/rl/recommendation/apply"):
+                self._on_apply(self.translate_apply_payload(payload, mac))
             elif msg.topic.endswith("/machine/state"):
                 self._on_machine_state(self.translate_machine_state_payload(payload, mac))
         except Exception:
@@ -190,6 +210,20 @@ class GaggimateMQTTClient:
             install_id=payload.get("install_id", self._config.install_id),
             machine_id=payload.get("machine_id", f"gaggimate:{mac}"),
             edited_fields=dict(payload.get("edited_fields", {})),
+            source=payload.get("source", "gaggimate_mqtt"),
+        )
+
+    def translate_apply_payload(self, payload: dict[str, Any], mac: str) -> RecommendationApplyEvent:
+        return RecommendationApplyEvent(
+            recommendation_id=str(payload.get("recommendation_id") or ""),
+            status=payload.get("status", "unknown"),
+            timestamp=int(payload.get("timestamp", self._config.now())),
+            install_id=payload.get("install_id", self._config.install_id),
+            machine_id=payload.get("machine_id", f"gaggimate:{mac}"),
+            applied_fields=dict(payload.get("applied_fields") or {}),
+            manual_fields=list(payload.get("manual_fields") or []),
+            failed_fields=dict(payload.get("failed_fields") or {}),
+            message=payload.get("message"),
             source=payload.get("source", "gaggimate_mqtt"),
         )
 

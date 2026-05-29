@@ -97,6 +97,11 @@ def recommendation_upload_payload(recommendation: Recommendation) -> dict[str, A
         "used_at": recommendation.used_at,
         "superseded_at": recommendation.superseded_at,
         "source_shot_id": recommendation.source_shot_id,
+        "apply_status": recommendation.apply_status.value,
+        "apply_acknowledged_at": recommendation.apply_acknowledged_at,
+        "applied_fields": dict(recommendation.applied_fields),
+        "manual_fields": list(recommendation.manual_fields),
+        "apply_error": recommendation.apply_error,
     }
 
 

@@ -5,6 +5,7 @@ import unittest
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.domain.events import (
     MachineStateEvent,
+    RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotFeedbackEvent,
     ShotProfileEvent,
@@ -13,6 +14,7 @@ from espresso_rl.domain.models import (
     FollowThroughState,
     MachineState,
     Recommendation,
+    RecommendationApplyStatus,
     RecommendationDecision,
     RecommendationMode,
     RecommendationStatus,
@@ -285,6 +287,37 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(shown.recommendation_id, rec.recommendation_id)  # type: ignore[union-attr]
         self.assertEqual(shown.status, RecommendationStatus.ACCEPTED)  # type: ignore[union-attr]
         self.assertEqual(accepted.status, RecommendationStatus.ACCEPTED)
+
+    def test_apply_acknowledgement_does_not_mark_recommendation_followed(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        service.record_recommendation_decision(
+            RecommendationDecisionEvent(
+                recommendation_id=rec.recommendation_id,
+                decision=RecommendationDecision.ACCEPTED,
+                timestamp=2,
+            )
+        )
+        applied = service.record_recommendation_apply(
+            RecommendationApplyEvent(
+                recommendation_id=rec.recommendation_id,
+                status=RecommendationApplyStatus.PARTIALLY_APPLIED,
+                timestamp=3,
+                applied_fields={"target_yield_g": rec.target_yield_g},
+                manual_fields=["next_grind_steps", "next_dose_g"],
+                message="Target yield applied; grind and dose are manual.",
+            )
+        )
+
+        self.assertEqual(applied.status, RecommendationStatus.ACCEPTED)
+        self.assertEqual(applied.apply_status, RecommendationApplyStatus.PARTIALLY_APPLIED)
+        self.assertEqual(applied.applied_fields["target_yield_g"], rec.target_yield_g)
+        self.assertEqual(applied.manual_fields, ["next_grind_steps", "next_dose_g"])
+        self.assertIsNone(applied.used_at)
+        self.assertEqual(recs.get(rec.recommendation_id).status, RecommendationStatus.ACCEPTED)  # type: ignore[union-attr]
 
     def test_no_answer_reprompts_until_user_decides(self) -> None:
         shots = MemoryShotRepository()

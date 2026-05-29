@@ -6,6 +6,7 @@ from typing import Callable
 
 from espresso_rl.domain.events import (
     MachineStateEvent,
+    RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotFeedbackEvent,
     ShotProfileEvent,
@@ -16,6 +17,7 @@ from espresso_rl.domain.models import (
     MachineState,
     Recipe,
     Recommendation,
+    RecommendationApplyStatus,
     RecommendationDecision,
     RecommendationStatus,
     SafetyBounds,
@@ -172,6 +174,22 @@ class EspressoRLService:
             updated.status = RecommendationStatus.SHOWN
             updated.shown_count += 1
 
+        self._store_recommendation(updated, now)
+        return updated
+
+    def record_recommendation_apply(self, event: RecommendationApplyEvent) -> Recommendation:
+        now = self._clock()
+        recommendation = self._recommendations.get(event.recommendation_id)
+        if recommendation is None:
+            raise ValueError(f"unknown recommendation_id {event.recommendation_id}")
+
+        updated = copy.copy(recommendation)
+        updated.updated_at = now
+        updated.apply_status = event.status
+        updated.apply_acknowledged_at = now
+        updated.applied_fields = dict(event.applied_fields)
+        updated.manual_fields = list(event.manual_fields)
+        updated.apply_error = event.message if event.status == RecommendationApplyStatus.FAILED else None
         self._store_recommendation(updated, now)
         return updated
 

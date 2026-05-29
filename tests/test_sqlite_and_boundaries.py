@@ -12,8 +12,8 @@ from espresso_rl.adapters.sqlite_repositories import (
     SQLiteUploadQueueRepository,
 )
 from espresso_rl.application.services import EspressoRLService
-from espresso_rl.domain.events import ShotProfileEvent
-from espresso_rl.domain.models import UploadQueueItem, UploadQueueStatus
+from espresso_rl.domain.events import RecommendationApplyEvent, ShotProfileEvent
+from espresso_rl.domain.models import RecommendationApplyStatus, UploadQueueItem, UploadQueueStatus
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from espresso_rl.adapters.supabase_upload import UploadQueueWorker
 
@@ -49,6 +49,14 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
             result = service.ingest_shot_profile(shot_event())
+            service.record_recommendation_apply(
+                RecommendationApplyEvent(
+                    recommendation_id=result.recommendation.recommendation_id,
+                    status=RecommendationApplyStatus.MANUAL_REQUIRED,
+                    timestamp=2,
+                    manual_fields=["next_grind_steps", "next_dose_g"],
+                )
+            )
             stored_shot = shots.get("shot_1")
             stored_rec = recs.get(result.recommendation.recommendation_id)
 
@@ -56,6 +64,8 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertIsNotNone(stored_rec)
             self.assertEqual(stored_shot.profile.shape, (5, 100))  # type: ignore[union-attr]
             self.assertEqual(stored_rec.reason, result.recommendation.reason)  # type: ignore[union-attr]
+            self.assertEqual(stored_rec.apply_status, RecommendationApplyStatus.MANUAL_REQUIRED)  # type: ignore[union-attr]
+            self.assertEqual(stored_rec.manual_fields, ["next_grind_steps", "next_dose_g"])  # type: ignore[union-attr]
 
     def test_sqlite_upload_queue_tracks_retry_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

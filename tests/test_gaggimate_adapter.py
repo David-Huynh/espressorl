@@ -13,7 +13,13 @@ from espresso_rl.adapters.sqlite_repositories import (
 )
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.config import Config
-from espresso_rl.domain.models import FollowThroughState, Recommendation, RecommendationMode, RecommendationStatus
+from espresso_rl.domain.models import (
+    FollowThroughState,
+    Recommendation,
+    RecommendationApplyStatus,
+    RecommendationMode,
+    RecommendationStatus,
+)
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 
 
@@ -32,6 +38,7 @@ class GaggimateAdapterTests(unittest.TestCase):
             on_shot=lambda event: None,
             on_feedback=lambda event: None,
             on_decision=lambda event: None,
+            on_apply=lambda event: None,
             on_machine_state=lambda event: None,
         )
 
@@ -70,6 +77,7 @@ class GaggimateAdapterTests(unittest.TestCase):
             on_shot=lambda event: None,
             on_feedback=lambda event: None,
             on_decision=lambda event: None,
+            on_apply=lambda event: None,
             on_machine_state=lambda event: None,
         )
         fake = FakeMQTT()
@@ -105,6 +113,78 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(decoded["shot_id"], "shot_1")
         self.assertEqual(decoded["recommendation_id"], "rec_1")
 
+    def test_status_payload_is_retained_for_gaggimate_settings(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+        fake = FakeMQTT()
+        client._client = fake  # type: ignore[assignment]
+
+        client.publish_status(
+            "gaggimate:AA_BB",
+            {
+                "addon_online": True,
+                "install_id": "install_1",
+                "timestamp": 10,
+                "last_shot_id": "shot_1",
+                "last_shot_at": 9,
+                "last_recommendation_id": "rec_1",
+                "last_recommendation_at": 10,
+                "recommendation_apply_status": "partially_applied",
+                "mode": "zero_immediate_bo",
+                "local_shot_count": 1,
+                "upload_queue_count": 0,
+                "community_upload_enabled": False,
+            },
+        )
+
+        topic, payload, qos, retain = fake.published[0]
+        self.assertEqual(topic, "gaggimate/AA_BB/rl/status")
+        self.assertEqual(qos, 1)
+        self.assertTrue(retain)
+        decoded = json.loads(payload)
+        self.assertEqual(decoded["event_type"], "espresso_rl_status")
+        self.assertTrue(decoded["addon_online"])
+        self.assertEqual(decoded["machine_id"], "gaggimate:AA_BB")
+        self.assertEqual(decoded["last_recommendation_id"], "rec_1")
+        self.assertEqual(decoded["recommendation_apply_status"], "partially_applied")
+
+    def test_apply_payload_records_machine_apply_separately_from_follow_through(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_apply_payload(
+            {
+                "event_type": "recommendation_apply",
+                "schema_version": 1,
+                "recommendation_id": "rec_1",
+                "status": "partially_applied",
+                "timestamp": 12,
+                "applied_fields": {"target_yield_g": 40.0},
+                "manual_fields": ["next_grind_steps", "next_dose_g"],
+                "message": "Target yield applied; grind and dose are manual.",
+                "source": "gaggimate_lvgl",
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.recommendation_id, "rec_1")
+        self.assertEqual(event.status, RecommendationApplyStatus.PARTIALLY_APPLIED)
+        self.assertEqual(event.machine_id, "gaggimate:AA_BB")
+        self.assertEqual(event.applied_fields["target_yield_g"], 40.0)
+        self.assertEqual(event.manual_fields, ["next_grind_steps", "next_dose_g"])
+
     def test_current_gaggimate_payload_drives_local_bo_data_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(
@@ -128,6 +208,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 on_shot=lambda event: None,
                 on_feedback=lambda event: None,
                 on_decision=lambda event: None,
+                on_apply=lambda event: None,
                 on_machine_state=lambda event: None,
             )
             fake = FakeMQTT()

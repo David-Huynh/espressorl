@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .models import MachineState, RecommendationDecision, Recipe, VALID_TASTE_TAGS
+from .models import (
+    MachineState,
+    RecommendationApplyStatus,
+    RecommendationDecision,
+    Recipe,
+    VALID_TASTE_TAGS,
+)
 
 
 def _numbers(values: list[Any], field_name: str) -> list[float]:
@@ -118,6 +124,44 @@ class RecommendationDecisionEvent:
         unknown = set(self.edited_fields) - allowed_edits
         if unknown:
             raise ValueError(f"unsupported edited fields: {sorted(unknown)}")
+
+
+@dataclass(frozen=True)
+class RecommendationApplyEvent:
+    recommendation_id: str
+    status: RecommendationApplyStatus
+    timestamp: int
+    install_id: str | None = None
+    machine_id: str | None = None
+    applied_fields: dict[str, Any] = field(default_factory=dict)
+    manual_fields: list[str] = field(default_factory=list)
+    failed_fields: dict[str, Any] = field(default_factory=dict)
+    message: str | None = None
+    source: str = "unknown"
+    schema_version: int = 1
+
+    event_type: str = field(default="recommendation_apply", init=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported apply schema_version")
+        object.__setattr__(self, "status", RecommendationApplyStatus(self.status))
+        allowed_fields = {
+            "next_grind_steps",
+            "next_grind_um",
+            "next_dose_g",
+            "target_yield_g",
+            "target_ratio",
+        }
+        unknown_applied = set(self.applied_fields) - allowed_fields
+        if unknown_applied:
+            raise ValueError(f"unsupported applied fields: {sorted(unknown_applied)}")
+        unknown_failed = set(self.failed_fields) - allowed_fields
+        if unknown_failed:
+            raise ValueError(f"unsupported failed fields: {sorted(unknown_failed)}")
+        unknown_manual = set(self.manual_fields) - allowed_fields
+        if unknown_manual:
+            raise ValueError(f"unsupported manual fields: {sorted(unknown_manual)}")
 
 
 @dataclass(frozen=True)

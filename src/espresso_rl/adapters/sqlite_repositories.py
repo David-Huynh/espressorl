@@ -11,6 +11,7 @@ from espresso_rl.domain.models import (
     PROFILE_SHAPE,
     FollowThroughState,
     Recommendation,
+    RecommendationApplyStatus,
     RecommendationDecision,
     RecommendationMode,
     RecommendationStatus,
@@ -97,7 +98,12 @@ class SQLiteStore:
                 edited_at INTEGER,
                 used_at INTEGER,
                 superseded_at INTEGER,
-                source_shot_id TEXT
+                source_shot_id TEXT,
+                apply_status TEXT NOT NULL DEFAULT 'unknown',
+                apply_acknowledged_at INTEGER,
+                applied_fields_json TEXT NOT NULL DEFAULT '{}',
+                manual_fields_json TEXT NOT NULL DEFAULT '[]',
+                apply_error TEXT
             )
             """
         )
@@ -120,6 +126,11 @@ class SQLiteStore:
             """
         )
         self._ensure_column("upload_queue", "payload_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column("recommendations", "apply_status", "TEXT NOT NULL DEFAULT 'unknown'")
+        self._ensure_column("recommendations", "apply_acknowledged_at", "INTEGER")
+        self._ensure_column("recommendations", "applied_fields_json", "TEXT NOT NULL DEFAULT '{}'")
+        self._ensure_column("recommendations", "manual_fields_json", "TEXT NOT NULL DEFAULT '[]'")
+        self._ensure_column("recommendations", "apply_error", "TEXT")
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -215,14 +226,18 @@ class SQLiteRecommendationRepository:
                 grind_delta_um, next_grind_steps, next_grind_um, next_dose_g,
                 target_yield_g, target_ratio, mode, confidence, reason, status,
                 shown_count, accepted_at, ignored_at, edited_at, used_at,
-                superseded_at, source_shot_id
+                superseded_at, source_shot_id, apply_status,
+                apply_acknowledged_at, applied_fields_json, manual_fields_json,
+                apply_error
             ) VALUES (
                 :recommendation_id, :created_at, :updated_at, :expires_at,
                 :install_id, :machine_id, :bean_context_id, :grind_delta_steps,
                 :grind_delta_um, :next_grind_steps, :next_grind_um, :next_dose_g,
                 :target_yield_g, :target_ratio, :mode, :confidence, :reason, :status,
                 :shown_count, :accepted_at, :ignored_at, :edited_at, :used_at,
-                :superseded_at, :source_shot_id
+                :superseded_at, :source_shot_id, :apply_status,
+                :apply_acknowledged_at, :applied_fields_json, :manual_fields_json,
+                :apply_error
             )
             """,
             _recommendation_to_row(recommendation),
@@ -475,6 +490,11 @@ def _recommendation_to_row(recommendation: Recommendation) -> dict:
         "used_at": recommendation.used_at,
         "superseded_at": recommendation.superseded_at,
         "source_shot_id": recommendation.source_shot_id,
+        "apply_status": recommendation.apply_status.value,
+        "apply_acknowledged_at": recommendation.apply_acknowledged_at,
+        "applied_fields_json": json.dumps(recommendation.applied_fields),
+        "manual_fields_json": json.dumps(recommendation.manual_fields),
+        "apply_error": recommendation.apply_error,
     }
 
 
@@ -505,6 +525,11 @@ def _row_to_recommendation(row: sqlite3.Row) -> Recommendation:
         used_at=row["used_at"],
         superseded_at=row["superseded_at"],
         source_shot_id=row["source_shot_id"],
+        apply_status=RecommendationApplyStatus(row["apply_status"]),
+        apply_acknowledged_at=row["apply_acknowledged_at"],
+        applied_fields=json.loads(row["applied_fields_json"]),
+        manual_fields=json.loads(row["manual_fields_json"]),
+        apply_error=row["apply_error"],
     )
 
 

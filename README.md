@@ -15,8 +15,8 @@ The core packages are:
 - `espresso_rl.domain`: canonical events, shot/recommendation models, profile
   resampling, grind normalization, reward, safety, and follow-through logic.
 - `espresso_rl.application`: use cases for shot ingestion, feedback,
-  recommendation decisions, reward recomputation, and next recommendation
-  generation.
+  recommendation decisions, recommendation apply acknowledgements, reward
+  recomputation, and next recommendation generation.
 - `espresso_rl.ports`: repository and optimizer interfaces.
 - `espresso_rl.optimizers`: machine-agnostic conservative BO implementation.
 - `espresso_rl.adapters`: SQLite persistence and Gaggimate MQTT translation.
@@ -26,11 +26,12 @@ modules remain present but are not wired into the active recommendation path
 until they can pass through the same safety, recommendation-memory, and
 follow-through gates.
 
-Implemented backend behavior includes canonical shot, feedback, decision, and
-machine-state events; recommendation memory; wake/idle recommendation display;
-stale recommendation expiry; actual-shot follow-through inference; low-confidence
-profile-only rewards; and an opt-in signed upload queue for a Supabase Edge
-Function or compatible ingestion endpoint.
+Implemented backend behavior includes canonical shot, feedback, decision,
+apply-acknowledgement, and machine-state events; recommendation memory;
+wake/idle recommendation display; stale recommendation expiry; actual-shot
+follow-through inference; low-confidence profile-only rewards; retained add-on
+status reporting; and an opt-in signed upload queue for a Supabase Edge Function
+or compatible ingestion endpoint.
 
 ## Data-collection MVP
 
@@ -53,16 +54,31 @@ Gaggimate publishes shot/profile
   -> add-on publishes gaggimate/{mac}/rl/recommendation
   -> Gaggimate stores the pending recommendation
   -> LVGL and WebUI show the recommendation/rating prompts
+  -> Gaggimate publishes decision and apply acknowledgement after Use
+  -> next shot data determines actual follow-through
 ```
 
 The recommendation payload includes grind delta, next dose target, target yield,
 ratio, mode, confidence, reason, and IDs. Grind is recommendation-only because
 Gaggimate cannot automate a grinder setting. When the user chooses Use, firmware
-saves the recommended target grind dose and selected-profile target yield, then
-publishes an accepted recommendation decision. It does not auto-apply on MQTT
-receipt. Choosing Later sends no decision, so the retained pending
+saves the selected-profile target yield when possible. It saves the recommended
+grind-by-weight dose target only when Gaggimate grind-by-weight targeting is
+enabled; otherwise it prompts the user to grind that dose manually.
+
+Use publishes both an accepted recommendation decision and
+`gaggimate/{mac}/rl/recommendation/apply`. The apply acknowledgement records
+which fields were applied by the machine and which fields still require manual
+action, but it never counts as follow-through by itself. EspressoRL only marks a
+recommendation followed after comparing the next actual shot data against the
+recommendation. Choosing Later sends no decision, so the retained pending
 recommendation can be shown again on the next wake/reconnect. Choosing Ignore
 sends an ignored decision so the optimizer will not count it as followed.
+
+The add-on also publishes retained `gaggimate/{mac}/rl/status` payloads. The
+Gaggimate WebUI settings page shows whether the add-on has been seen, the last
+stored shot, the last recommendation, the recommendation apply status, the
+current BO mode, local shot count, queued upload count, and community upload
+state.
 
 If EspressoRL Auto Tuning is disabled, Gaggimate still uses the Home
 Assistant/MQTT plugin normally, but it does not publish EspressoRL shot profiles,

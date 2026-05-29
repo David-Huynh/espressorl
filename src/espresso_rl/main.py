@@ -21,6 +21,7 @@ from espresso_rl.application.services import EspressoRLService
 from espresso_rl.config import Config
 from espresso_rl.domain.events import (
     MachineStateEvent,
+    RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotFeedbackEvent,
     ShotProfileEvent,
@@ -62,6 +63,31 @@ def main() -> None:
 
     mqtt_client: GaggimateMQTTClient
 
+    def publish_status(
+        machine_id: str,
+        bean_context_id: str | None,
+        *,
+        last_shot_id: str | None = None,
+        last_shot_at: int | None = None,
+        last_recommendation_id: str | None = None,
+        last_recommendation_at: int | None = None,
+        mode: str | None = None,
+    ) -> None:
+        status = build_status_payload(
+            config=config,
+            service=service,
+            shot_repo=shot_repo,
+            upload_queue_repo=upload_queue_repo,
+            machine_id=machine_id,
+            bean_context_id=bean_context_id,
+            last_shot_id=last_shot_id,
+            last_shot_at=last_shot_at,
+            last_recommendation_id=last_recommendation_id,
+            last_recommendation_at=last_recommendation_at,
+            mode=mode,
+        )
+        mqtt_client.publish_status(machine_id, status)
+
     def on_shot(event: ShotProfileEvent) -> None:
         result = service.ingest_shot_profile(event)
         logger.info(
@@ -74,6 +100,15 @@ def main() -> None:
             result.recommendation.target_yield_g,
         )
         mqtt_client.publish_recommendation(result.recommendation)
+        publish_status(
+            event.machine_id,
+            event.bean_context_id,
+            last_shot_id=result.shot.shot_id,
+            last_shot_at=result.shot.timestamp,
+            last_recommendation_id=result.recommendation.recommendation_id,
+            last_recommendation_at=result.recommendation.created_at,
+            mode=result.recommendation.mode.value,
+        )
 
     def on_feedback(event: ShotFeedbackEvent) -> None:
         shot = service.record_feedback(event)
@@ -84,6 +119,12 @@ def main() -> None:
             shot.reward or 0.0,
             shot.reward_confidence,
         )
+        publish_status(
+            shot.machine_id,
+            shot.bean_context_id,
+            last_shot_id=shot.shot_id,
+            last_shot_at=shot.timestamp,
+        )
 
     def on_decision(event: RecommendationDecisionEvent) -> None:
         recommendation = service.record_recommendation_decision(event)
@@ -92,10 +133,34 @@ def main() -> None:
             recommendation.recommendation_id,
             recommendation.status.value,
         )
+        publish_status(
+            recommendation.machine_id,
+            recommendation.bean_context_id,
+            last_recommendation_id=recommendation.recommendation_id,
+            last_recommendation_at=recommendation.updated_at,
+            mode=recommendation.mode.value,
+        )
+
+    def on_apply(event: RecommendationApplyEvent) -> None:
+        recommendation = service.record_recommendation_apply(event)
+        logger.info(
+            "Recommendation %s apply acknowledgement stored apply_status=%s manual_fields=%s",
+            recommendation.recommendation_id,
+            recommendation.apply_status.value,
+            ",".join(recommendation.manual_fields),
+        )
+        publish_status(
+            recommendation.machine_id,
+            recommendation.bean_context_id,
+            last_recommendation_id=recommendation.recommendation_id,
+            last_recommendation_at=recommendation.updated_at,
+            mode=recommendation.mode.value,
+        )
 
     def on_machine_state(event: MachineStateEvent) -> None:
         recommendation = service.handle_machine_state(event)
         if recommendation is None:
+            publish_status(event.machine_id, event.bean_context_id)
             return
         logger.info(
             "Machine %s state=%s showing recommendation %s",
@@ -104,12 +169,20 @@ def main() -> None:
             recommendation.recommendation_id,
         )
         mqtt_client.publish_recommendation(recommendation)
+        publish_status(
+            event.machine_id,
+            event.bean_context_id,
+            last_recommendation_id=recommendation.recommendation_id,
+            last_recommendation_at=recommendation.updated_at,
+            mode=recommendation.mode.value,
+        )
 
     mqtt_client = GaggimateMQTTClient(
         config=config,
         on_shot=on_shot,
         on_feedback=on_feedback,
         on_decision=on_decision,
+        on_apply=on_apply,
         on_machine_state=on_machine_state,
     )
 
@@ -124,8 +197,14 @@ def main() -> None:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    maybe_publish_startup_recommendation(config, service, mqtt_client)
     mqtt_client.start()
+    maybe_publish_startup_recommendation(
+        config,
+        service,
+        mqtt_client,
+        shot_repo=shot_repo,
+        upload_queue_repo=upload_queue_repo,
+    )
     logger.info("Listening for canonical events via Gaggimate MQTT adapter")
     signal.pause()
 
@@ -134,6 +213,8 @@ def maybe_publish_startup_recommendation(
     config: Config,
     service: EspressoRLService,
     mqtt_client: GaggimateMQTTClient,
+    shot_repo: SQLiteShotRepository | None = None,
+    upload_queue_repo: SQLiteUploadQueueRepository | None = None,
 ) -> None:
     if config.machine_id == "gaggimate:local":
         return
@@ -144,6 +225,20 @@ def maybe_publish_startup_recommendation(
     )
     if current is not None:
         mqtt_client.publish_recommendation(current)
+        mqtt_client.publish_status(
+            config.machine_id,
+            build_status_payload(
+                config=config,
+                service=service,
+                shot_repo=shot_repo,
+                upload_queue_repo=upload_queue_repo,
+                machine_id=config.machine_id,
+                bean_context_id=config.bean_context_id,
+                last_recommendation_id=current.recommendation_id,
+                last_recommendation_at=current.updated_at,
+                mode=current.mode.value,
+            ),
+        )
         return
     recipe = Recipe(
         grind_steps=config.initial_grind_steps,
@@ -158,6 +253,83 @@ def maybe_publish_startup_recommendation(
         current_recipe=recipe,
     )
     mqtt_client.publish_recommendation(recommendation)
+    mqtt_client.publish_status(
+        config.machine_id,
+        build_status_payload(
+            config=config,
+            service=service,
+            shot_repo=shot_repo,
+            upload_queue_repo=upload_queue_repo,
+            machine_id=config.machine_id,
+            bean_context_id=config.bean_context_id,
+            last_recommendation_id=recommendation.recommendation_id,
+            last_recommendation_at=recommendation.created_at,
+            mode=recommendation.mode.value,
+        ),
+    )
+
+
+def build_status_payload(
+    config: Config,
+    service: EspressoRLService,
+    shot_repo: SQLiteShotRepository | None,
+    upload_queue_repo: SQLiteUploadQueueRepository | None,
+    machine_id: str,
+    bean_context_id: str | None,
+    *,
+    last_shot_id: str | None = None,
+    last_shot_at: int | None = None,
+    last_recommendation_id: str | None = None,
+    last_recommendation_at: int | None = None,
+    mode: str | None = None,
+) -> dict:
+    now = config.now()
+    recent = (
+        shot_repo.list_recent(
+            install_id=config.install_id,
+            machine_id=machine_id,
+            bean_context_id=bean_context_id,
+            limit=1_000_000,
+        )
+        if shot_repo is not None
+        else []
+    )
+    if recent and last_shot_id is None:
+        last_shot = recent[-1]
+        last_shot_id = last_shot.shot_id
+        last_shot_at = last_shot.timestamp
+
+    current = service.get_current_recommendation(
+        install_id=config.install_id,
+        machine_id=machine_id,
+        bean_context_id=bean_context_id,
+    )
+    if current is not None:
+        last_recommendation_id = last_recommendation_id or current.recommendation_id
+        last_recommendation_at = last_recommendation_at or current.updated_at
+        mode = mode or current.mode.value
+        apply_status = current.apply_status.value
+    else:
+        apply_status = None
+
+    upload_queue_count = 0
+    if upload_queue_repo is not None:
+        upload_queue_count = len(upload_queue_repo.list_ready(now=now, limit=1_000_000))
+
+    return {
+        "addon_online": True,
+        "install_id": config.install_id,
+        "timestamp": now,
+        "last_shot_id": last_shot_id,
+        "last_shot_at": last_shot_at,
+        "last_recommendation_id": last_recommendation_id,
+        "last_recommendation_at": last_recommendation_at,
+        "recommendation_apply_status": apply_status,
+        "mode": mode,
+        "local_shot_count": len(recent),
+        "upload_queue_count": upload_queue_count,
+        "community_upload_enabled": config.community_upload_enabled,
+    }
 
 
 def maybe_start_upload_worker(
