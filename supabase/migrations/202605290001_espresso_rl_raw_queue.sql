@@ -1,6 +1,6 @@
 -- EspressoRL public community upload queue.
 --
--- Public add-ons must upload through the Edge Function. The function verifies
+-- Public clients must upload through the Edge Function. The function verifies
 -- signatures and writes only to raw_upload_queue. Admin collectors mirror these
 -- raw rows into local Postgres for validation, trust scoring, and training.
 

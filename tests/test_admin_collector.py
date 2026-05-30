@@ -101,14 +101,14 @@ class AdminCollectorTests(unittest.TestCase):
     def test_admin_collector_worker_requires_admin_role_and_supabase_credentials(self) -> None:
         public_config = Config(
             mqtt_host="localhost",
-            addon_role="public",
+            deployment_role="public",
             admin_collector_enabled=True,
         )
         self.assertIsNone(maybe_start_admin_collector_worker(public_config, threading.Event()))
 
         admin_config = Config(
             mqtt_host="localhost",
-            addon_role="admin",
+            deployment_role="admin",
             admin_collector_enabled=True,
             storage_backend="postgres",
             postgres_dsn="postgresql://example",

@@ -33,7 +33,7 @@ class SupabaseCommunityQueueClient:
     Admin-only adapter for polling the community-fed Supabase raw queue.
 
     This adapter must use a service-role key and must not be used by public
-    add-ons. It mirrors raw queue rows into local Postgres for validation and
+    clients. It mirrors raw queue rows into local Postgres for validation and
     training jobs.
     """
 

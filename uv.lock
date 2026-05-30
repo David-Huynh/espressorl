@@ -37,6 +37,32 @@ wheels = [
 ]
 
 [[package]]
+name = "espresso-rl"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "botorch" },
+    { name = "gpytorch" },
+    { name = "numpy" },
+    { name = "paho-mqtt" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "scipy" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "botorch", specifier = ">=0.10" },
+    { name = "gpytorch", specifier = ">=1.11" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "paho-mqtt", specifier = ">=2.1" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
+    { name = "scipy", specifier = ">=1.12" },
+    { name = "torch", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
+]
+
+[[package]]
 name = "filelock"
 version = "3.25.2"
 source = { registry = "https://pypi.org/simple" }
@@ -67,32 +93,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/23/00/cac3e309b2f66518d937ce4d9fa821f167d9070d004fcb070b1780cd1d94/gpytorch-1.15.2.tar.gz", hash = "sha256:380625e93f851b85f772b25c5fb0a6c6d2e3eb2ef667f1e566ab4f95b8775361", size = 2781831, upload-time = "2026-02-28T01:12:55.172Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b6/70/c419a361b09ccb618b5165daa919003ccdd9c148356f7ff71a710db6bcf0/gpytorch-1.15.2-py3-none-any.whl", hash = "sha256:2112fdc7c0c0bf56a7f2444663cfc80fdfc3e19724399d6303a83d8efdd71e9e", size = 291209, upload-time = "2026-02-28T01:12:52.587Z" },
-]
-
-[[package]]
-name = "grinder-ha-addon-container"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "botorch" },
-    { name = "gpytorch" },
-    { name = "numpy" },
-    { name = "paho-mqtt" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "scipy" },
-    { name = "torch", version = "2.11.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "botorch", specifier = ">=0.10" },
-    { name = "gpytorch", specifier = ">=1.11" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "paho-mqtt", specifier = ">=2.1" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.1" },
-    { name = "scipy", specifier = ">=1.12" },
-    { name = "torch", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
 ]
 
 [[package]]

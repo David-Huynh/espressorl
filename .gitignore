@@ -13,3 +13,7 @@ EspressoRL_DESIGN.md
 
 .agents/
 .codex/
+
+# Runtime data for standalone Docker.
+data/*
+!data/options.example.json

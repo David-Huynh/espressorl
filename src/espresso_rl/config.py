@@ -42,7 +42,7 @@ class Config:
     upload_max_payload_bytes: int = 2_000_000
     storage_backend: str = "sqlite"
     postgres_dsn: str = ""
-    addon_role: str = "public"
+    deployment_role: str = "public"
     admin_collector_enabled: bool = False
     supabase_rest_url: str = ""
     supabase_service_role_key: str = ""
@@ -56,7 +56,7 @@ class Config:
         return int(time.time())
 
     def should_enqueue_community_uploads(self) -> bool:
-        return self.community_upload_enabled and self.addon_role != "admin"
+        return self.community_upload_enabled and self.deployment_role != "admin"
 
     @classmethod
     def load(cls) -> "Config":
@@ -82,11 +82,16 @@ class Config:
         storage_backend = str(
             opts.get("storage_backend", os.getenv("ESPRESSORL_STORAGE_BACKEND", "sqlite"))
         ).lower()
-        addon_role = str(opts.get("addon_role", os.getenv("ESPRESSORL_ADDON_ROLE", "public"))).lower()
+        deployment_role = str(
+            opts.get(
+                "deployment_role",
+                os.getenv("ESPRESSORL_DEPLOYMENT_ROLE", "public"),
+            )
+        ).lower()
         if storage_backend not in {"postgres", "sqlite"}:
             raise ValueError("storage_backend must be 'postgres' or 'sqlite'")
-        if addon_role not in {"public", "admin"}:
-            raise ValueError("addon_role must be 'public' or 'admin'")
+        if deployment_role not in {"public", "admin"}:
+            raise ValueError("deployment_role must be 'public' or 'admin'")
 
         return cls(
             mqtt_host=opts.get("mqtt_host", os.getenv("MQTT_HOST", "localhost")),
@@ -97,7 +102,7 @@ class Config:
             grinder_model=opts.get("grinder_model", ""),
             install_id=opts.get("install_id", os.getenv("ESPRESSORL_INSTALL_ID", "local_install")),
             machine_id=opts.get("machine_id", "gaggimate:local"),
-            bean_context_id=opts.get("bean_context_id"),
+            bean_context_id=_optional_string(opts.get("bean_context_id")),
             machine_pressure_bar=float(opts.get("machine_pressure_bar", 9.0)),
             basket_size_ml=float(opts.get("basket_size_ml", 18.0)),
             initial_grind_steps=initial_grind_steps,
@@ -118,7 +123,7 @@ class Config:
             upload_max_payload_bytes=int(opts.get("upload_max_payload_bytes", 2_000_000)),
             storage_backend=storage_backend,
             postgres_dsn=opts.get("postgres_dsn", os.getenv("ESPRESSORL_POSTGRES_DSN", "")),
-            addon_role=addon_role,
+            deployment_role=deployment_role,
             admin_collector_enabled=bool(opts.get("admin_collector_enabled", False)),
             supabase_rest_url=opts.get("supabase_rest_url", os.getenv("ESPRESSORL_SUPABASE_REST_URL", "")),
             supabase_service_role_key=opts.get(
@@ -134,3 +139,10 @@ class Config:
             admin_collector_batch_size=int(opts.get("admin_collector_batch_size", 100)),
             data_dir=data_dir,
         )
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

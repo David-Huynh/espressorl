@@ -1,7 +1,7 @@
 [project]
-name = "grinder-ha-addon-container"
+name = "espresso-rl"
 version = "0.1.0"
-description = "EspressoRL — adaptive grind optimisation for Gaggimate"
+description = "EspressoRL — adaptive espresso optimisation for Gaggimate over MQTT"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

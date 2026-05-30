@@ -1,5 +1,5 @@
 def main():
-    print("Hello from grinder-ha-addon-container!")
+    print("Hello from espresso-rl!")
 
 
 if __name__ == "__main__":

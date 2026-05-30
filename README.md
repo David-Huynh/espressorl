@@ -1,7 +1,17 @@
-# EspressoRL Home Assistant Add-on
+# EspressoRL Standalone Container
 
-This add-on hosts the local EspressoRL service. The active runtime path follows
-the ports-and-adapters layout described in `EspressoRL_DESIGN.md`:
+EspressoRL is a local espresso dial-in service for Gaggimate. It communicates
+through MQTT, stores shot history in Postgres, and publishes conservative BO
+recommendations back to Gaggimate.
+
+```text
+Gaggimate -> MQTT broker -> EspressoRL -> MQTT broker -> Gaggimate
+                         -> local Postgres
+                         -> optional Supabase upload
+```
+
+The active runtime path follows the ports-and-adapters architecture described in
+`EspressoRL_DESIGN.md`:
 
 ```text
 Gaggimate MQTT adapter -> canonical events -> application service
@@ -19,43 +29,116 @@ The core packages are:
   recomputation, and next recommendation generation.
 - `espresso_rl.ports`: repository and optimizer interfaces.
 - `espresso_rl.optimizers`: machine-agnostic conservative BO implementation.
-- `espresso_rl.adapters`: Postgres/SQLite persistence, signed upload, and
-  Gaggimate MQTT translation.
+- `espresso_rl.adapters`: Postgres/SQLite persistence, signed upload,
+  Supabase queue access, and Gaggimate MQTT translation.
 
-The old rushed active agent/replay-buffer/MQTT path has been removed. DreamerV3
-modules remain present but are not wired into the active recommendation path
-until they can pass through the same safety, recommendation-memory, and
-follow-through gates.
+DreamerV3 modules remain present but are not wired into the active
+recommendation path until they can pass through the same safety,
+recommendation-memory, and follow-through gates.
 
-Implemented backend behavior includes canonical shot, feedback, decision,
-apply-acknowledgement, and machine-state events; recommendation memory;
-wake/idle recommendation display; stale recommendation expiry; actual-shot
-follow-through inference; low-confidence profile-only rewards; retained add-on
-status reporting; a Postgres runtime storage backend; and an opt-in signed
-upload queue for a Supabase Edge Function or compatible ingestion endpoint.
+## Quick Start
 
-## Data-collection MVP
+Copy the example config and edit it:
+
+```bash
+mkdir -p data
+cp data/options.example.json data/options.json
+```
+
+Important fields in `data/options.json`:
+
+```json
+{
+  "mqtt_host": "192.168.1.85",
+  "mqtt_port": 1883,
+  "mqtt_user": "mqtt",
+  "mqtt_password": "replace-me",
+
+  "machine_id": "gaggimate:YOUR_GAGGIMATE_TOPIC_ID",
+  "grinder_step_size_um": 12.5,
+  "initial_grind_steps": 42.0,
+  "initial_dose_g": 18.0,
+  "initial_target_yield_g": 36.0,
+
+  "storage_backend": "postgres",
+  "postgres_dsn": "postgresql://espresso_rl:espresso_rl@postgres:5432/espresso_rl",
+
+  "deployment_role": "public",
+  "training_mode": false
+}
+```
+
+Start the local service and Postgres:
+
+```bash
+docker compose up -d --build
+```
+
+Follow logs:
+
+```bash
+docker compose logs -f espresso-rl
+```
+
+Expected startup lines:
+
+```text
+Using Postgres storage backend
+Subscribed to gaggimate/+/shot/profile...
+```
+
+## MQTT Setup
+
+EspressoRL and Gaggimate must point to the same MQTT broker.
+
+If the broker is outside Docker, set `mqtt_host` to the broker IP address.
+If the broker runs in the same Compose project, set `mqtt_host` to that service
+name.
+
+Gaggimate should publish and subscribe on these topics:
+
+```text
+gaggimate/{topic_id}/shot/profile
+gaggimate/{topic_id}/machine/state
+gaggimate/{topic_id}/rl/rating
+gaggimate/{topic_id}/rl/recommendation/decision
+gaggimate/{topic_id}/rl/recommendation/apply
+gaggimate/{topic_id}/rl/recommendation
+gaggimate/{topic_id}/rl/status
+```
+
+If Gaggimate publishes to:
+
+```text
+gaggimate/AA_BB_CC_DD_EE_FF/shot/profile
+```
+
+then set:
+
+```json
+"machine_id": "gaggimate:AA_BB_CC_DD_EE_FF"
+```
+
+## Data-Collection MVP
 
 You can start accumulating local BO data when:
 
-- the add-on is running and connected to the same MQTT broker as Gaggimate
-- Gaggimate has Home Assistant over MQTT enabled
-- the nested EspressoRL Auto Tuning setting is enabled in the Gaggimate
-  Home Assistant/MQTT settings
-- Gaggimate publishes `gaggimate/{mac}/shot/profile` at brew end
-- Gaggimate subscribes to `gaggimate/{mac}/rl/recommendation`
-- the add-on options set the current grinder step size, initial grind, dose,
-  and target yield
-- `storage_backend=postgres` points at a reachable Postgres DSN
+- EspressoRL is running and connected to the same MQTT broker as Gaggimate.
+- Gaggimate MQTT publishing is enabled.
+- Gaggimate publishes `gaggimate/{topic_id}/shot/profile` at brew end.
+- Gaggimate subscribes to `gaggimate/{topic_id}/rl/recommendation`.
+- `data/options.json` has the current grinder step size, initial grind, dose,
+  and target yield.
+- `storage_backend=postgres` points at a reachable Postgres DSN.
 
 Recommendation flow:
 
 ```text
 Gaggimate publishes shot/profile
-  -> add-on stores shot and generates bounded BO recommendation
-  -> add-on publishes gaggimate/{mac}/rl/recommendation
+  -> EspressoRL stores shot and generates bounded BO recommendation
+  -> EspressoRL publishes gaggimate/{topic_id}/rl/recommendation
   -> Gaggimate stores the pending recommendation
-  -> LVGL and WebUI show the recommendation/rating prompts
+  -> Gaggimate UI shows recommendation/rating prompts
   -> Gaggimate publishes decision and apply acknowledgement after Use
   -> next shot data determines actual follow-through
 ```
@@ -68,7 +151,7 @@ grind-by-weight dose target only when Gaggimate grind-by-weight targeting is
 enabled; otherwise it prompts the user to grind that dose manually.
 
 Use publishes both an accepted recommendation decision and
-`gaggimate/{mac}/rl/recommendation/apply`. The apply acknowledgement records
+`gaggimate/{topic_id}/rl/recommendation/apply`. The apply acknowledgement records
 which fields were applied by the machine and which fields still require manual
 action, but it never counts as follow-through by itself. EspressoRL only marks a
 recommendation followed after comparing the next actual shot data against the
@@ -76,90 +159,69 @@ recommendation. Choosing Later sends no decision, so the retained pending
 recommendation can be shown again on the next wake/reconnect. Choosing Ignore
 sends an ignored decision so the optimizer will not count it as followed.
 
-The add-on also publishes retained `gaggimate/{mac}/rl/status` payloads. The
-Gaggimate WebUI settings page shows whether the add-on has been seen, the last
-stored shot, the last recommendation, the recommendation apply status, the
-current BO mode, local shot count, queued upload count, and community upload
-state.
+EspressoRL also publishes retained `gaggimate/{topic_id}/rl/status` payloads.
+Gaggimate can use that status to show service connectivity, last stored shot,
+last recommendation, recommendation apply status, current BO mode, local shot
+count, queued upload count, and community upload state.
 
-If EspressoRL Auto Tuning is disabled, Gaggimate still uses the Home
-Assistant/MQTT plugin normally, but it does not publish EspressoRL shot profiles,
-listen for BO recommendations, or send ratings.
+## Supabase Upload
 
-Optional Supabase upload is controlled by:
+Community upload is optional. Local recommendations and local Postgres data
+collection work without Supabase.
 
-- `community_upload_enabled`
-- `supabase_registration_url`
-- `supabase_ingest_url`
-- `upload_secret`
-- `upload_token_id`
-- `addon_role`
+Public deployment settings:
 
-If upload is enabled without a configured `upload_secret`, the public add-on
-uses `supabase_registration_url` to request anonymous upload credentials and
-stores them under `/data/espresso_rl/community_upload_credentials.json`. If
-registration is not configured, records are queued locally but not sent. Local
-recommendations and Postgres data collection continue either way.
+```json
+{
+  "deployment_role": "public",
+  "community_upload_enabled": true,
+  "supabase_registration_url": "https://PROJECT_REF.supabase.co/functions/v1/espresso-rl-register",
+  "supabase_ingest_url": "https://PROJECT_REF.supabase.co/functions/v1/espresso-rl-ingest",
+  "upload_secret": "",
+  "upload_token_id": ""
+}
+```
 
-The Supabase ingestion scaffold lives in `supabase/`:
+If upload is enabled without a configured `upload_secret`, EspressoRL uses the
+registration URL to request anonymous upload credentials and stores them under
+`/data/espresso_rl/community_upload_credentials.json`. The secret is not logged.
+
+The Supabase scaffold lives in `supabase/`:
 
 - `supabase/migrations/202605290001_espresso_rl_raw_queue.sql`
 - `supabase/functions/espresso-rl-register/index.ts`
 - `supabase/functions/espresso-rl-ingest/index.ts`
 
-The registration function issues server-generated `install_id`,
-`upload_token_id`, and `upload_secret` values, and supports signed rotate/revoke
-requests. The secret is returned only from register/rotate responses and should
-not be logged.
+Deploy it with:
 
-The Edge Function verifies the signed upload headers produced by the add-on,
-checks timestamp and payload hash, applies basic rate limits and espresso sanity
-bounds, and inserts only into `raw_upload_queue`. It does not write validated
-shots, priors, training data, trust scores, or model tables.
-
-Set `addon_role=admin` for an admin/training deployment. Admin mode may read the
-community-fed Supabase queue, but it never pushes its own local records back
-into Supabase, which prevents doubled data. SQLite remains available as a
-development fallback adapter, but Postgres is the intended public-user and admin
-runtime backend.
-
-## Admin community mirror
-
-An admin deployment can mirror the community-fed Supabase raw queue into local
-Postgres:
-
-```text
-Supabase raw_upload_queue
-  -> service-role admin collector
-  -> local Postgres community_raw_uploads
-  -> later validation/trust/training jobs
+```bash
+supabase db push
+supabase functions deploy espresso-rl-register --no-verify-jwt
+supabase functions deploy espresso-rl-ingest --no-verify-jwt
 ```
 
-Enable it with:
+## Admin Mirror
 
-- `addon_role=admin`
-- `admin_collector_enabled=true`
-- `supabase_rest_url`
-- `supabase_service_role_key`
-- `postgres_dsn`
+Admin mode is a separate deployment for mirroring the Supabase raw queue into an
+admin Postgres database. Do not run admin mode in the same container that is
+attached to your espresso machine for daily use.
 
-The collector claims rows by calling the `espressorl_claim_raw_uploads` RPC,
-which uses a short lease and `FOR UPDATE SKIP LOCKED`. Multiple admin mirrors can
-poll at the same time without claiming the same row. The collector upserts
-claimed rows into local Postgres, then marks only rows it owns as `mirrored` or
-`mirror_failed`.
+Admin settings:
 
-The Supabase table is a small raw queue, not the long-term warehouse. Rows are
-not deleted immediately after mirroring; `espressorl_purge_raw_upload_queue`
-clears old mirrored, rejected, and failed rows after retention windows. The
-local admin Postgres database is where mirrored raw data waits for later
-validation, trust scoring, and training jobs.
+```json
+{
+  "deployment_role": "admin",
+  "admin_collector_enabled": true,
+  "supabase_rest_url": "https://PROJECT_REF.supabase.co/rest/v1",
+  "supabase_service_role_key": "SERVICE_ROLE_KEY"
+}
+```
 
-The expected Supabase raw queue shape includes `install_id`, `upload_id`,
-`payload_hash`, `event_type`, `payload_json`, `received_at`, `status`,
-`mirror_claimed_by`, `mirror_claim_expires_at`, `mirror_completed_at`, and
-`mirror_error`. Public add-ons should only create raw queue rows through the
-signed ingestion path; admin mode only mirrors and never reuploads.
+The admin mirror claims rows with `espressorl_claim_raw_uploads`, which uses a
+short lease and `FOR UPDATE SKIP LOCKED`. Multiple admin mirrors can poll at the
+same time without claiming the same row. Mirrored rows are retained in Supabase
+for a short audit/debug window and later removed by
+`espressorl_purge_raw_upload_queue`.
 
 Run local verification with:
 

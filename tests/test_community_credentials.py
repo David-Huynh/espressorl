@@ -136,7 +136,7 @@ class CommunityCredentialTests(unittest.TestCase):
         config = Config(
             mqtt_host="localhost",
             community_upload_enabled=True,
-            addon_role="admin",
+            deployment_role="admin",
             supabase_registration_url="https://example.invalid/functions/v1/espresso-rl-register",
         )
 
@@ -148,6 +148,22 @@ class CommunityCredentialTests(unittest.TestCase):
 
         self.assertIsNone(resolved)
         self.assertEqual(registrar.registered, 0)
+
+    def test_registration_failure_does_not_block_local_startup(self) -> None:
+        config = Config(
+            mqtt_host="localhost",
+            community_upload_enabled=True,
+            supabase_registration_url="https://example.invalid/functions/v1/espresso-rl-register",
+        )
+
+        resolved = maybe_resolve_community_upload_credentials(
+            config,
+            store=FakeCredentialStore(),
+            registrar=FailingCredentialRegistrar(),
+        )
+
+        self.assertIsNone(resolved)
+        self.assertEqual(config.upload_secret, "")
 
 
 class FakeCredentialStore:
@@ -188,6 +204,17 @@ class FakeCredentialRegistrar:
 
     def revoke_credentials(self, current: CommunityUploadCredentials) -> None:
         self.revoked += 1
+
+
+class FailingCredentialRegistrar:
+    def register_install(self) -> CommunityUploadCredentials:
+        raise RuntimeError("registration failed")
+
+    def rotate_credentials(self, current: CommunityUploadCredentials) -> CommunityUploadCredentials:
+        raise RuntimeError("rotation failed")
+
+    def revoke_credentials(self, current: CommunityUploadCredentials) -> None:
+        raise RuntimeError("revoke failed")
 
 
 if __name__ == "__main__":

@@ -136,7 +136,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             community_upload_enabled=True,
             supabase_ingest_url="https://example.invalid/ingest",
             upload_secret="x" * 32,
-            addon_role="admin",
+            deployment_role="admin",
         )
 
         self.assertFalse(config.should_enqueue_community_uploads())

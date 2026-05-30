@@ -359,8 +359,8 @@ def maybe_start_upload_worker(
     upload_queue_repo: UploadQueueRepository,
     stop_event: threading.Event,
 ) -> threading.Thread | None:
-    if config.addon_role == "admin":
-        logger.info("Admin add-on role selected; community upload push is disabled to prevent duplicate data.")
+    if config.deployment_role == "admin":
+        logger.info("Admin deployment role selected; community upload push is disabled to prevent duplicate data.")
         return None
     if not config.community_upload_enabled:
         logger.info("Community upload disabled; local shot history will still accumulate.")
@@ -404,8 +404,8 @@ def maybe_resolve_community_upload_credentials(
     store: CommunityCredentialStore | None = None,
     registrar: CommunityCredentialRegistrar | None = None,
 ) -> CommunityUploadCredentials | None:
-    if config.addon_role == "admin":
-        logger.info("Admin add-on role selected; community upload registration is disabled.")
+    if config.deployment_role == "admin":
+        logger.info("Admin deployment role selected; community upload registration is disabled.")
         return None
     if not config.community_upload_enabled:
         return None
@@ -430,10 +430,17 @@ def maybe_resolve_community_upload_credentials(
     credential_registrar = registrar or SupabaseCredentialRegistrar(
         SupabaseCredentialRegistrarConfig(registration_url=config.supabase_registration_url)
     )
-    credentials = CommunityCredentialService(
-        store=credential_store,
-        registrar=credential_registrar,
-    ).resolve_for_upload(allow_registration=True)
+    try:
+        credentials = CommunityCredentialService(
+            store=credential_store,
+            registrar=credential_registrar,
+        ).resolve_for_upload(allow_registration=True)
+    except Exception as exc:
+        logger.warning(
+            "Community upload registration failed; records will queue locally only: %s",
+            exc,
+        )
+        return None
     if credentials is None:
         return None
     logger.info("Registered community upload credentials for install_id=%s", credentials.install_id)
@@ -464,7 +471,7 @@ def maybe_start_admin_collector_worker(
     config: Config,
     stop_event: threading.Event,
 ) -> threading.Thread | None:
-    if config.addon_role != "admin":
+    if config.deployment_role != "admin":
         return None
     if not config.admin_collector_enabled:
         logger.info("Admin collector disabled.")
@@ -529,7 +536,7 @@ def open_repositories(
             PostgresUploadQueueRepository(store),
         )
 
-    logger.warning("Using SQLite storage backend; Postgres is the intended HA/admin runtime backend.")
+    logger.warning("Using SQLite storage backend; Postgres is the intended container/admin runtime backend.")
     store = SQLiteStore(config.data_dir / "espresso_rl.db")
     return (
         SQLiteShotRepository(store),
