@@ -8,7 +8,7 @@ WORKDIR /app
 
 RUN pip install uv --no-cache-dir
 
-COPY pyproject.toml uv.lock* README.md ./
+COPY pyproject.toml uv.lock* README.md LICENSE ./
 COPY src/ src/
 # CPU-only torch is selected by the [tool.uv.sources] entry in pyproject.toml.
 RUN uv sync --no-dev --frozen
