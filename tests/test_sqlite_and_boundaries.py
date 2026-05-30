@@ -12,7 +12,9 @@ from espresso_rl.adapters.sqlite_repositories import (
     SQLiteShotRepository,
     SQLiteStore,
     SQLiteUploadQueueRepository,
+    _shot_to_row,
 )
+from espresso_rl.adapters.postgres_repositories import _upsert
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.domain.events import RecommendationApplyEvent, ShotProfileEvent
 from espresso_rl.domain.models import RecommendationApplyStatus, UploadQueueItem, UploadQueueStatus
@@ -69,6 +71,44 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(stored_rec.reason, result.recommendation.reason)  # type: ignore[union-attr]
             self.assertEqual(stored_rec.apply_status, RecommendationApplyStatus.MANUAL_REQUIRED)  # type: ignore[union-attr]
             self.assertEqual(stored_rec.manual_fields, ["next_grind_steps", "next_dose_g"])  # type: ignore[union-attr]
+
+    def test_shared_shot_row_uses_boolean_for_postgres_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            service = EspressoRLService(
+                SQLiteShotRepository(store),
+                SQLiteRecommendationRepository(store),
+                ConservativeBOOptimizer(),
+                clock=lambda: 10,
+            )
+
+            result = service.ingest_shot_profile(shot_event())
+            row = _shot_to_row(result.shot)
+
+            self.assertIs(row["raw_profile_available"], True)
+
+    def test_postgres_upsert_rolls_back_failed_transaction(self) -> None:
+        class FailingConnection:
+            def __init__(self) -> None:
+                self.rolled_back = False
+                self.committed = False
+
+            def execute(self, *_args: object, **_kwargs: object) -> None:
+                raise RuntimeError("database rejected row")
+
+            def commit(self) -> None:
+                self.committed = True
+
+            def rollback(self) -> None:
+                self.rolled_back = True
+
+        conn = FailingConnection()
+
+        with self.assertRaises(RuntimeError):
+            _upsert(conn, "shots", "shot_id", {"shot_id": "shot_1"})
+
+        self.assertTrue(conn.rolled_back)
+        self.assertFalse(conn.committed)
 
     def test_sqlite_upload_queue_tracks_retry_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

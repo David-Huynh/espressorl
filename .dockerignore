@@ -1,0 +1,27 @@
+.git
+.gitignore
+.venv
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.mypy_cache
+.ruff_cache
+build
+dist
+wheels
+*.egg-info
+
+# Runtime and local-only data.
+data
+EspressoRL_DESIGN.md
+.agents
+.codex
+
+# Local Supabase runtime state is not needed in the image.
+supabase/.branches
+supabase/.temp
+
+# Tests are not needed at runtime.
+tests

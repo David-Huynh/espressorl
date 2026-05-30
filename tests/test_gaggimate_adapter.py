@@ -71,6 +71,36 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.beverage_out_g, 39.8)
         self.assertEqual(event.recommendation_id, "rec_1")
 
+    def test_shot_profile_payload_treats_zero_final_weight_as_missing(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_shot_payload(
+            {
+                "shot_id": "shot_1",
+                "timestamp": 100,
+                "time_ms": [0, 250, 500],
+                "pressure": [0, 4, 9],
+                "target_pressure": [0, 4, 9],
+                "flow": [0, 1, 2],
+                "target_flow": [0, 1, 2],
+                "weight": [0, 0, 0],
+                "dose_in_g": 18.0,
+                "target_yield_g": 36.0,
+                "beverage_out_g": 0.0,
+                "shot_time_s": 30.0,
+            },
+            mac="AA_BB",
+        )
+
+        self.assertIsNone(event.beverage_out_g)
+
     def test_recommendation_payload_keeps_completed_shot_id_for_rating_popup(self) -> None:
         client = GaggimateMQTTClient(
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),

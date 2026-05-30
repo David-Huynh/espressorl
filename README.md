@@ -56,7 +56,8 @@ Important fields in `data/options.json`:
 
   "machine_id": "gaggimate:YOUR_GAGGIMATE_TOPIC_ID",
   "grinder_step_size_um": 12.5,
-  "initial_grind_steps": 42.0,
+  "initial_grind_steps": null,
+  "initial_grind_um": 525.0,
   "initial_dose_g": 18.0,
   "initial_target_yield_g": 36.0,
 
@@ -67,6 +68,11 @@ Important fields in `data/options.json`:
   "training_mode": false
 }
 ```
+
+If you know grinder steps, set `initial_grind_steps` and leave
+`initial_grind_um` as `0.0`. If you know microns but not the step number, set
+`initial_grind_steps` to `null` and provide `initial_grind_um`; EspressoRL will
+derive internal steps from `grinder_step_size_um`.
 
 Start the local service and Postgres:
 
@@ -229,3 +235,8 @@ Run local verification with:
 PYTHONPATH=src python -m unittest discover -s tests
 python -m compileall -q src tests
 ```
+
+## License
+
+EspressoRL is licensed under the GNU Affero General Public License v3.0 or
+later. See `LICENSE` for the full license text.

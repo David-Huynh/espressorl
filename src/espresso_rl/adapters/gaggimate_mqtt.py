@@ -161,6 +161,7 @@ class GaggimateMQTTClient:
         beverage_out_g = payload.get("beverage_out_g")
         if beverage_out_g is None and weight:
             beverage_out_g = float(weight[-1])
+        beverage_out_g = _positive_optional_float(beverage_out_g)
         shot_time_s = payload.get("shot_time_s")
         if shot_time_s is None and time_ms:
             shot_time_s = float(time_ms[-1]) / 1000.0
@@ -180,7 +181,7 @@ class GaggimateMQTTClient:
             grind_steps=_optional_float(payload.get("grind_steps", self._config.initial_grind_steps)),
             dose_in_g=float(payload.get("dose_in_g", self._config.initial_dose_g)),
             target_yield_g=target_yield_g,
-            beverage_out_g=_optional_float(beverage_out_g),
+            beverage_out_g=beverage_out_g,
             shot_time_s=_optional_float(shot_time_s),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
             recommendation_id=payload.get("recommendation_id"),
@@ -251,6 +252,13 @@ def _optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _positive_optional_float(value: Any) -> float | None:
+    parsed = _optional_float(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
 
 
 def _channel(payload: dict[str, Any], key: str, n: int) -> list[float]:

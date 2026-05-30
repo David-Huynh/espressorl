@@ -24,7 +24,7 @@ class Config:
     machine_pressure_bar: float = 9.0
     basket_size_ml: float = 18.0
     # Initial state — user sets these before first run
-    initial_grind_steps: float = 0.0
+    initial_grind_steps: float | None = None
     initial_grind_um: float = 0.0
     initial_dose_g: float = 18.0
     initial_target_yield_g: float = 36.0
@@ -71,11 +71,11 @@ class Config:
 
         step_size_um = float(opts.get("grinder_step_size_um", 10.0))
         initial_grind_um = float(opts.get("initial_grind_um", 0.0))
-        raw_steps = opts.get("initial_grind_steps")
+        raw_steps = _optional_number(opts.get("initial_grind_steps"))
         if raw_steps is None:
             initial_grind_steps = initial_grind_um / step_size_um if initial_grind_um else 0.0
         else:
-            initial_grind_steps = float(raw_steps)
+            initial_grind_steps = raw_steps
         if initial_grind_um == 0.0 and initial_grind_steps:
             initial_grind_um = initial_grind_steps * step_size_um
 
@@ -146,3 +146,11 @@ def _optional_string(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_number(value: object) -> float | None:
+    if value is None:
+        return None
+    if value == "":
+        return None
+    return float(value)

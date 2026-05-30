@@ -12,12 +12,40 @@ from espresso_rl.adapters.supabase_credentials import (
     SupabaseCredentialRegistrarConfig,
 )
 from espresso_rl.application.community_credentials import CommunityCredentialService
+from espresso_rl import config as config_module
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityUploadCredentials
 from espresso_rl.main import maybe_resolve_community_upload_credentials
 
 
 class CommunityCredentialTests(unittest.TestCase):
+    def test_config_accepts_micron_only_initial_grind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            options_path = Path(tmp) / "options.json"
+            data_dir = Path(tmp) / "data"
+            options_path.write_text(
+                json.dumps(
+                    {
+                        "mqtt_host": "localhost",
+                        "grinder_step_size_um": 12.5,
+                        "initial_grind_steps": None,
+                        "initial_grind_um": 525.0,
+                    }
+                )
+            )
+            original_options_path = config_module._OPTIONS_PATH
+            original_data_dir = config_module._DATA_DIR
+            config_module._OPTIONS_PATH = options_path
+            config_module._DATA_DIR = data_dir
+            try:
+                config = Config.load()
+            finally:
+                config_module._OPTIONS_PATH = original_options_path
+                config_module._DATA_DIR = original_data_dir
+
+        self.assertEqual(config.initial_grind_steps, 42.0)
+        self.assertEqual(config.initial_grind_um, 525.0)
+
     def test_service_prefers_configured_credentials_without_registering(self) -> None:
         store = FakeCredentialStore()
         registrar = FakeCredentialRegistrar()

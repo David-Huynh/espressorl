@@ -389,7 +389,7 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "machine_adapter": shot.machine_adapter,
         "bean_context_id": shot.bean_context_id,
         "profile_resampled_blob": shot.profile.astype(PROFILE_DTYPE).tobytes(),
-        "raw_profile_available": int(shot.raw_profile_available),
+        "raw_profile_available": bool(shot.raw_profile_available),
         "raw_profile_hash": shot.raw_profile_hash,
         "grind_steps": shot.grind_steps,
         "grind_um": shot.grind_um,

@@ -249,12 +249,16 @@ def _upsert(conn, table: str, key: str, row: dict[str, Any]) -> None:
     column_sql = ", ".join(columns)
     value_sql = ", ".join(f"%({column})s" for column in columns)
     update_sql = ", ".join(f"{column}=EXCLUDED.{column}" for column in columns if column != key)
-    conn.execute(
-        f"""
-        INSERT INTO {table} ({column_sql})
-        VALUES ({value_sql})
-        ON CONFLICT ({key}) DO UPDATE SET {update_sql}
-        """,
-        row,
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            f"""
+            INSERT INTO {table} ({column_sql})
+            VALUES ({value_sql})
+            ON CONFLICT ({key}) DO UPDATE SET {update_sql}
+            """,
+            row,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
