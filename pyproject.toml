@@ -25,7 +25,7 @@ build-backend = "hatchling.build"
 packages = ["src/espresso_rl"]
 
 # CPU-only PyTorch — avoids pulling CUDA wheels (~2 GB savings).
-# Used both locally (uv sync --index ...) and in the Dockerfile.
+# Used by uv sync locally and in the Dockerfile.
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
