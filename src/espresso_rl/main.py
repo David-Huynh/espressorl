@@ -28,9 +28,16 @@ from espresso_rl.adapters.supabase_community_queue import (
     SupabaseCommunityQueueClient,
     SupabaseCommunityQueueConfig,
 )
+from espresso_rl.adapters.supabase_credentials import (
+    JsonCommunityCredentialStore,
+    SupabaseCredentialRegistrar,
+    SupabaseCredentialRegistrarConfig,
+)
+from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.config import Config
+from espresso_rl.domain.community import CommunityUploadCredentials
 from espresso_rl.domain.events import (
     MachineStateEvent,
     RecommendationApplyEvent,
@@ -40,6 +47,7 @@ from espresso_rl.domain.events import (
 )
 from espresso_rl.domain.models import Recipe, SafetyBounds
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
+from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import RecommendationRepository, ShotRepository, UploadQueueRepository
 
 logging.basicConfig(
@@ -52,6 +60,7 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     config = Config.load()
+    maybe_resolve_community_upload_credentials(config)
     logger.info("EspressoRL starting [training_mode=%s]", config.training_mode)
     if config.training_mode:
         logger.warning(
@@ -387,6 +396,68 @@ def maybe_start_upload_worker(
     thread = threading.Thread(target=loop, name="espresso-rl-upload", daemon=True)
     thread.start()
     return thread
+
+
+def maybe_resolve_community_upload_credentials(
+    config: Config,
+    *,
+    store: CommunityCredentialStore | None = None,
+    registrar: CommunityCredentialRegistrar | None = None,
+) -> CommunityUploadCredentials | None:
+    if config.addon_role == "admin":
+        logger.info("Admin add-on role selected; community upload registration is disabled.")
+        return None
+    if not config.community_upload_enabled:
+        return None
+
+    configured = _configured_upload_credentials(config)
+    if configured is not None:
+        return _apply_upload_credentials(config, configured)
+
+    credential_store = store or JsonCommunityCredentialStore(config.data_dir / "community_upload_credentials.json")
+    stored = credential_store.load()
+    if stored is not None:
+        logger.info("Loaded stored community upload credentials for install_id=%s", stored.install_id)
+        return _apply_upload_credentials(config, stored)
+
+    if registrar is None and not config.supabase_registration_url:
+        logger.warning(
+            "Community upload enabled but no upload credentials or registration URL are configured; "
+            "records will queue locally only."
+        )
+        return None
+
+    credential_registrar = registrar or SupabaseCredentialRegistrar(
+        SupabaseCredentialRegistrarConfig(registration_url=config.supabase_registration_url)
+    )
+    credentials = CommunityCredentialService(
+        store=credential_store,
+        registrar=credential_registrar,
+    ).resolve_for_upload(allow_registration=True)
+    if credentials is None:
+        return None
+    logger.info("Registered community upload credentials for install_id=%s", credentials.install_id)
+    return _apply_upload_credentials(config, credentials)
+
+
+def _configured_upload_credentials(config: Config) -> CommunityUploadCredentials | None:
+    if not config.upload_secret:
+        return None
+    return CommunityUploadCredentials(
+        install_id=config.install_id,
+        upload_token_id=config.upload_token_id,
+        upload_secret=config.upload_secret,
+    )
+
+
+def _apply_upload_credentials(
+    config: Config,
+    credentials: CommunityUploadCredentials,
+) -> CommunityUploadCredentials:
+    config.install_id = credentials.install_id
+    config.upload_token_id = credentials.upload_token_id
+    config.upload_secret = credentials.upload_secret
+    return credentials
 
 
 def maybe_start_admin_collector_worker(

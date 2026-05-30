@@ -34,6 +34,7 @@ class Config:
     # When False (default): inference + BO only; downloads weights from central server.
     training_mode: bool = False
     community_upload_enabled: bool = False
+    supabase_registration_url: str = ""
     supabase_ingest_url: str = ""
     upload_secret: str = ""
     upload_token_id: str = ""
@@ -106,6 +107,10 @@ class Config:
             alpha=float(opts.get("alpha", 0.5)),
             training_mode=bool(opts.get("training_mode", False)),
             community_upload_enabled=bool(opts.get("community_upload_enabled", False)),
+            supabase_registration_url=opts.get(
+                "supabase_registration_url",
+                os.getenv("ESPRESSORL_SUPABASE_REGISTRATION_URL", ""),
+            ),
             supabase_ingest_url=opts.get("supabase_ingest_url", ""),
             upload_secret=opts.get("upload_secret", ""),
             upload_token_id=opts.get("upload_token_id", ""),

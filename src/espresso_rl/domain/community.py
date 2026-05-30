@@ -5,6 +5,21 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class CommunityUploadCredentials:
+    install_id: str
+    upload_token_id: str
+    upload_secret: str
+
+    def __post_init__(self) -> None:
+        if not self.install_id:
+            raise ValueError("install_id is required")
+        if self.upload_token_id is None:
+            raise ValueError("upload_token_id is required")
+        if len(self.upload_secret) < 32:
+            raise ValueError("upload_secret must be at least 32 characters")
+
+
+@dataclass(frozen=True)
 class CommunityRawUpload:
     install_id: str
     upload_id: str

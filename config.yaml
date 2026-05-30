@@ -27,6 +27,7 @@ options:
   alpha: 0.5
   training_mode: false
   community_upload_enabled: false
+  supabase_registration_url: ""
   supabase_ingest_url: ""
   upload_secret: ""
   upload_token_id: ""
@@ -61,6 +62,7 @@ schema:
   alpha: float
   training_mode: bool
   community_upload_enabled: bool
+  supabase_registration_url: str?
   supabase_ingest_url: str?
   upload_secret: password?
   upload_token_id: str?

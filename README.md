@@ -89,19 +89,28 @@ listen for BO recommendations, or send ratings.
 Optional Supabase upload is controlled by:
 
 - `community_upload_enabled`
+- `supabase_registration_url`
 - `supabase_ingest_url`
 - `upload_secret`
 - `upload_token_id`
 - `addon_role`
 
-If upload is enabled without an ingest URL or secret, records are queued locally
-but not sent. Local recommendations and Postgres data collection continue either
-way.
+If upload is enabled without a configured `upload_secret`, the public add-on
+uses `supabase_registration_url` to request anonymous upload credentials and
+stores them under `/data/espresso_rl/community_upload_credentials.json`. If
+registration is not configured, records are queued locally but not sent. Local
+recommendations and Postgres data collection continue either way.
 
 The Supabase ingestion scaffold lives in `supabase/`:
 
 - `supabase/migrations/202605290001_espresso_rl_raw_queue.sql`
+- `supabase/functions/espresso-rl-register/index.ts`
 - `supabase/functions/espresso-rl-ingest/index.ts`
+
+The registration function issues server-generated `install_id`,
+`upload_token_id`, and `upload_secret` values, and supports signed rotate/revoke
+requests. The secret is returned only from register/rotate responses and should
+not be logged.
 
 The Edge Function verifies the signed upload headers produced by the add-on,
 checks timestamp and payload hash, applies basic rate limits and espresso sanity
