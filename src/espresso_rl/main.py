@@ -6,6 +6,13 @@ import sys
 import threading
 
 from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
+from espresso_rl.adapters.postgres_repositories import (
+    PostgresCommunityWarehouse,
+    PostgresRecommendationRepository,
+    PostgresShotRepository,
+    PostgresStore,
+    PostgresUploadQueueRepository,
+)
 from espresso_rl.adapters.sqlite_repositories import (
     SQLiteRecommendationRepository,
     SQLiteShotRepository,
@@ -17,6 +24,11 @@ from espresso_rl.adapters.supabase_upload import (
     SignedUploadConfig,
     UploadQueueWorker,
 )
+from espresso_rl.adapters.supabase_community_queue import (
+    SupabaseCommunityQueueClient,
+    SupabaseCommunityQueueConfig,
+)
+from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.config import Config
 from espresso_rl.domain.events import (
@@ -28,6 +40,7 @@ from espresso_rl.domain.events import (
 )
 from espresso_rl.domain.models import Recipe, SafetyBounds
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
+from espresso_rl.ports.repositories import RecommendationRepository, ShotRepository, UploadQueueRepository
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,21 +58,19 @@ def main() -> None:
             "DreamerV3 training is not wired into the active path yet; BO remains the safe recommendation path."
         )
 
-    store = SQLiteStore(config.data_dir / "espresso_rl.db")
-    shot_repo = SQLiteShotRepository(store)
-    recommendation_repo = SQLiteRecommendationRepository(store)
-    upload_queue_repo = SQLiteUploadQueueRepository(store)
+    shot_repo, recommendation_repo, upload_queue_repo = open_repositories(config)
     service = EspressoRLService(
         shots=shot_repo,
         recommendations=recommendation_repo,
         optimizer=ConservativeBOOptimizer(),
-        upload_queue=upload_queue_repo if config.community_upload_enabled else None,
+        upload_queue=upload_queue_for_service(config, upload_queue_repo),
         safety_bounds=SafetyBounds(),
         clock=config.now,
     )
 
     stop_event = threading.Event()
     upload_thread = maybe_start_upload_worker(config, upload_queue_repo, stop_event)
+    collector_thread = maybe_start_admin_collector_worker(config, stop_event)
 
     mqtt_client: GaggimateMQTTClient
 
@@ -192,6 +203,8 @@ def main() -> None:
         mqtt_client.stop()
         if upload_thread is not None:
             upload_thread.join(timeout=5)
+        if collector_thread is not None:
+            collector_thread.join(timeout=5)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
@@ -213,8 +226,8 @@ def maybe_publish_startup_recommendation(
     config: Config,
     service: EspressoRLService,
     mqtt_client: GaggimateMQTTClient,
-    shot_repo: SQLiteShotRepository | None = None,
-    upload_queue_repo: SQLiteUploadQueueRepository | None = None,
+    shot_repo: ShotRepository | None = None,
+    upload_queue_repo: UploadQueueRepository | None = None,
 ) -> None:
     if config.machine_id == "gaggimate:local":
         return
@@ -272,8 +285,8 @@ def maybe_publish_startup_recommendation(
 def build_status_payload(
     config: Config,
     service: EspressoRLService,
-    shot_repo: SQLiteShotRepository | None,
-    upload_queue_repo: SQLiteUploadQueueRepository | None,
+    shot_repo: ShotRepository | None,
+    upload_queue_repo: UploadQueueRepository | None,
     machine_id: str,
     bean_context_id: str | None,
     *,
@@ -328,15 +341,18 @@ def build_status_payload(
         "mode": mode,
         "local_shot_count": len(recent),
         "upload_queue_count": upload_queue_count,
-        "community_upload_enabled": config.community_upload_enabled,
+        "community_upload_enabled": config.should_enqueue_community_uploads(),
     }
 
 
 def maybe_start_upload_worker(
     config: Config,
-    upload_queue_repo: SQLiteUploadQueueRepository,
+    upload_queue_repo: UploadQueueRepository,
     stop_event: threading.Event,
 ) -> threading.Thread | None:
+    if config.addon_role == "admin":
+        logger.info("Admin add-on role selected; community upload push is disabled to prevent duplicate data.")
+        return None
     if not config.community_upload_enabled:
         logger.info("Community upload disabled; local shot history will still accumulate.")
         return None
@@ -371,6 +387,84 @@ def maybe_start_upload_worker(
     thread = threading.Thread(target=loop, name="espresso-rl-upload", daemon=True)
     thread.start()
     return thread
+
+
+def maybe_start_admin_collector_worker(
+    config: Config,
+    stop_event: threading.Event,
+) -> threading.Thread | None:
+    if config.addon_role != "admin":
+        return None
+    if not config.admin_collector_enabled:
+        logger.info("Admin collector disabled.")
+        return None
+    if config.storage_backend != "postgres":
+        logger.warning("Admin collector requires Postgres storage.")
+        return None
+    if not config.supabase_rest_url or not config.supabase_service_role_key:
+        logger.warning("Admin collector enabled but Supabase REST URL/service-role key is missing.")
+        return None
+
+    source = SupabaseCommunityQueueClient(
+        SupabaseCommunityQueueConfig(
+            rest_url=config.supabase_rest_url,
+            service_role_key=config.supabase_service_role_key,
+            admin_id=config.admin_collector_id,
+            claim_lease_seconds=config.admin_collector_lease_seconds,
+        )
+    )
+    warehouse = PostgresCommunityWarehouse(PostgresStore(config.postgres_dsn))
+    mirror = CommunityMirrorService(source=source, warehouse=warehouse)
+
+    def loop() -> None:
+        logger.info("Admin community mirror worker started")
+        while not stop_event.is_set():
+            try:
+                result = mirror.mirror_once(limit=config.admin_collector_batch_size)
+                if result.claimed:
+                    logger.info(
+                        "Mirrored community uploads claimed=%d mirrored=%d failed=%d",
+                        result.claimed,
+                        result.mirrored,
+                        result.failed,
+                    )
+            except Exception:
+                logger.exception("Admin community mirror cycle failed")
+            stop_event.wait(config.admin_collector_interval_s)
+
+    thread = threading.Thread(target=loop, name="espresso-rl-admin-mirror", daemon=True)
+    thread.start()
+    return thread
+
+
+def upload_queue_for_service(
+    config: Config,
+    upload_queue_repo: UploadQueueRepository,
+) -> UploadQueueRepository | None:
+    if not config.should_enqueue_community_uploads():
+        return None
+    return upload_queue_repo
+
+
+def open_repositories(
+    config: Config,
+) -> tuple[ShotRepository, RecommendationRepository, UploadQueueRepository]:
+    if config.storage_backend == "postgres":
+        logger.info("Using Postgres storage backend")
+        store = PostgresStore(config.postgres_dsn)
+        return (
+            PostgresShotRepository(store),
+            PostgresRecommendationRepository(store),
+            PostgresUploadQueueRepository(store),
+        )
+
+    logger.warning("Using SQLite storage backend; Postgres is the intended HA/admin runtime backend.")
+    store = SQLiteStore(config.data_dir / "espresso_rl.db")
+    return (
+        SQLiteShotRepository(store),
+        SQLiteRecommendationRepository(store),
+        SQLiteUploadQueueRepository(store),
+    )
 
 
 if __name__ == "__main__":

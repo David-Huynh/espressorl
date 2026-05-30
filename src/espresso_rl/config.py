@@ -39,10 +39,23 @@ class Config:
     upload_token_id: str = ""
     upload_worker_interval_s: float = 30.0
     upload_max_payload_bytes: int = 2_000_000
+    storage_backend: str = "sqlite"
+    postgres_dsn: str = ""
+    addon_role: str = "public"
+    admin_collector_enabled: bool = False
+    supabase_rest_url: str = ""
+    supabase_service_role_key: str = ""
+    admin_collector_id: str = "espresso-rl-admin"
+    admin_collector_lease_seconds: int = 300
+    admin_collector_interval_s: float = 30.0
+    admin_collector_batch_size: int = 100
     data_dir: Path = field(default_factory=lambda: _DATA_DIR)
 
     def now(self) -> int:
         return int(time.time())
+
+    def should_enqueue_community_uploads(self) -> bool:
+        return self.community_upload_enabled and self.addon_role != "admin"
 
     @classmethod
     def load(cls) -> "Config":
@@ -64,6 +77,15 @@ class Config:
             initial_grind_steps = float(raw_steps)
         if initial_grind_um == 0.0 and initial_grind_steps:
             initial_grind_um = initial_grind_steps * step_size_um
+
+        storage_backend = str(
+            opts.get("storage_backend", os.getenv("ESPRESSORL_STORAGE_BACKEND", "sqlite"))
+        ).lower()
+        addon_role = str(opts.get("addon_role", os.getenv("ESPRESSORL_ADDON_ROLE", "public"))).lower()
+        if storage_backend not in {"postgres", "sqlite"}:
+            raise ValueError("storage_backend must be 'postgres' or 'sqlite'")
+        if addon_role not in {"public", "admin"}:
+            raise ValueError("addon_role must be 'public' or 'admin'")
 
         return cls(
             mqtt_host=opts.get("mqtt_host", os.getenv("MQTT_HOST", "localhost")),
@@ -89,5 +111,21 @@ class Config:
             upload_token_id=opts.get("upload_token_id", ""),
             upload_worker_interval_s=float(opts.get("upload_worker_interval_s", 30.0)),
             upload_max_payload_bytes=int(opts.get("upload_max_payload_bytes", 2_000_000)),
+            storage_backend=storage_backend,
+            postgres_dsn=opts.get("postgres_dsn", os.getenv("ESPRESSORL_POSTGRES_DSN", "")),
+            addon_role=addon_role,
+            admin_collector_enabled=bool(opts.get("admin_collector_enabled", False)),
+            supabase_rest_url=opts.get("supabase_rest_url", os.getenv("ESPRESSORL_SUPABASE_REST_URL", "")),
+            supabase_service_role_key=opts.get(
+                "supabase_service_role_key",
+                os.getenv("ESPRESSORL_SUPABASE_SERVICE_ROLE_KEY", ""),
+            ),
+            admin_collector_id=opts.get(
+                "admin_collector_id",
+                os.getenv("ESPRESSORL_ADMIN_COLLECTOR_ID", "espresso-rl-admin"),
+            ),
+            admin_collector_lease_seconds=int(opts.get("admin_collector_lease_seconds", 300)),
+            admin_collector_interval_s=float(opts.get("admin_collector_interval_s", 30.0)),
+            admin_collector_batch_size=int(opts.get("admin_collector_batch_size", 100)),
             data_dir=data_dir,
         )

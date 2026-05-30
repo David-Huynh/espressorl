@@ -32,6 +32,16 @@ options:
   upload_token_id: ""
   upload_worker_interval_s: 30.0
   upload_max_payload_bytes: 2000000
+  storage_backend: "postgres"
+  postgres_dsn: "postgresql://espresso_rl:espresso_rl@postgres:5432/espresso_rl"
+  addon_role: "public"
+  admin_collector_enabled: false
+  supabase_rest_url: ""
+  supabase_service_role_key: ""
+  admin_collector_id: "espresso-rl-admin"
+  admin_collector_lease_seconds: 300
+  admin_collector_interval_s: 30.0
+  admin_collector_batch_size: 100
 schema:
   mqtt_host: str
   mqtt_port: int
@@ -56,5 +66,15 @@ schema:
   upload_token_id: str?
   upload_worker_interval_s: float
   upload_max_payload_bytes: int
+  storage_backend: list(postgres|sqlite)
+  postgres_dsn: str?
+  addon_role: list(public|admin)
+  admin_collector_enabled: bool
+  supabase_rest_url: str?
+  supabase_service_role_key: password?
+  admin_collector_id: str
+  admin_collector_lease_seconds: int
+  admin_collector_interval_s: float
+  admin_collector_batch_size: int
 map:
   - data:rw

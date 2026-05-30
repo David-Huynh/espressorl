@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import ast
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
+from espresso_rl.config import Config
 from espresso_rl.adapters.sqlite_repositories import (
     SQLiteRecommendationRepository,
     SQLiteShotRepository,
@@ -16,6 +18,7 @@ from espresso_rl.domain.events import RecommendationApplyEvent, ShotProfileEvent
 from espresso_rl.domain.models import RecommendationApplyStatus, UploadQueueItem, UploadQueueStatus
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from espresso_rl.adapters.supabase_upload import UploadQueueWorker
+from espresso_rl.main import maybe_start_upload_worker, upload_queue_for_service
 
 
 def shot_event() -> ShotProfileEvent:
@@ -126,6 +129,53 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(worker.run_once(), 1)
             self.assertEqual(client.uploaded, ["upload_1"])
             self.assertEqual(queue.list_ready(now=6), [])
+
+    def test_admin_role_never_pushes_to_community_upload_queue(self) -> None:
+        config = Config(
+            mqtt_host="localhost",
+            community_upload_enabled=True,
+            supabase_ingest_url="https://example.invalid/ingest",
+            upload_secret="x" * 32,
+            addon_role="admin",
+        )
+
+        self.assertFalse(config.should_enqueue_community_uploads())
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            self.assertIsNone(upload_queue_for_service(config, queue))
+            worker = maybe_start_upload_worker(
+                config,
+                queue,
+                threading.Event(),
+            )
+        self.assertIsNone(worker)
+
+    def test_postgres_schema_defines_public_and_admin_storage_tables(self) -> None:
+        schema = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "espresso_rl"
+            / "adapters"
+            / "postgres_schema.sql"
+        ).read_text()
+
+        for table_name in (
+            "shots",
+            "recommendations",
+            "upload_queue",
+            "community_raw_uploads",
+            "community_validated_shots",
+            "community_recommendations",
+            "install_trust_scores",
+            "abuse_events",
+            "training_dataset",
+            "community_priors",
+        ):
+            self.assertIn(f"CREATE TABLE IF NOT EXISTS {table_name}", schema)
+
+        self.assertIn("PRIMARY KEY (install_id, upload_id)", schema)
+        self.assertIn("UNIQUE (install_id, payload_hash)", schema)
 
     def test_core_layers_do_not_import_adapters_or_infrastructure(self) -> None:
         root = Path(__file__).resolve().parents[1] / "src" / "espresso_rl"
