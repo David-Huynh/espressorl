@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import copy
 import unittest
 
-from espresso_rl.application.services import EspressoRLService
+from espresso_rl.application.services import EspressoRLService, _recommendation_signature
 from espresso_rl.domain.events import (
     MachineStateEvent,
     RecommendationApplyEvent,
@@ -124,6 +125,47 @@ class MemoryUploadQueue:
         item.error_message = error_message
         item.next_retry_at = next_retry_at
         item.updated_at = now
+
+
+class RecordingUploadQueue:
+    """Upload queue stub that records every enqueue call (without coalescing), so
+    a test can assert exactly which lifecycle transitions produced an upload."""
+
+    def __init__(self) -> None:
+        self.calls: list[UploadQueueItem] = []
+
+    def enqueue(self, item: UploadQueueItem) -> None:
+        self.calls.append(item)
+
+    def list_ready(self, now: int, limit: int = 100) -> list[UploadQueueItem]:
+        return []
+
+    def update_status(self, *args, **kwargs) -> None:
+        pass
+
+    def for_record(self, local_record_type: str, local_record_id: str | None = None) -> list[UploadQueueItem]:
+        return [
+            item
+            for item in self.calls
+            if item.local_record_type == local_record_type
+            and (local_record_id is None or item.local_record_id == local_record_id)
+        ]
+
+
+def idle_event(timestamp: int, **overrides) -> MachineStateEvent:
+    base = {
+        "install_id": "install_1",
+        "machine_id": "machine_1",
+        "machine_adapter": "gaggimate",
+        "timestamp": timestamp,
+        "state": MachineState.IDLE,
+        "grind_steps": 42,
+        "grinder_step_size_um": 12.5,
+        "dose_in_g": 18.0,
+        "target_yield_g": 36.0,
+    }
+    base.update(overrides)
+    return MachineStateEvent(**base)
 
 
 def shot_event(shot_id: str, timestamp: int, **overrides) -> ShotProfileEvent:
@@ -400,6 +442,86 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertTrue(
             any(result.recommendation.recommendation_id in payload for payload in payloads)
         )
+
+    def test_idle_reshows_do_not_reenqueue_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        queue = RecordingUploadQueue()
+        service = EspressoRLService(
+            shots, recs, ConservativeBOOptimizer(), upload_queue=queue, clock=lambda: 10
+        )
+
+        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        for ts in range(2, 9):
+            service.handle_machine_state(idle_event(ts))
+
+        # Only the create and the first show are meaningful; the six later idle
+        # re-marks (shown_count 2..7) are incidental churn and must not upload.
+        self.assertEqual(len(queue.for_record("recommendation", rec.recommendation_id)), 2)
+        # The shot uploads exactly once (at ingest); idle pings never touch it.
+        self.assertEqual(len(queue.for_record("shot")), 1)
+
+    def test_recommendation_lifecycle_transitions_each_enqueue_once(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        queue = RecordingUploadQueue()
+        service = EspressoRLService(
+            shots, recs, ConservativeBOOptimizer(), upload_queue=queue, clock=lambda: 10
+        )
+
+        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation  # created
+        service.handle_machine_state(idle_event(2))  # first shown
+        service.record_recommendation_decision(
+            RecommendationDecisionEvent(
+                recommendation_id=rec.recommendation_id,
+                decision=RecommendationDecision.ACCEPTED,
+                timestamp=3,
+            )
+        )  # accepted
+        service.record_recommendation_apply(
+            RecommendationApplyEvent(
+                recommendation_id=rec.recommendation_id,
+                status=RecommendationApplyStatus.PARTIALLY_APPLIED,
+                timestamp=4,
+                applied_fields={"target_yield_g": rec.target_yield_g},
+                manual_fields=["next_grind_steps"],
+            )
+        )  # applied
+
+        calls = queue.for_record("recommendation", rec.recommendation_id)
+        # created, first-shown, accepted, applied -> four uploads, each a new snapshot.
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len({item.payload_hash for item in calls}), 4)
+
+    def test_recommendation_signature_ignores_incidental_churn(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        base = recs.get(rec.recommendation_id)
+        self.assertEqual(base.shown_count, 0)
+
+        shown_once = copy.copy(base)
+        shown_once.shown_count = 1
+        shown_more = copy.copy(base)
+        shown_more.shown_count = 7
+        shown_more.updated_at = base.updated_at + 9999
+
+        # First show flips was_shown (and the signature)...
+        self.assertNotEqual(_recommendation_signature(base), _recommendation_signature(shown_once))
+        # ...but later shown_count bumps and updated_at-only changes do not.
+        self.assertEqual(_recommendation_signature(shown_once), _recommendation_signature(shown_more))
+
+        # A changed recommended value is meaningful even if status is unchanged.
+        different_dose = copy.copy(base)
+        different_dose.next_dose_g = base.next_dose_g + 1.0
+        self.assertNotEqual(_recommendation_signature(base), _recommendation_signature(different_dose))
+
+        # A lifecycle status change is meaningful.
+        accepted = copy.copy(base)
+        accepted.status = RecommendationStatus.ACCEPTED
+        self.assertNotEqual(_recommendation_signature(base), _recommendation_signature(accepted))
 
 
 if __name__ == "__main__":

@@ -131,6 +131,12 @@ class SQLiteStore:
         self._ensure_column("recommendations", "applied_fields_json", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column("recommendations", "manual_fields_json", "TEXT NOT NULL DEFAULT '[]'")
         self._ensure_column("recommendations", "apply_error", "TEXT")
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_upload_queue_record
+            ON upload_queue (local_record_type, local_record_id)
+            """
+        )
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -312,7 +318,44 @@ class SQLiteUploadQueueRepository:
         self._store = store
 
     def enqueue(self, item: UploadQueueItem) -> None:
-        self._store.conn.execute(
+        conn = self._store.conn
+        # Idempotency: this exact content was already uploaded; nothing to do.
+        if conn.execute(
+            """
+            SELECT 1 FROM upload_queue
+            WHERE local_record_type=? AND local_record_id=? AND payload_hash=? AND status=?
+            LIMIT 1
+            """,
+            (
+                item.local_record_type,
+                item.local_record_id,
+                item.payload_hash,
+                UploadQueueStatus.UPLOADED.value,
+            ),
+        ).fetchone():
+            return
+        # Never clobber an in-flight send of this exact content.
+        if conn.execute(
+            "SELECT 1 FROM upload_queue WHERE upload_id=? AND status=? LIMIT 1",
+            (item.upload_id, UploadQueueStatus.UPLOADING.value),
+        ).fetchone():
+            return
+        # Coalesce: drop superseded queued versions for this record so the latest
+        # state replaces them. UPLOADING rows are left untouched (a worker may be
+        # mid-send) and UPLOADED rows are kept as the "already sent" memory.
+        conn.execute(
+            """
+            DELETE FROM upload_queue
+            WHERE local_record_type=? AND local_record_id=? AND status IN (?, ?)
+            """,
+            (
+                item.local_record_type,
+                item.local_record_id,
+                UploadQueueStatus.PENDING.value,
+                UploadQueueStatus.FAILED.value,
+            ),
+        )
+        conn.execute(
             """
             INSERT OR REPLACE INTO upload_queue (
                 upload_id, local_record_type, local_record_id, payload_hash, payload_json,
@@ -326,7 +369,7 @@ class SQLiteUploadQueueRepository:
             """,
             _upload_item_to_row(item),
         )
-        self._store.conn.commit()
+        conn.commit()
 
     def list_ready(self, now: int, limit: int = 100) -> list[UploadQueueItem]:
         rows = self._store.conn.execute(
@@ -357,7 +400,9 @@ class SQLiteUploadQueueRepository:
             raise ValueError(f"unknown upload_id {upload_id}")
         attempt_count = int(existing["attempt_count"])
         last_attempt_at = None
-        if status in {UploadQueueStatus.UPLOADING, UploadQueueStatus.FAILED, UploadQueueStatus.REJECTED}:
+        # Count one attempt per completed try (FAILED/REJECTED), not for the
+        # transient UPLOADING transition, so a single cycle increments once.
+        if status in {UploadQueueStatus.FAILED, UploadQueueStatus.REJECTED}:
             attempt_count += 1
             last_attempt_at = now
         self._store.conn.execute(

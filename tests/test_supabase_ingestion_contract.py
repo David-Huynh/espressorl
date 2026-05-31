@@ -7,6 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "supabase" / "migrations" / "202605290001_espresso_rl_raw_queue.sql"
 FUNCTION = ROOT / "supabase" / "functions" / "espresso-rl-ingest" / "index.ts"
+RATE_LIMIT_MIGRATION = (
+    ROOT / "supabase" / "migrations" / "202605310001_espressorl_rate_limit_no_overcount.sql"
+)
 
 
 class SupabaseIngestionContractTests(unittest.TestCase):
@@ -63,6 +66,34 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("requireNumberRange(payload, 'target_yield_g', 5, 100", source)
         self.assertIn("optionalNumberRange(payload, 'shot_time_s', 5, 90", source)
         self.assertIn("requireNumberRange(payload, 'target_ratio', 1.2, 3.5", source)
+
+    def test_edge_function_dedups_before_consuming_rate_limit(self) -> None:
+        source = FUNCTION.read_text()
+
+        self.assertIn("uploadAlreadyQueued", source)
+        self.assertIn("status: 'duplicate'", source)
+        # A re-send must be detected before any rate-limit budget is spent.
+        self.assertLess(
+            source.index("uploadAlreadyQueued("),
+            source.index("consumeRateLimits("),
+        )
+
+    def test_edge_function_returns_retry_after_and_raised_limits(self) -> None:
+        source = FUNCTION.read_text()
+
+        self.assertIn("'Retry-After'", source)
+        self.assertIn("secondsToNextUtcDay", source)
+        self.assertIn("INSTALL_DAY_LIMIT = 500", source)
+        self.assertIn("INSTALL_MINUTE_LIMIT = 30", source)
+
+    def test_rate_limit_migration_counts_only_accepted_uploads(self) -> None:
+        sql = RATE_LIMIT_MIGRATION.read_text()
+
+        self.assertIn("CREATE OR REPLACE FUNCTION public.espressorl_consume_rate_limit", sql)
+        # Increment only while under the limit; deny without counting once at/over it.
+        self.assertIn("WHERE public.espressorl_ingest_rate_counters.count < p_limit", sql)
+        self.assertIn("IF NOT FOUND THEN", sql)
+        self.assertIn("RETURN FALSE", sql)
 
 
 if __name__ == "__main__":

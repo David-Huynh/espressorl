@@ -94,6 +94,9 @@ CREATE TABLE IF NOT EXISTS upload_queue (
 CREATE INDEX IF NOT EXISTS idx_upload_queue_ready
     ON upload_queue (status, next_retry_at, created_at);
 
+CREATE INDEX IF NOT EXISTS idx_upload_queue_record
+    ON upload_queue (local_record_type, local_record_id);
+
 -- Admin/training warehouse tables. These are populated by an admin collector
 -- from the community-fed Supabase raw queue. Public clients must not write here.
 CREATE TABLE IF NOT EXISTS community_raw_uploads (

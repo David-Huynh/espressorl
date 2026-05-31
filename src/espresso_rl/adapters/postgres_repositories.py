@@ -155,8 +155,64 @@ class PostgresUploadQueueRepository:
         self._store = store
 
     def enqueue(self, item: UploadQueueItem) -> None:
-        row = _upload_item_to_row(item)
-        _upsert(self._store.conn, "upload_queue", "upload_id", row)
+        conn = self._store.conn
+        try:
+            # Idempotency: this exact content was already uploaded; nothing to do.
+            if conn.execute(
+                """
+                SELECT 1 FROM upload_queue
+                WHERE local_record_type=%s AND local_record_id=%s AND payload_hash=%s
+                  AND status=%s
+                LIMIT 1
+                """,
+                (
+                    item.local_record_type,
+                    item.local_record_id,
+                    item.payload_hash,
+                    UploadQueueStatus.UPLOADED.value,
+                ),
+            ).fetchone():
+                conn.commit()
+                return
+            # Never clobber an in-flight send of this exact content.
+            if conn.execute(
+                "SELECT 1 FROM upload_queue WHERE upload_id=%s AND status=%s LIMIT 1",
+                (item.upload_id, UploadQueueStatus.UPLOADING.value),
+            ).fetchone():
+                conn.commit()
+                return
+            # Coalesce: drop superseded queued versions for this record. UPLOADING
+            # rows are left untouched (a worker may be mid-send); UPLOADED rows are
+            # kept as the "already sent" memory.
+            conn.execute(
+                """
+                DELETE FROM upload_queue
+                WHERE local_record_type=%s AND local_record_id=%s AND status IN (%s, %s)
+                """,
+                (
+                    item.local_record_type,
+                    item.local_record_id,
+                    UploadQueueStatus.PENDING.value,
+                    UploadQueueStatus.FAILED.value,
+                ),
+            )
+            row = _upload_item_to_row(item)
+            columns = list(row)
+            column_sql = ", ".join(columns)
+            value_sql = ", ".join(f"%({column})s" for column in columns)
+            update_sql = ", ".join(f"{column}=EXCLUDED.{column}" for column in columns if column != "upload_id")
+            conn.execute(
+                f"""
+                INSERT INTO upload_queue ({column_sql})
+                VALUES ({value_sql})
+                ON CONFLICT (upload_id) DO UPDATE SET {update_sql}
+                """,
+                row,
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def list_ready(self, now: int, limit: int = 100) -> list[UploadQueueItem]:
         rows = self._store.conn.execute(
@@ -187,7 +243,9 @@ class PostgresUploadQueueRepository:
             raise ValueError(f"unknown upload_id {upload_id}")
         attempt_count = int(existing["attempt_count"])
         last_attempt_at = None
-        if status in {UploadQueueStatus.UPLOADING, UploadQueueStatus.FAILED, UploadQueueStatus.REJECTED}:
+        # Count one attempt per completed try (FAILED/REJECTED), not for the
+        # transient UPLOADING transition, so a single cycle increments once.
+        if status in {UploadQueueStatus.FAILED, UploadQueueStatus.REJECTED}:
             attempt_count += 1
             last_attempt_at = now
         self._store.conn.execute(

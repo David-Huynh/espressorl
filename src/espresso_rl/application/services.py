@@ -46,6 +46,35 @@ class IngestResult:
     recommendation: Recommendation
 
 
+def _recommendation_signature(recommendation: Recommendation) -> tuple:
+    """The *meaningful* state of a recommendation for upload deduplication.
+
+    Two recommendations with the same signature differ only in incidental
+    bookkeeping — `shown_count` beyond the first show, `updated_at`, and the
+    per-transition timestamps — so they should not produce a fresh community
+    upload. Real lifecycle transitions (status/apply changes, the first show, or
+    a change to the recommended values/reason) all change the signature.
+    """
+    return (
+        recommendation.status.value,
+        recommendation.apply_status.value,
+        recommendation.shown_count > 0,  # was_shown: first show matters; later bumps do not
+        tuple(sorted(recommendation.applied_fields.items())),
+        tuple(sorted(recommendation.manual_fields)),
+        recommendation.apply_error,
+        recommendation.grind_delta_steps,
+        round(recommendation.grind_delta_um, 4),
+        round(recommendation.next_grind_steps, 4),
+        round(recommendation.next_grind_um, 4),
+        round(recommendation.next_dose_g, 4),
+        round(recommendation.target_yield_g, 4),
+        round(recommendation.target_ratio, 4),
+        recommendation.mode.value,
+        round(recommendation.confidence, 4),
+        recommendation.reason,
+    )
+
+
 class EspressoRLService:
     """Application service over canonical EspressoRL events."""
 
@@ -401,6 +430,13 @@ class EspressoRLService:
         recommendation: Recommendation,
         now: int,
     ) -> None:
+        prior = self._recommendations.get(recommendation.recommendation_id)
         self._recommendations.upsert(recommendation)
-        if self._upload_queue is not None:
-            self._upload_queue.enqueue(make_recommendation_upload_item(recommendation, now))
+        if self._upload_queue is None:
+            return
+        # Upload only meaningful lifecycle transitions (created/shown/accepted/
+        # ignored/edited/used/applied/expired). Skip incidental churn such as
+        # repeated shown_count bumps, updated_at-only changes, and idle re-marks.
+        if prior is not None and _recommendation_signature(prior) == _recommendation_signature(recommendation):
+            return
+        self._upload_queue.enqueue(make_recommendation_upload_item(recommendation, now))

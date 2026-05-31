@@ -19,7 +19,11 @@ from espresso_rl.application.services import EspressoRLService
 from espresso_rl.domain.events import RecommendationApplyEvent, ShotProfileEvent
 from espresso_rl.domain.models import RecommendationApplyStatus, UploadQueueItem, UploadQueueStatus
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
-from espresso_rl.adapters.supabase_upload import UploadQueueWorker
+from espresso_rl.adapters.supabase_upload import (
+    MAX_UPLOAD_ATTEMPTS,
+    UploadQueueWorker,
+    UploadRateLimited,
+)
 from espresso_rl.main import maybe_start_upload_worker, upload_queue_for_service
 
 
@@ -42,6 +46,28 @@ def shot_event() -> ShotProfileEvent:
         target_yield_g=36.0,
         beverage_out_g=36.0,
         shot_time_s=30.0,
+    )
+
+
+def queue_item(
+    upload_id: str,
+    payload_hash: str,
+    *,
+    status: UploadQueueStatus = UploadQueueStatus.PENDING,
+    local_record_type: str = "shot",
+    local_record_id: str = "shot_1",
+    attempt_count: int = 0,
+) -> UploadQueueItem:
+    return UploadQueueItem(
+        upload_id=upload_id,
+        local_record_type=local_record_type,
+        local_record_id=local_record_id,
+        payload_hash=payload_hash,
+        payload_json='{"event_type":"shot_record"}',
+        status=status,
+        attempt_count=attempt_count,
+        created_at=1,
+        updated_at=1,
     )
 
 
@@ -169,6 +195,117 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(worker.run_once(), 1)
             self.assertEqual(client.uploaded, ["upload_1"])
             self.assertEqual(queue.list_ready(now=6), [])
+
+    def test_enqueue_coalesces_pending_versions_of_same_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            for payload_hash in ("h1", "h2", "h3"):
+                queue.enqueue(queue_item(f"shot_shot_1_{payload_hash}", payload_hash))
+            ready = queue.list_ready(now=10)
+            self.assertEqual(len(ready), 1)
+            self.assertEqual(ready[0].payload_hash, "h3")  # newest queued state wins
+
+    def test_enqueue_skips_content_already_uploaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            queue.enqueue(queue_item("u_abc", "abc"))
+            queue.update_status("u_abc", UploadQueueStatus.UPLOADED, now=2)
+            queue.enqueue(queue_item("u_abc", "abc"))  # identical content already sent
+            self.assertEqual(queue.list_ready(now=10), [])
+            count = store.conn.execute(
+                "SELECT COUNT(*) AS c FROM upload_queue WHERE local_record_id='shot_1'"
+            ).fetchone()["c"]
+            self.assertEqual(count, 1)
+
+    def test_enqueue_rearms_when_content_changes_after_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            queue.enqueue(queue_item("u_a", "a"))
+            queue.update_status("u_a", UploadQueueStatus.UPLOADED, now=2)
+            queue.enqueue(queue_item("u_b", "b"))  # e.g. a rating added later
+            self.assertEqual([item.upload_id for item in queue.list_ready(now=10)], ["u_b"])
+            count = store.conn.execute(
+                "SELECT COUNT(*) AS c FROM upload_queue WHERE local_record_id='shot_1'"
+            ).fetchone()["c"]
+            self.assertEqual(count, 2)  # uploaded 'a' kept as memory + pending 'b'
+
+    def test_enqueue_never_deletes_in_flight_uploading_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            queue.enqueue(queue_item("u_a", "a"))
+            queue.update_status("u_a", UploadQueueStatus.UPLOADING, now=2)
+            queue.enqueue(queue_item("u_b", "b"))  # coalesce must leave u_a alone
+            statuses = {
+                row["upload_id"]: row["status"]
+                for row in store.conn.execute(
+                    "SELECT upload_id, status FROM upload_queue WHERE local_record_id='shot_1'"
+                ).fetchall()
+            }
+            self.assertEqual(statuses, {"u_a": "uploading", "u_b": "pending"})
+
+    def test_uploading_transition_is_not_counted_as_an_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            queue.enqueue(queue_item("u_a", "a"))
+            queue.update_status("u_a", UploadQueueStatus.UPLOADING, now=2)
+            queue.update_status("u_a", UploadQueueStatus.FAILED, now=3, next_retry_at=10)
+            ready = queue.list_ready(now=10)
+            self.assertEqual(ready[0].attempt_count, 1)  # one failed try, not two
+
+    def test_worker_dead_letters_after_max_attempts(self) -> None:
+        class BoomClient:
+            def upload(self, item: UploadQueueItem) -> None:
+                raise RuntimeError("boom")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            queue.enqueue(queue_item("u_a", "a", attempt_count=MAX_UPLOAD_ATTEMPTS - 1))
+            worker = UploadQueueWorker(queue, BoomClient(), clock=lambda: 100)
+            worker.run_once()
+            status = store.conn.execute(
+                "SELECT status FROM upload_queue WHERE upload_id='u_a'"
+            ).fetchone()["status"]
+            self.assertEqual(status, "rejected")
+            self.assertEqual(queue.list_ready(now=10_000), [])
+
+    def test_worker_defers_rate_limited_upload_without_charging_attempt(self) -> None:
+        class LimitedClient:
+            def upload(self, item: UploadQueueItem) -> None:
+                raise UploadRateLimited(retry_after=120)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            queue.enqueue(queue_item("u_a", "a"))
+            worker = UploadQueueWorker(queue, LimitedClient(), clock=lambda: 1000)
+            worker.run_once()
+            self.assertEqual(queue.list_ready(now=1001), [])  # deferred past now
+            ready = queue.list_ready(now=2000)
+            self.assertEqual(len(ready), 1)
+            self.assertEqual(ready[0].attempt_count, 0)  # rate limiting never charges an attempt
+            self.assertEqual(ready[0].status, UploadQueueStatus.PENDING)
+
+    def test_worker_rate_limited_without_header_defers_to_utc_day_reset(self) -> None:
+        class LimitedClient:
+            def upload(self, item: UploadQueueItem) -> None:
+                raise UploadRateLimited(retry_after=None)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            queue.enqueue(queue_item("u_a", "a"))
+            worker = UploadQueueWorker(queue, LimitedClient(), clock=lambda: 1000)
+            worker.run_once()
+            next_retry_at = store.conn.execute(
+                "SELECT next_retry_at FROM upload_queue WHERE upload_id='u_a'"
+            ).fetchone()["next_retry_at"]
+            self.assertEqual(next_retry_at, 1000 + (86_400 - (1000 % 86_400)))
 
     def test_admin_role_never_pushes_to_community_upload_queue(self) -> None:
         config = Config(

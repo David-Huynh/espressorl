@@ -3,8 +3,8 @@ import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
 const MAX_PAYLOAD_BYTES = 2_000_000;
 const MAX_CLOCK_SKEW_S = 15 * 60;
-const INSTALL_MINUTE_LIMIT = 5;
-const INSTALL_DAY_LIMIT = 50;
+const INSTALL_MINUTE_LIMIT = 30;
+const INSTALL_DAY_LIMIT = 500;
 const IP_MINUTE_LIMIT = 30;
 
 type JsonRecord = Record<string, unknown>;
@@ -65,11 +65,24 @@ serve(async request => {
     return jsonResponse(403, { error: 'invalid signature' });
   }
 
+  // Dedup before spending rate-limit budget: a re-send of an already-queued
+  // upload is acknowledged without consuming the install's quota.
+  if (await uploadAlreadyQueued(supabase, installId, uploadId)) {
+    return jsonResponse(202, { status: 'duplicate' });
+  }
+
   const sourceIpHash = await sourceIpDigest(request);
-  const rateOk = await consumeRateLimits(supabase, installId, sourceIpHash);
-  if (!rateOk) {
-    await logAbuse(supabase, { installId, uploadId, payloadHash, sourceIpHash, reason: 'rate_limited' });
-    return jsonResponse(429, { error: 'rate limit exceeded' });
+  const rate = await consumeRateLimits(supabase, installId, sourceIpHash);
+  if (!rate.ok) {
+    await logAbuse(supabase, {
+      installId,
+      uploadId,
+      payloadHash,
+      sourceIpHash,
+      reason: 'rate_limited',
+      detail: { retry_after: rate.retryAfter },
+    });
+    return jsonResponse(429, { error: 'rate limit exceeded' }, { 'Retry-After': String(rate.retryAfter) });
   }
 
   let payload: JsonRecord;
@@ -226,26 +239,52 @@ async function consumeRateLimits(
   supabase: ReturnType<typeof createClient>,
   installId: string,
   sourceIpHash: string,
-): Promise<boolean> {
+): Promise<{ ok: boolean; retryAfter: number }> {
   const now = new Date();
   const minuteBucket = new Date(Math.floor(now.getTime() / 60_000) * 60_000).toISOString();
   const dayBucket = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
-  const checks = [
-    [`install:${installId}:minute`, minuteBucket, INSTALL_MINUTE_LIMIT],
-    [`install:${installId}:day`, dayBucket, INSTALL_DAY_LIMIT],
-    [`ip:${sourceIpHash}:minute`, minuteBucket, IP_MINUTE_LIMIT],
+  const minuteReset = secondsToNextMinute(now);
+  const dayReset = secondsToNextUtcDay(now);
+  const checks: Array<[string, string, number, number]> = [
+    [`install:${installId}:minute`, minuteBucket, INSTALL_MINUTE_LIMIT, minuteReset],
+    [`install:${installId}:day`, dayBucket, INSTALL_DAY_LIMIT, dayReset],
+    [`ip:${sourceIpHash}:minute`, minuteBucket, IP_MINUTE_LIMIT, minuteReset],
   ];
-  for (const [scope, bucket, limit] of checks) {
+  for (const [scope, bucket, limit, retryAfter] of checks) {
     const { data, error } = await supabase.rpc('espressorl_consume_rate_limit', {
       p_scope: scope,
       p_bucket_start: bucket,
       p_limit: limit,
     });
     if (error || data !== true) {
-      return false;
+      return { ok: false, retryAfter };
     }
   }
-  return true;
+  return { ok: true, retryAfter: 0 };
+}
+
+async function uploadAlreadyQueued(
+  supabase: ReturnType<typeof createClient>,
+  installId: string,
+  uploadId: string,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('raw_upload_queue')
+    .select('upload_id')
+    .eq('install_id', installId)
+    .eq('upload_id', uploadId)
+    .maybeSingle();
+  // Fail open on error: the insert's unique constraint still dedups (23505 -> 202).
+  return !error && data !== null;
+}
+
+function secondsToNextMinute(now: Date): number {
+  return Math.max(1, 60 - now.getUTCSeconds());
+}
+
+function secondsToNextUtcDay(now: Date): number {
+  const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
 }
 
 async function logAbuse(
@@ -316,9 +355,9 @@ function header(request: Request, name: string): string {
   return request.headers.get(name)?.trim() || '';
 }
 
-function jsonResponse(status: number, body: JsonRecord): Response {
+function jsonResponse(status: number, body: JsonRecord, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
   });
 }
