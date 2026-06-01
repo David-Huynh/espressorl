@@ -35,6 +35,7 @@ from espresso_rl.adapters.supabase_credentials import (
 )
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
+from espresso_rl.application.community_validation import CommunityValidationService
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
@@ -597,9 +598,10 @@ def maybe_start_admin_collector_worker(
     )
     warehouse = PostgresCommunityWarehouse(PostgresStore(config.postgres_dsn))
     mirror = CommunityMirrorService(source=source, warehouse=warehouse)
+    validator = CommunityValidationService(warehouse=warehouse)
 
     def loop() -> None:
-        logger.info("Admin community mirror worker started")
+        logger.info("Admin community mirror/validation worker started")
         while not stop_event.is_set():
             try:
                 result = mirror.mirror_once(limit=config.admin_collector_batch_size)
@@ -610,8 +612,18 @@ def maybe_start_admin_collector_worker(
                         result.mirrored,
                         result.failed,
                     )
+                validation = validator.validate_once(limit=config.admin_collector_batch_size)
+                if validation.processed:
+                    logger.info(
+                        "Validated community uploads processed=%d shots=%d recommendations=%d rejected=%d training_rows=%d",
+                        validation.processed,
+                        validation.validated_shots,
+                        validation.stored_recommendations,
+                        validation.rejected,
+                        validation.training_rows,
+                    )
             except Exception:
-                logger.exception("Admin community mirror cycle failed")
+                logger.exception("Admin community mirror/validation cycle failed")
             stop_event.wait(config.admin_collector_interval_s)
 
     thread = threading.Thread(target=loop, name="espresso-rl-admin-mirror", daemon=True)

@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from espresso_rl.domain.models import VALID_TASTE_TAGS
+
 
 @dataclass(frozen=True)
 class UploadPayloadValidation:
@@ -45,14 +47,17 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_number_range(payload, "shot_time_s", 5, 90, errors)
     _optional_number_range(payload, "human_rating", 1, 5, errors)
     _optional_number_range(payload, "optimization_weight", 0, 1, errors)
+    _optional_number_range(payload, "recommendation_attribution_weight", 0, 1, errors)
     _optional_number_range(payload, "grind_recommendation_trust", 0, 1, errors)
     _optional_number_range(payload, "dose_recommendation_trust", 0, 1, errors)
     _optional_number_range(payload, "yield_recommendation_trust", 0, 1, errors)
+    _optional_number_range(payload, "reward_confidence", 0, 1, errors)
     _optional_bool(payload, "exclude_from_local_optimization", errors)
     _optional_bool(payload, "rating_prompt_allowed", errors)
     _optional_bool(payload, "grind_followed", errors)
     _optional_bool(payload, "dose_followed", errors)
     _optional_bool(payload, "yield_followed", errors)
+    _optional_string_list_enum(payload, "taste_tags", VALID_TASTE_TAGS, errors)
     _optional_enum(
         payload,
         "shot_type",
@@ -146,3 +151,20 @@ def _optional_enum(
         return
     if not isinstance(payload.get(key), str) or payload.get(key) not in allowed:
         errors.append(f"{key} is invalid")
+
+
+def _optional_string_list_enum(
+    payload: dict[str, Any],
+    key: str,
+    allowed: set[str],
+    errors: list[str],
+) -> None:
+    value = payload.get(key)
+    if value is None:
+        return
+    if not isinstance(value, list):
+        errors.append(f"{key} must be a list")
+        return
+    invalid = [item for item in value if not isinstance(item, str) or item not in allowed]
+    if invalid:
+        errors.append(f"{key} contains invalid values")

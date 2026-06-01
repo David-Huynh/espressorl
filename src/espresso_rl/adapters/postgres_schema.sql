@@ -118,9 +118,16 @@ CREATE TABLE IF NOT EXISTS community_raw_uploads (
     supabase_received_at TIMESTAMPTZ,
     mirrored_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     status TEXT NOT NULL DEFAULT 'mirrored',
+    validated_at TIMESTAMPTZ,
+    rejected_at TIMESTAMPTZ,
+    validation_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
     PRIMARY KEY (install_id, upload_id),
     UNIQUE (install_id, payload_hash)
 );
+
+CREATE INDEX IF NOT EXISTS idx_community_raw_uploads_status
+    ON community_raw_uploads (status, mirrored_at);
 
 CREATE TABLE IF NOT EXISTS community_validated_shots (
     validation_id BIGSERIAL PRIMARY KEY,
@@ -165,7 +172,8 @@ CREATE TABLE IF NOT EXISTS training_dataset (
     source_validation_id BIGINT REFERENCES community_validated_shots(validation_id),
     payload_json JSONB NOT NULL,
     trust_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source_validation_id)
 );
 
 CREATE TABLE IF NOT EXISTS community_priors (

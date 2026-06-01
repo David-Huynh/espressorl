@@ -12,7 +12,14 @@ from espresso_rl.adapters.sqlite_repositories import (
     _shot_to_row,
     _upload_item_to_row,
 )
-from espresso_rl.domain.community import CommunityRawUpload
+from espresso_rl.domain.community import (
+    CommunityAbuseEvent,
+    CommunityInstallStats,
+    CommunityRawUpload,
+    CommunityRecommendationRecord,
+    CommunityValidatedShot,
+    InstallTrustScore,
+)
 from espresso_rl.domain.models import Recommendation, ShotRecord, UploadQueueItem, UploadQueueStatus
 
 
@@ -48,6 +55,21 @@ class PostgresStore:
             "yield_recommendation_trust": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
         }.items():
             self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
+        for column, definition in {
+            "validated_at": "TIMESTAMPTZ",
+            "rejected_at": "TIMESTAMPTZ",
+            "validation_summary": "JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "validation_errors": "JSONB NOT NULL DEFAULT '[]'::jsonb",
+        }.items():
+            self.conn.execute(
+                f"ALTER TABLE community_raw_uploads ADD COLUMN IF NOT EXISTS {column} {definition}"
+            )
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_training_dataset_source_validation_id
+                ON training_dataset (source_validation_id)
+            """
+        )
         self.conn.commit()
 
 
@@ -386,6 +408,177 @@ class PostgresCommunityWarehouse:
         )
         self._store.conn.commit()
 
+    def list_raw_uploads(self, status: str = "mirrored", limit: int = 100) -> list[CommunityRawUpload]:
+        rows = self._store.conn.execute(
+            """
+            SELECT install_id, upload_id, payload_hash, event_type, payload_json, supabase_received_at
+            FROM community_raw_uploads
+            WHERE status=%s
+            ORDER BY mirrored_at ASC
+            LIMIT %s
+            """,
+            (status, limit),
+        ).fetchall()
+        return [_row_to_community_raw_upload(row) for row in rows]
+
+    def mark_raw_upload_validated(
+        self,
+        upload: CommunityRawUpload,
+        validation_summary: dict[str, Any],
+    ) -> None:
+        self._store.conn.execute(
+            """
+            UPDATE community_raw_uploads
+            SET status='validated', validated_at=now(), rejected_at=NULL,
+                validation_summary=%s::jsonb, validation_errors='[]'::jsonb
+            WHERE install_id=%s AND upload_id=%s
+            """,
+            (
+                json.dumps(validation_summary, sort_keys=True),
+                upload.install_id,
+                upload.upload_id,
+            ),
+        )
+        self._store.conn.commit()
+
+    def mark_raw_upload_rejected(
+        self,
+        upload: CommunityRawUpload,
+        validation_errors: list[str],
+    ) -> None:
+        self._store.conn.execute(
+            """
+            UPDATE community_raw_uploads
+            SET status='rejected', rejected_at=now(),
+                validation_errors=%s::jsonb
+            WHERE install_id=%s AND upload_id=%s
+            """,
+            (
+                json.dumps(validation_errors[:50], sort_keys=True),
+                upload.install_id,
+                upload.upload_id,
+            ),
+        )
+        self._store.conn.commit()
+
+    def upsert_validated_shot(self, shot: CommunityValidatedShot) -> int:
+        row = self._store.conn.execute(
+            """
+            INSERT INTO community_validated_shots (
+                install_id, upload_id, shot_id, payload_json, trust_weight, validation_summary
+            ) VALUES (%s, %s, %s, %s::jsonb, %s, %s::jsonb)
+            ON CONFLICT (install_id, shot_id) DO UPDATE SET
+                upload_id=EXCLUDED.upload_id,
+                payload_json=EXCLUDED.payload_json,
+                trust_weight=EXCLUDED.trust_weight,
+                validation_summary=EXCLUDED.validation_summary
+            RETURNING validation_id
+            """,
+            (
+                shot.install_id,
+                shot.upload_id,
+                shot.shot_id,
+                json.dumps(shot.payload_json, sort_keys=True),
+                shot.trust_weight,
+                json.dumps(shot.validation_summary, sort_keys=True),
+            ),
+        ).fetchone()
+        self._store.conn.commit()
+        return int(row["validation_id"])
+
+    def upsert_community_recommendation(self, recommendation: CommunityRecommendationRecord) -> None:
+        self._store.conn.execute(
+            """
+            INSERT INTO community_recommendations (
+                install_id, recommendation_id, upload_id, payload_json
+            ) VALUES (%s, %s, %s, %s::jsonb)
+            ON CONFLICT (install_id, recommendation_id) DO UPDATE SET
+                upload_id=EXCLUDED.upload_id,
+                payload_json=EXCLUDED.payload_json
+            """,
+            (
+                recommendation.install_id,
+                recommendation.recommendation_id,
+                recommendation.upload_id,
+                json.dumps(recommendation.payload_json, sort_keys=True),
+            ),
+        )
+        self._store.conn.commit()
+
+    def upsert_install_trust_score(self, score: InstallTrustScore) -> None:
+        self._store.conn.execute(
+            """
+            INSERT INTO install_trust_scores (install_id, trust_score, reason, updated_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (install_id) DO UPDATE SET
+                trust_score=EXCLUDED.trust_score,
+                reason=EXCLUDED.reason,
+                updated_at=now()
+            """,
+            (score.install_id, score.trust_score, score.reason),
+        )
+        self._store.conn.commit()
+
+    def install_stats(self, install_id: str) -> CommunityInstallStats:
+        validated_row = self._store.conn.execute(
+            "SELECT COUNT(*) AS count FROM community_validated_shots WHERE install_id=%s",
+            (install_id,),
+        ).fetchone()
+        rejected_row = self._store.conn.execute(
+            """
+            SELECT COUNT(*) AS count FROM community_raw_uploads
+            WHERE install_id=%s AND status='rejected'
+            """,
+            (install_id,),
+        ).fetchone()
+        abuse_row = self._store.conn.execute(
+            "SELECT COUNT(*) AS count FROM abuse_events WHERE install_id=%s",
+            (install_id,),
+        ).fetchone()
+        return CommunityInstallStats(
+            validated_shots=int(validated_row["count"]),
+            rejected_uploads=int(rejected_row["count"]),
+            abuse_events=int(abuse_row["count"]),
+        )
+
+    def record_abuse_event(self, event: CommunityAbuseEvent) -> None:
+        self._store.conn.execute(
+            """
+            INSERT INTO abuse_events (install_id, upload_id, payload_hash, reason, detail)
+            VALUES (%s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                event.install_id,
+                event.upload_id,
+                event.payload_hash,
+                event.reason,
+                json.dumps(event.detail, sort_keys=True),
+            ),
+        )
+        self._store.conn.commit()
+
+    def upsert_training_row(
+        self,
+        source_validation_id: int,
+        payload_json: dict[str, Any],
+        trust_weight: float,
+    ) -> None:
+        self._store.conn.execute(
+            """
+            INSERT INTO training_dataset (source_validation_id, payload_json, trust_weight)
+            VALUES (%s, %s::jsonb, %s)
+            ON CONFLICT (source_validation_id) DO UPDATE SET
+                payload_json=EXCLUDED.payload_json,
+                trust_weight=EXCLUDED.trust_weight
+            """,
+            (
+                source_validation_id,
+                json.dumps(payload_json, sort_keys=True),
+                trust_weight,
+            ),
+        )
+        self._store.conn.commit()
+
 
 def _upsert(conn, table: str, key: str, row: dict[str, Any]) -> None:
     columns = list(row)
@@ -405,3 +598,18 @@ def _upsert(conn, table: str, key: str, row: dict[str, Any]) -> None:
     except Exception:
         conn.rollback()
         raise
+
+
+def _row_to_community_raw_upload(row: dict[str, Any]) -> CommunityRawUpload:
+    received_at = row.get("supabase_received_at")
+    payload_json = row["payload_json"]
+    if isinstance(payload_json, str):
+        payload_json = json.loads(payload_json)
+    return CommunityRawUpload(
+        install_id=row["install_id"],
+        upload_id=row["upload_id"],
+        payload_hash=row["payload_hash"],
+        event_type=row["event_type"],
+        payload_json=payload_json,
+        received_at=str(received_at) if received_at is not None else None,
+    )

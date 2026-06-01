@@ -224,7 +224,7 @@ supabase functions deploy espresso-rl-register --no-verify-jwt
 supabase functions deploy espresso-rl-ingest --no-verify-jwt
 ```
 
-## Admin Mirror
+## Admin Mirror And Validation
 
 Admin mode is a separate deployment for mirroring the Supabase raw queue into an
 admin Postgres database. Do not run admin mode in the same container that is
@@ -246,6 +246,15 @@ short lease and `FOR UPDATE SKIP LOCKED`. Multiple admin mirrors can poll at the
 same time without claiming the same row. Mirrored rows are retained in Supabase
 for a short audit/debug window and later removed by
 `espressorl_purge_raw_upload_queue`.
+
+After mirroring, the admin worker validates local `community_raw_uploads` rows
+before they can enter trusted warehouse tables. Validation rejects spoofed
+payload install IDs, event-type mismatches, malformed payloads, impossible
+espresso values, invalid taste tags, unsafe profile arrays, and non-espresso
+utility shots. Accepted shot uploads are stored in `community_validated_shots`
+with a capped low trust weight and are copied into `training_dataset` only when
+their trust weight is non-zero. Recommendation uploads are stored for audit and
+follow-through analysis, but they are not training rows by themselves.
 
 Run local verification with:
 
