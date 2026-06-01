@@ -37,6 +37,8 @@ class GaggimateAdapterTests(unittest.TestCase):
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
             on_shot=lambda event: None,
             on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
             on_decision=lambda event: None,
             on_apply=lambda event: None,
             on_machine_state=lambda event: None,
@@ -88,6 +90,8 @@ class GaggimateAdapterTests(unittest.TestCase):
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
             on_shot=lambda event: None,
             on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
             on_decision=lambda event: None,
             on_apply=lambda event: None,
             on_machine_state=lambda event: None,
@@ -118,6 +122,8 @@ class GaggimateAdapterTests(unittest.TestCase):
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
             on_shot=lambda event: None,
             on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
             on_decision=lambda event: None,
             on_apply=lambda event: None,
             on_machine_state=lambda event: None,
@@ -160,6 +166,8 @@ class GaggimateAdapterTests(unittest.TestCase):
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
             on_shot=lambda event: None,
             on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
             on_decision=lambda event: None,
             on_apply=lambda event: None,
             on_machine_state=lambda event: None,
@@ -201,6 +209,8 @@ class GaggimateAdapterTests(unittest.TestCase):
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
             on_shot=lambda event: None,
             on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
             on_decision=lambda event: None,
             on_apply=lambda event: None,
             on_machine_state=lambda event: None,
@@ -227,6 +237,76 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.applied_fields["target_yield_g"], 40.0)
         self.assertEqual(event.manual_fields, ["next_grind_steps", "next_dose_g"])
 
+    def test_correction_payload_records_manual_exclusion_and_follow_through(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp"), install_id="install_1"),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_correction_payload(
+            {
+                "event_type": "shot_correction",
+                "schema_version": 1,
+                "shot_id": "shot_1",
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 12,
+                "exclude_from_local_optimization": True,
+                "grind_followed": False,
+                "dose_followed": True,
+                "yield_followed": True,
+                "correction_tags": ["did_not_follow_grind", "changed_manually"],
+                "source": "gaggimate_webui",
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.shot_id, "shot_1")
+        self.assertEqual(event.install_id, "install_1")
+        self.assertEqual(event.machine_id, "gaggimate:AA_BB")
+        self.assertTrue(event.exclude_from_local_optimization)
+        self.assertFalse(event.grind_followed)
+        self.assertTrue(event.dose_followed)
+        self.assertTrue(event.yield_followed)
+        self.assertEqual(event.correction_tags, ["did_not_follow_grind", "changed_manually"])
+
+    def test_upload_maintenance_payload_requests_safe_requeue(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp"), install_id="install_1"),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_upload_maintenance_payload(
+            {
+                "event_type": "upload_queue_maintenance",
+                "schema_version": 1,
+                "machine_id": "gaggimate:AA_BB",
+                "bean_context_id": "bean_1",
+                "timestamp": 12,
+                "action": "requeue_valid_rejected",
+                "limit": 50,
+                "source": "gaggimate_webui",
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.install_id, "install_1")
+        self.assertEqual(event.machine_id, "gaggimate:AA_BB")
+        self.assertEqual(event.bean_context_id, "bean_1")
+        self.assertEqual(event.action, "requeue_valid_rejected")
+        self.assertEqual(event.limit, 50)
+
     def test_current_gaggimate_payload_drives_local_bo_data_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(
@@ -249,6 +329,8 @@ class GaggimateAdapterTests(unittest.TestCase):
                 config=config,
                 on_shot=lambda event: None,
                 on_feedback=lambda event: None,
+                on_correction=lambda event: None,
+                on_upload_maintenance=lambda event: None,
                 on_decision=lambda event: None,
                 on_apply=lambda event: None,
                 on_machine_state=lambda event: None,

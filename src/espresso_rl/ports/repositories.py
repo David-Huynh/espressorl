@@ -73,3 +73,17 @@ class UploadQueueRepository(Protocol):
         next_retry_at: int | None = None,
     ) -> None:
         ...
+
+    def count_by_status(self) -> dict[UploadQueueStatus, int]:
+        ...
+
+    def list_by_status(self, status: UploadQueueStatus, limit: int = 100) -> list[UploadQueueItem]:
+        ...
+
+    def requeue(
+        self,
+        upload_id: str,
+        now: int,
+        error_message: str | None = None,
+    ) -> None:
+        ...

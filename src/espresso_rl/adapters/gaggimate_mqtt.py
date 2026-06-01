@@ -12,8 +12,10 @@ from espresso_rl.domain.events import (
     MachineStateEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
+    ShotCorrectionEvent,
     ShotFeedbackEvent,
     ShotProfileEvent,
+    UploadQueueMaintenanceEvent,
 )
 from espresso_rl.domain.models import Recommendation
 from espresso_rl.domain.models import new_id
@@ -22,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 SHOT_TOPIC = "gaggimate/+/shot/profile"
 FEEDBACK_TOPIC = "gaggimate/+/rl/rating"
+CORRECTION_TOPIC = "gaggimate/+/rl/shot/correction"
+UPLOAD_REQUEUE_TOPIC = "gaggimate/+/rl/upload/requeue"
 DECISION_TOPIC = "gaggimate/+/rl/recommendation/decision"
 APPLY_TOPIC = "gaggimate/+/rl/recommendation/apply"
 MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
@@ -35,6 +39,8 @@ class GaggimateMQTTClient:
         config: Config,
         on_shot: Callable[[ShotProfileEvent], None],
         on_feedback: Callable[[ShotFeedbackEvent], None],
+        on_correction: Callable[[ShotCorrectionEvent], None],
+        on_upload_maintenance: Callable[[UploadQueueMaintenanceEvent], None],
         on_decision: Callable[[RecommendationDecisionEvent], None],
         on_apply: Callable[[RecommendationApplyEvent], None],
         on_machine_state: Callable[[MachineStateEvent], None],
@@ -42,6 +48,8 @@ class GaggimateMQTTClient:
         self._config = config
         self._on_shot = on_shot
         self._on_feedback = on_feedback
+        self._on_correction = on_correction
+        self._on_upload_maintenance = on_upload_maintenance
         self._on_decision = on_decision
         self._on_apply = on_apply
         self._on_machine_state = on_machine_state
@@ -109,13 +117,17 @@ class GaggimateMQTTClient:
         if reason_code == 0:
             client.subscribe(SHOT_TOPIC)
             client.subscribe(FEEDBACK_TOPIC)
+            client.subscribe(CORRECTION_TOPIC)
+            client.subscribe(UPLOAD_REQUEUE_TOPIC)
             client.subscribe(DECISION_TOPIC)
             client.subscribe(APPLY_TOPIC)
             client.subscribe(MACHINE_STATE_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
                 FEEDBACK_TOPIC,
+                CORRECTION_TOPIC,
+                UPLOAD_REQUEUE_TOPIC,
                 DECISION_TOPIC,
                 APPLY_TOPIC,
                 MACHINE_STATE_TOPIC,
@@ -137,6 +149,10 @@ class GaggimateMQTTClient:
                 self._on_shot(self.translate_shot_payload(payload, mac))
             elif msg.topic.endswith("/rl/rating"):
                 self._on_feedback(self.translate_feedback_payload(payload, mac))
+            elif msg.topic.endswith("/rl/shot/correction"):
+                self._on_correction(self.translate_correction_payload(payload, mac))
+            elif msg.topic.endswith("/rl/upload/requeue"):
+                self._on_upload_maintenance(self.translate_upload_maintenance_payload(payload, mac))
             elif msg.topic.endswith("/rl/recommendation/decision"):
                 self._on_decision(self.translate_decision_payload(payload, mac))
             elif msg.topic.endswith("/rl/recommendation/apply"):
@@ -209,6 +225,36 @@ class GaggimateMQTTClient:
             source=payload.get("source", "gaggimate_mqtt"),
         )
 
+    def translate_correction_payload(self, payload: dict[str, Any], mac: str) -> ShotCorrectionEvent:
+        return ShotCorrectionEvent(
+            shot_id=str(payload.get("shot_id") or ""),
+            install_id=str(payload.get("install_id") or self._config.install_id),
+            machine_id=str(payload.get("machine_id") or f"gaggimate:{mac}"),
+            timestamp=int(payload.get("timestamp", self._config.now())),
+            exclude_from_local_optimization=_optional_bool(payload.get("exclude_from_local_optimization")),
+            shot_type=payload.get("shot_type"),
+            grind_followed=_optional_bool(payload.get("grind_followed")),
+            dose_followed=_optional_bool(payload.get("dose_followed")),
+            yield_followed=_optional_bool(payload.get("yield_followed")),
+            correction_tags=list(payload.get("correction_tags", [])),
+            source=payload.get("source", "gaggimate_mqtt"),
+        )
+
+    def translate_upload_maintenance_payload(
+        self,
+        payload: dict[str, Any],
+        mac: str,
+    ) -> UploadQueueMaintenanceEvent:
+        return UploadQueueMaintenanceEvent(
+            install_id=str(payload.get("install_id") or self._config.install_id),
+            machine_id=str(payload.get("machine_id") or f"gaggimate:{mac}"),
+            timestamp=int(payload.get("timestamp", self._config.now())),
+            action=payload.get("action", "requeue_valid_rejected"),
+            limit=int(payload.get("limit", 25)),
+            bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
+            source=payload.get("source", "gaggimate_mqtt"),
+        )
+
     def translate_decision_payload(self, payload: dict[str, Any], mac: str) -> RecommendationDecisionEvent:
         return RecommendationDecisionEvent(
             recommendation_id=str(payload.get("recommendation_id") or ""),
@@ -258,6 +304,12 @@ def _optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
 
 
 def _positive_optional_float(value: Any) -> float | None:

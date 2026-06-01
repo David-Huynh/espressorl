@@ -8,6 +8,7 @@ from espresso_rl.domain.events import (
     MachineStateEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
+    ShotCorrectionEvent,
     ShotFeedbackEvent,
     ShotProfileEvent,
 )
@@ -142,6 +143,33 @@ class MemoryUploadQueue:
         item.next_retry_at = next_retry_at
         item.updated_at = now
 
+    def count_by_status(self) -> dict[UploadQueueStatus, int]:
+        counts: dict[UploadQueueStatus, int] = {}
+        for item in self.rows.values():
+            counts[item.status] = counts.get(item.status, 0) + 1
+        return counts
+
+    def list_by_status(self, status: UploadQueueStatus, limit: int = 100) -> list[UploadQueueItem]:
+        return [
+            item
+            for item in sorted(self.rows.values(), key=lambda row: row.updated_at, reverse=True)
+            if item.status == status
+        ][:limit]
+
+    def requeue(
+        self,
+        upload_id: str,
+        now: int,
+        error_message: str | None = None,
+    ) -> None:
+        item = self.rows[upload_id]
+        item.status = UploadQueueStatus.PENDING
+        item.attempt_count = 0
+        item.last_attempt_at = None
+        item.next_retry_at = None
+        item.error_message = error_message
+        item.updated_at = now
+
 
 class RecordingUploadQueue:
     """Upload queue stub that records every enqueue call (without coalescing), so
@@ -158,6 +186,32 @@ class RecordingUploadQueue:
 
     def update_status(self, *args, **kwargs) -> None:
         pass
+
+    def count_by_status(self) -> dict[UploadQueueStatus, int]:
+        counts: dict[UploadQueueStatus, int] = {}
+        for item in self.calls:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        return counts
+
+    def list_by_status(self, status: UploadQueueStatus, limit: int = 100) -> list[UploadQueueItem]:
+        return [item for item in self.calls if item.status == status][:limit]
+
+    def requeue(
+        self,
+        upload_id: str,
+        now: int,
+        error_message: str | None = None,
+    ) -> None:
+        for item in self.calls:
+            if item.upload_id == upload_id:
+                item.status = UploadQueueStatus.PENDING
+                item.attempt_count = 0
+                item.last_attempt_at = None
+                item.next_retry_at = None
+                item.error_message = error_message
+                item.updated_at = now
+                return
+        raise ValueError(f"unknown upload_id {upload_id}")
 
     def for_record(self, local_record_type: str, local_record_id: str | None = None) -> list[UploadQueueItem]:
         return [
@@ -269,6 +323,98 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(result.shot.optimization_weight, 0.0)
         self.assertTrue(result.shot.rating_prompt_allowed)
         self.assertEqual(recs.rows, {})
+
+    def test_shot_correction_excludes_stored_shot_from_local_optimization(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        uploads = MemoryUploadQueue()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), upload_queue=uploads, clock=lambda: 10)
+
+        service.ingest_shot_profile(shot_event("shot_1", 1))
+        corrected = service.record_shot_correction(
+            ShotCorrectionEvent(
+                shot_id="shot_1",
+                install_id="install_1",
+                machine_id="machine_1",
+                timestamp=2,
+                exclude_from_local_optimization=True,
+                correction_tags=["bad_puck_prep"],
+            )
+        )
+
+        self.assertTrue(corrected.exclude_from_local_optimization)
+        self.assertEqual(corrected.optimization_weight, 0.0)
+        self.assertEqual(corrected.recommendation_attribution_weight, 0.0)
+        self.assertEqual(corrected.recommendation_followed, FollowThroughState.NOT_FOLLOWED)
+        self.assertIn("channeling_suspected", corrected.taste_tags)
+        self.assertEqual(shots.get("shot_1").optimization_weight, 0.0)  # type: ignore[union-attr]
+        self.assertTrue(uploads.list_ready(now=20))  # corrected espresso snapshot is still uploadable
+
+    def test_shot_correction_records_variable_specific_not_followed(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        service.record_recommendation_decision(
+            RecommendationDecisionEvent(
+                recommendation_id=rec.recommendation_id,
+                decision=RecommendationDecision.ACCEPTED,
+                timestamp=2,
+            )
+        )
+        service.ingest_shot_profile(
+            shot_event(
+                "shot_2",
+                3,
+                recommendation_id=rec.recommendation_id,
+                grind_steps=rec.next_grind_steps,
+                dose_in_g=rec.next_dose_g,
+                target_yield_g=rec.target_yield_g,
+                beverage_out_g=rec.target_yield_g,
+            )
+        )
+
+        corrected = service.record_shot_correction(
+            ShotCorrectionEvent(
+                shot_id="shot_2",
+                install_id="install_1",
+                machine_id="machine_1",
+                timestamp=4,
+                grind_followed=False,
+                dose_followed=True,
+                yield_followed=True,
+                correction_tags=["did_not_follow_grind", "changed_manually"],
+            )
+        )
+
+        self.assertFalse(corrected.exclude_from_local_optimization)
+        self.assertFalse(corrected.grind_followed)
+        self.assertTrue(corrected.dose_followed)
+        self.assertTrue(corrected.yield_followed)
+        self.assertEqual(corrected.grind_recommendation_trust, 0.0)
+        self.assertGreater(corrected.recommendation_attribution_weight, 0.0)
+        self.assertLess(corrected.recommendation_attribution_weight, 1.0)
+        self.assertEqual(corrected.recommendation_followed, FollowThroughState.PARTIALLY_FOLLOWED)
+
+    def test_utility_shot_is_not_queued_for_community_upload(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        uploads = MemoryUploadQueue()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), upload_queue=uploads, clock=lambda: 10)
+
+        result = service.ingest_shot_profile(
+            shot_event(
+                "flush_1",
+                1,
+                shot_time_s=5.0,
+                beverage_out_g=1.0,
+                weight=[0.0, 0.5, 1.0],
+            )
+        )
+
+        self.assertEqual(result.shot.shot_type, ShotType.UTILITY_FLUSH)
+        self.assertFalse(any(item.local_record_id == "flush_1" for item in uploads.rows.values()))
 
     def test_decision_and_actual_shot_data_drive_follow_through(self) -> None:
         shots = MemoryShotRepository()

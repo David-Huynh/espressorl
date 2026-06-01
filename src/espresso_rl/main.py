@@ -36,16 +36,19 @@ from espresso_rl.adapters.supabase_credentials import (
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.services import EspressoRLService
+from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityUploadCredentials
 from espresso_rl.domain.events import (
     MachineStateEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
+    ShotCorrectionEvent,
     ShotFeedbackEvent,
     ShotProfileEvent,
+    UploadQueueMaintenanceEvent,
 )
-from espresso_rl.domain.models import Recipe, SafetyBounds
+from espresso_rl.domain.models import Recipe, SafetyBounds, UploadQueueStatus
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import RecommendationRepository, ShotRepository, UploadQueueRepository
@@ -76,6 +79,7 @@ def main() -> None:
         safety_bounds=SafetyBounds(),
         clock=config.now,
     )
+    upload_maintenance = UploadQueueMaintenanceService(upload_queue_repo, clock=config.now)
 
     stop_event = threading.Event()
     upload_thread = maybe_start_upload_worker(config, upload_queue_repo, stop_event)
@@ -96,6 +100,7 @@ def main() -> None:
         status = build_status_payload(
             config=config,
             service=service,
+            upload_maintenance=upload_maintenance,
             shot_repo=shot_repo,
             upload_queue_repo=upload_queue_repo,
             machine_id=machine_id,
@@ -160,6 +165,34 @@ def main() -> None:
             last_shot_at=shot.timestamp,
         )
 
+    def on_correction(event: ShotCorrectionEvent) -> None:
+        shot = service.record_shot_correction(event)
+        logger.info(
+            "Correction for shot %s stored type=%s excluded=%s followed=%s attribution=%.2f",
+            shot.shot_id,
+            shot.shot_type.value,
+            shot.exclude_from_local_optimization,
+            shot.recommendation_followed.value,
+            shot.recommendation_attribution_weight,
+        )
+        publish_status(
+            shot.machine_id,
+            shot.bean_context_id,
+            last_shot_id=shot.shot_id,
+            last_shot_at=shot.timestamp,
+        )
+
+    def on_upload_maintenance(event: UploadQueueMaintenanceEvent) -> None:
+        result = upload_maintenance.requeue_valid_rejected(limit=event.limit)
+        logger.info(
+            "Upload queue maintenance action=%s inspected=%d requeued=%d skipped=%d",
+            event.action,
+            result.inspected,
+            result.requeued,
+            result.skipped,
+        )
+        publish_status(event.machine_id, event.bean_context_id)
+
     def on_decision(event: RecommendationDecisionEvent) -> None:
         recommendation = service.record_recommendation_decision(event)
         logger.info(
@@ -215,6 +248,8 @@ def main() -> None:
         config=config,
         on_shot=on_shot,
         on_feedback=on_feedback,
+        on_correction=on_correction,
+        on_upload_maintenance=on_upload_maintenance,
         on_decision=on_decision,
         on_apply=on_apply,
         on_machine_state=on_machine_state,
@@ -238,6 +273,7 @@ def main() -> None:
         config,
         service,
         mqtt_client,
+        upload_maintenance=upload_maintenance,
         shot_repo=shot_repo,
         upload_queue_repo=upload_queue_repo,
     )
@@ -249,6 +285,7 @@ def maybe_publish_startup_recommendation(
     config: Config,
     service: EspressoRLService,
     mqtt_client: GaggimateMQTTClient,
+    upload_maintenance: UploadQueueMaintenanceService | None = None,
     shot_repo: ShotRepository | None = None,
     upload_queue_repo: UploadQueueRepository | None = None,
 ) -> None:
@@ -268,6 +305,7 @@ def maybe_publish_startup_recommendation(
             build_status_payload(
                 config=config,
                 service=service,
+                upload_maintenance=upload_maintenance,
                 shot_repo=shot_repo,
                 upload_queue_repo=upload_queue_repo,
                 machine_id=config.machine_id,
@@ -296,6 +334,7 @@ def maybe_publish_startup_recommendation(
         build_status_payload(
             config=config,
             service=service,
+            upload_maintenance=upload_maintenance,
             shot_repo=shot_repo,
             upload_queue_repo=upload_queue_repo,
             machine_id=config.machine_id,
@@ -310,6 +349,7 @@ def maybe_publish_startup_recommendation(
 def build_status_payload(
     config: Config,
     service: EspressoRLService,
+    upload_maintenance: UploadQueueMaintenanceService | None,
     shot_repo: ShotRepository | None,
     upload_queue_repo: UploadQueueRepository | None,
     machine_id: str,
@@ -360,8 +400,13 @@ def build_status_payload(
         apply_status = None
 
     upload_queue_count = 0
+    upload_queue_status_counts: dict[str, int] = {}
     if upload_queue_repo is not None:
         upload_queue_count = len(upload_queue_repo.list_ready(now=now, limit=1_000_000))
+        upload_queue_status_counts = {
+            status.value: count for status, count in upload_queue_repo.count_by_status().items()
+        }
+    latest_rejected = upload_maintenance.latest_rejected() if upload_maintenance is not None else None
 
     return {
         "addon_online": True,
@@ -377,6 +422,15 @@ def build_status_payload(
         "rated_shot_count": len(rated_shots),
         "best_known_recipe": best_known_recipe_payload(optimizer_shots),
         "upload_queue_count": upload_queue_count,
+        "upload_queue_pending_count": upload_queue_status_counts.get(UploadQueueStatus.PENDING.value, 0),
+        "upload_queue_failed_count": upload_queue_status_counts.get(UploadQueueStatus.FAILED.value, 0),
+        "upload_queue_rejected_count": upload_queue_status_counts.get(UploadQueueStatus.REJECTED.value, 0),
+        "upload_queue_uploaded_count": upload_queue_status_counts.get(UploadQueueStatus.UPLOADED.value, 0),
+        "upload_queue_last_rejected_id": latest_rejected.upload_id if latest_rejected else None,
+        "upload_queue_last_rejected_record_type": latest_rejected.local_record_type if latest_rejected else None,
+        "upload_queue_last_rejected_record_id": latest_rejected.local_record_id if latest_rejected else None,
+        "upload_queue_last_rejected_error": latest_rejected.error_message if latest_rejected else None,
+        "upload_queue_last_rejected_at": latest_rejected.updated_at if latest_rejected else None,
         "community_upload_enabled": config.should_enqueue_community_uploads(),
     }
 

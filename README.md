@@ -107,6 +107,7 @@ Gaggimate should publish and subscribe on these topics:
 gaggimate/{topic_id}/shot/profile
 gaggimate/{topic_id}/machine/state
 gaggimate/{topic_id}/rl/rating
+gaggimate/{topic_id}/rl/shot/correction
 gaggimate/{topic_id}/rl/recommendation/decision
 gaggimate/{topic_id}/rl/recommendation/apply
 gaggimate/{topic_id}/rl/recommendation
@@ -165,10 +166,27 @@ recommendation. Choosing Later sends no decision, so the retained pending
 recommendation can be shown again on the next wake/reconnect. Choosing Ignore
 sends an ignored decision so the optimizer will not count it as followed.
 
+Manual shot corrections are sent as
+`gaggimate/{topic_id}/rl/shot/correction`. They can exclude the latest shot from
+local optimization, mark bad puck prep/channeling, or mark grind/dose/yield as
+not followed while preserving the shot record. EspressoRL updates the stored
+shot in place, recomputes reward confidence, and requeues the corrected espresso
+snapshot for community upload when upload is enabled.
+
 EspressoRL also publishes retained `gaggimate/{topic_id}/rl/status` payloads.
 Gaggimate can use that status to show service connectivity, last stored shot,
 last recommendation, recommendation apply status, current BO mode, local shot
-count, queued upload count, and community upload state.
+count, queued upload count, rejected upload count, uploaded snapshot count, and
+community upload state. Utility flushes and other non-espresso shots are kept
+out of the community upload queue so validation failures there do not mask real
+espresso data collection.
+
+If `upload_queue_rejected_count` is non-zero, use the Auto Tuning page's
+`Retry Valid` action. EspressoRL locally preflights rejected payloads before
+retrying them, resets only valid rejected rows back to pending, and leaves
+invalid rows rejected. This is meant for recovery after ingestion/schema fixes;
+it will not blindly retry malformed utility flushes or impossible espresso
+payloads.
 
 ## Supabase Upload
 

@@ -247,6 +247,37 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             }
             self.assertEqual(statuses, {"u_a": "uploading", "u_b": "pending"})
 
+    def test_enqueue_rearms_rejected_record_when_content_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            queue.enqueue(queue_item("u_a", "a"))
+            queue.update_status("u_a", UploadQueueStatus.REJECTED, now=2, error_message="schema")
+            queue.enqueue(queue_item("u_b", "b"))
+
+            ready = queue.list_ready(now=10)
+            self.assertEqual([item.upload_id for item in ready], ["u_b"])
+            statuses = {
+                row["upload_id"]: row["status"]
+                for row in store.conn.execute(
+                    "SELECT upload_id, status FROM upload_queue WHERE local_record_id='shot_1'"
+                ).fetchall()
+            }
+            self.assertEqual(statuses, {"u_b": "pending"})
+
+    def test_upload_queue_counts_by_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            queue = SQLiteUploadQueueRepository(store)
+            queue.enqueue(queue_item("u_a", "a"))
+            queue.enqueue(queue_item("u_b", "b", local_record_id="shot_2"))
+            queue.update_status("u_b", UploadQueueStatus.REJECTED, now=2, error_message="schema")
+
+            counts = queue.count_by_status()
+
+            self.assertEqual(counts[UploadQueueStatus.PENDING], 1)
+            self.assertEqual(counts[UploadQueueStatus.REJECTED], 1)
+
     def test_uploading_transition_is_not_counted_as_an_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteStore(Path(tmp) / "espresso.db")

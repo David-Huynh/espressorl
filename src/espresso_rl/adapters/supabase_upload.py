@@ -139,6 +139,7 @@ class UploadQueueWorker:
                     now=int(self._clock()),
                     error_message=f"HTTP {exc.status}: {exc}",
                 )
+                logger.warning("Upload rejected for %s: HTTP %d %s", item.upload_id, exc.status, exc)
             except UploadRateLimited as exc:
                 # Backpressure, not a failure: defer until the bucket resets and do
                 # not charge an attempt, so rate limiting can never dead-letter.

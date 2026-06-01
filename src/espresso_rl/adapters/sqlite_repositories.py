@@ -393,19 +393,22 @@ class SQLiteUploadQueueRepository:
             (item.upload_id, UploadQueueStatus.UPLOADING.value),
         ).fetchone():
             return
-        # Coalesce: drop superseded queued versions for this record so the latest
-        # state replaces them. UPLOADING rows are left untouched (a worker may be
-        # mid-send) and UPLOADED rows are kept as the "already sent" memory.
+        # Coalesce: drop superseded unsent versions for this record so the latest
+        # state replaces them. Rejected rows are also rearmed by a new snapshot,
+        # which lets a payload/schema fix drain local data without manual SQL.
+        # UPLOADING rows are left untouched (a worker may be mid-send) and
+        # UPLOADED rows are kept as the "already sent" memory.
         conn.execute(
             """
             DELETE FROM upload_queue
-            WHERE local_record_type=? AND local_record_id=? AND status IN (?, ?)
+            WHERE local_record_type=? AND local_record_id=? AND status IN (?, ?, ?)
             """,
             (
                 item.local_record_type,
                 item.local_record_id,
                 UploadQueueStatus.PENDING.value,
                 UploadQueueStatus.FAILED.value,
+                UploadQueueStatus.REJECTED.value,
             ),
         )
         conn.execute(
@@ -470,6 +473,52 @@ class SQLiteUploadQueueRepository:
                 attempt_count,
                 last_attempt_at,
                 next_retry_at,
+                error_message,
+                now,
+                upload_id,
+            ),
+        )
+        self._store.conn.commit()
+
+    def count_by_status(self) -> dict[UploadQueueStatus, int]:
+        rows = self._store.conn.execute(
+            "SELECT status, COUNT(*) AS count FROM upload_queue GROUP BY status"
+        ).fetchall()
+        return {UploadQueueStatus(row["status"]): int(row["count"]) for row in rows}
+
+    def list_by_status(self, status: UploadQueueStatus, limit: int = 100) -> list[UploadQueueItem]:
+        rows = self._store.conn.execute(
+            """
+            SELECT * FROM upload_queue
+            WHERE status=?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (UploadQueueStatus(status).value, limit),
+        ).fetchall()
+        return [_row_to_upload_item(row) for row in rows]
+
+    def requeue(
+        self,
+        upload_id: str,
+        now: int,
+        error_message: str | None = None,
+    ) -> None:
+        existing = self._store.conn.execute(
+            "SELECT 1 FROM upload_queue WHERE upload_id=? AND status=?",
+            (upload_id, UploadQueueStatus.REJECTED.value),
+        ).fetchone()
+        if existing is None:
+            raise ValueError(f"unknown rejected upload_id {upload_id}")
+        self._store.conn.execute(
+            """
+            UPDATE upload_queue
+            SET status=?, attempt_count=0, last_attempt_at=NULL, next_retry_at=NULL,
+                error_message=?, updated_at=?
+            WHERE upload_id=?
+            """,
+            (
+                UploadQueueStatus.PENDING.value,
                 error_message,
                 now,
                 upload_id,

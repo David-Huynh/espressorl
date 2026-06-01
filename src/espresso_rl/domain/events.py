@@ -12,6 +12,16 @@ from .models import (
     VALID_TASTE_TAGS,
 )
 
+VALID_CORRECTION_TAGS = {
+    "changed_manually",
+    "bad_puck_prep",
+    "channeling_suspected",
+    "utility_brew",
+    "did_not_follow_grind",
+    "did_not_follow_dose",
+    "did_not_follow_yield",
+}
+
 
 def _numbers(values: list[Any], field_name: str) -> list[float]:
     try:
@@ -106,6 +116,58 @@ class ShotFeedbackEvent:
         invalid_tags = set(self.taste_tags) - VALID_TASTE_TAGS
         if invalid_tags:
             raise ValueError(f"invalid taste tags: {sorted(invalid_tags)}")
+
+
+@dataclass(frozen=True)
+class ShotCorrectionEvent:
+    shot_id: str
+    install_id: str
+    machine_id: str
+    timestamp: int
+    exclude_from_local_optimization: bool | None = None
+    shot_type: ShotType | None = None
+    grind_followed: bool | None = None
+    dose_followed: bool | None = None
+    yield_followed: bool | None = None
+    correction_tags: list[str] = field(default_factory=list)
+    source: str = "unknown"
+    schema_version: int = 1
+
+    event_type: str = field(default="shot_correction", init=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported correction schema_version")
+        if not self.shot_id:
+            raise ValueError("shot_id is required")
+        if self.shot_type is not None:
+            object.__setattr__(self, "shot_type", ShotType(self.shot_type))
+        invalid_tags = set(self.correction_tags) - VALID_CORRECTION_TAGS
+        if invalid_tags:
+            raise ValueError(f"invalid correction tags: {sorted(invalid_tags)}")
+
+
+@dataclass(frozen=True)
+class UploadQueueMaintenanceEvent:
+    install_id: str
+    machine_id: str
+    timestamp: int
+    action: str = "requeue_valid_rejected"
+    limit: int = 25
+    bean_context_id: str | None = None
+    source: str = "unknown"
+    schema_version: int = 1
+
+    event_type: str = field(default="upload_queue_maintenance", init=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported upload maintenance schema_version")
+        if self.action != "requeue_valid_rejected":
+            raise ValueError("unsupported upload maintenance action")
+        if not 1 <= int(self.limit) <= 500:
+            raise ValueError("upload maintenance limit must be between 1 and 500")
+        object.__setattr__(self, "limit", int(self.limit))
 
 
 @dataclass(frozen=True)

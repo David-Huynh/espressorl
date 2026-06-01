@@ -8,6 +8,7 @@ from espresso_rl.domain.events import (
     MachineStateEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
+    ShotCorrectionEvent,
     ShotFeedbackEvent,
     ShotProfileEvent,
 )
@@ -22,6 +23,7 @@ from espresso_rl.domain.models import (
     RecommendationStatus,
     SafetyBounds,
     ShotRecord,
+    ShotType,
     now_ts,
 )
 from espresso_rl.domain.optimization import OptimizationContext
@@ -177,6 +179,95 @@ class EspressoRLService:
 
         shot.human_rating = None if event.skipped else event.rating
         shot.taste_tags = list(event.taste_tags)
+        reward = compute_reward(
+            human_rating=shot.human_rating,
+            profile_score=shot.profile_score or 0.0,
+            follow_through=shot.recommendation_followed,
+            taste_tags=shot.taste_tags,
+            profile_complete=shot.raw_profile_available,
+        )
+        shot.reward = reward.reward
+        shot.reward_confidence = reward.confidence
+        shot.updated_at = now
+        self._store_shot(shot, now)
+        return shot
+
+    def record_shot_correction(self, event: ShotCorrectionEvent) -> ShotRecord:
+        now = self._clock()
+        shot = self._shots.get(event.shot_id)
+        if shot is None:
+            raise ValueError(f"unknown shot_id {event.shot_id}")
+        if shot.install_id != event.install_id or shot.machine_id != event.machine_id:
+            raise ValueError("shot correction does not match the stored shot owner")
+
+        tags = set(event.correction_tags)
+        if event.shot_type is not None:
+            shot.shot_type = event.shot_type
+        if "utility_brew" in tags:
+            shot.shot_type = ShotType.UTILITY_FLUSH
+
+        should_exclude = event.exclude_from_local_optimization is True
+        if tags.intersection({"bad_puck_prep", "utility_brew"}):
+            should_exclude = True
+        if shot.shot_type != ShotType.ESPRESSO:
+            should_exclude = True
+
+        if event.grind_followed is not None:
+            shot.grind_followed = event.grind_followed
+            shot.grind_recommendation_trust = 1.0 if event.grind_followed else 0.0
+        if event.dose_followed is not None:
+            shot.dose_followed = event.dose_followed
+            shot.dose_recommendation_trust = 1.0 if event.dose_followed else 0.0
+        if event.yield_followed is not None:
+            shot.yield_followed = event.yield_followed
+            shot.yield_recommendation_trust = 1.0 if event.yield_followed else 0.0
+
+        if "did_not_follow_grind" in tags:
+            shot.grind_followed = False
+            shot.grind_recommendation_trust = 0.0
+        if "did_not_follow_dose" in tags:
+            shot.dose_followed = False
+            shot.dose_recommendation_trust = 0.0
+        if "did_not_follow_yield" in tags:
+            shot.yield_followed = False
+            shot.yield_recommendation_trust = 0.0
+
+        if "channeling_suspected" in tags or "bad_puck_prep" in tags:
+            taste_tags = set(shot.taste_tags)
+            taste_tags.add("channeling_suspected")
+            shot.taste_tags = sorted(taste_tags)
+
+        variable_follow = [shot.grind_followed, shot.dose_followed, shot.yield_followed]
+        any_not_followed = any(value is False for value in variable_follow)
+        any_followed = any(value is True for value in variable_follow)
+
+        if should_exclude:
+            shot.exclude_from_local_optimization = True
+            shot.optimization_weight = 0.0
+            shot.recommendation_attribution_weight = 0.0
+            shot.grind_recommendation_trust = 0.0
+            shot.dose_recommendation_trust = 0.0
+            shot.yield_recommendation_trust = 0.0
+            if shot.shot_type != ShotType.ESPRESSO:
+                shot.rating_prompt_allowed = False
+            shot.recommendation_followed = FollowThroughState.NOT_FOLLOWED
+        elif any_not_followed:
+            known = [value for value in variable_follow if value is not None]
+            all_known_variables_rejected = len(known) == 3 and all(value is False for value in known)
+            shot.recommendation_followed = (
+                FollowThroughState.NOT_FOLLOWED
+                if all_known_variables_rejected
+                else FollowThroughState.PARTIALLY_FOLLOWED
+            )
+            if shot.recommendation_followed == FollowThroughState.NOT_FOLLOWED:
+                shot.recommendation_attribution_weight = 0.0
+            else:
+                followed_share = sum(1 for value in known if value) / max(1, len(known))
+                shot.recommendation_attribution_weight = min(
+                    shot.recommendation_attribution_weight or 0.5,
+                    max(0.25, followed_share),
+                )
+
         reward = compute_reward(
             human_rating=shot.human_rating,
             profile_score=shot.profile_score or 0.0,
@@ -437,7 +528,7 @@ class EspressoRLService:
 
     def _store_shot(self, shot: ShotRecord, now: int) -> None:
         self._shots.upsert(shot)
-        if self._upload_queue is not None:
+        if self._upload_queue is not None and shot.shot_type == ShotType.ESPRESSO:
             self._upload_queue.enqueue(make_shot_upload_item(shot, now))
 
     def _store_recommendation(
