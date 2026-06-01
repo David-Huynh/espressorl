@@ -110,6 +110,20 @@ def main() -> None:
 
     def on_shot(event: ShotProfileEvent) -> None:
         result = service.ingest_shot_profile(event)
+        if result.recommendation is None:
+            logger.info(
+                "Shot %s stored type=%s local_optimization=%s; no BO recommendation generated",
+                result.shot.shot_id,
+                result.shot.shot_type.value,
+                "included" if not result.shot.exclude_from_local_optimization else "excluded",
+            )
+            publish_status(
+                event.machine_id,
+                event.bean_context_id,
+                last_shot_id=result.shot.shot_id,
+                last_shot_at=result.shot.timestamp,
+            )
+            return
         logger.info(
             "Shot %s stored; next rec %s mode=%s grind=%+d dose=%.1f yield=%.1f",
             result.shot.shot_id,
@@ -240,6 +254,8 @@ def maybe_publish_startup_recommendation(
 ) -> None:
     if config.machine_id == "gaggimate:local":
         return
+    if not config.bean_context_id:
+        return
     current = service.get_current_recommendation(
         install_id=config.install_id,
         machine_id=config.machine_id,
@@ -321,6 +337,15 @@ def build_status_payload(
         last_shot_id = last_shot.shot_id
         last_shot_at = last_shot.timestamp
 
+    optimizer_shots = [
+        shot
+        for shot in recent
+        if shot.shot_type.value == "espresso"
+        and not shot.exclude_from_local_optimization
+        and shot.optimization_weight > 0.0
+    ]
+    rated_shots = [shot for shot in optimizer_shots if shot.human_rating is not None]
+
     current = service.get_current_recommendation(
         install_id=config.install_id,
         machine_id=machine_id,
@@ -348,9 +373,34 @@ def build_status_payload(
         "last_recommendation_at": last_recommendation_at,
         "recommendation_apply_status": apply_status,
         "mode": mode,
-        "local_shot_count": len(recent),
+        "local_shot_count": len(optimizer_shots),
+        "rated_shot_count": len(rated_shots),
+        "best_known_recipe": best_known_recipe_payload(optimizer_shots),
         "upload_queue_count": upload_queue_count,
         "community_upload_enabled": config.should_enqueue_community_uploads(),
+    }
+
+
+def best_known_recipe_payload(shots: list) -> dict | None:
+    if not shots:
+        return None
+
+    def score(shot) -> float:
+        if shot.human_rating is not None:
+            return 10.0 + shot.human_rating + (shot.reward or 0.0)
+        if shot.reward is not None:
+            return shot.reward * max(shot.reward_confidence, 0.05)
+        return shot.profile_score or 0.0
+
+    best = max(shots, key=score)
+    return {
+        "shot_id": best.shot_id,
+        "rating": best.human_rating,
+        "grind_steps": best.grind_steps,
+        "dose_g": best.dose_in_g,
+        "target_yield_g": best.target_yield_g,
+        "target_ratio": best.target_ratio,
+        "reward": best.reward,
     }
 
 

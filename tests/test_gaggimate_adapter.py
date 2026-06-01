@@ -59,6 +59,12 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "beverage_out_g": 39.8,
                 "shot_time_s": 31.2,
                 "bean_context_id": "profile_1",
+                "shot_type": "espresso",
+                "utility": False,
+                "local_optimization_enabled": False,
+                "exclude_from_local_optimization": True,
+                "optimization_weight": 0.0,
+                "rating_prompt_allowed": True,
                 "recommendation_id": "rec_1",
             },
             mac="AA_BB",
@@ -70,6 +76,12 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.target_yield_g, 40.0)
         self.assertEqual(event.beverage_out_g, 39.8)
         self.assertEqual(event.recommendation_id, "rec_1")
+        self.assertEqual(event.shot_type.value, "espresso")
+        self.assertFalse(event.utility)
+        self.assertFalse(event.local_optimization_enabled)
+        self.assertTrue(event.exclude_from_local_optimization)
+        self.assertEqual(event.optimization_weight, 0.0)
+        self.assertTrue(event.rating_prompt_allowed)
 
     def test_shot_profile_payload_treats_zero_final_weight_as_missing(self) -> None:
         client = GaggimateMQTTClient(

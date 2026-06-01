@@ -105,6 +105,18 @@ serve(async request => {
     });
     return jsonResponse(400, { error: validation.errors.join('; ') });
   }
+  if (payload.install_id !== undefined && payload.install_id !== installId) {
+    await logAbuse(supabase, {
+      installId,
+      uploadId,
+      payloadHash,
+      sourceIpHash,
+      reason: 'install_id_mismatch',
+      detail: { payload_install_id: String(payload.install_id) },
+    });
+    return jsonResponse(403, { error: 'payload install_id does not match upload credential' });
+  }
+  payload.install_id = installId;
 
   const { error } = await supabase.from('raw_upload_queue').insert({
     install_id: installId,
@@ -179,12 +191,22 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   requireNumberRange(payload, 'target_yield_g', 5, 100, errors);
   optionalNumberRange(payload, 'shot_time_s', 5, 90, errors);
   optionalNumberRange(payload, 'human_rating', 1, 5, errors);
+  optionalEnum(payload, 'shot_type', ['espresso', 'utility_flush', 'cleaning', 'calibration', 'unknown'], errors);
+  optionalBoolean(payload, 'exclude_from_local_optimization', errors);
+  optionalBoolean(payload, 'rating_prompt_allowed', errors);
+  optionalNumberRange(payload, 'optimization_weight', 0, 1, errors);
+  optionalBoolean(payload, 'grind_followed', errors);
+  optionalBoolean(payload, 'dose_followed', errors);
+  optionalBoolean(payload, 'yield_followed', errors);
+  optionalNumberRange(payload, 'grind_recommendation_trust', 0, 1, errors);
+  optionalNumberRange(payload, 'dose_recommendation_trust', 0, 1, errors);
+  optionalNumberRange(payload, 'yield_recommendation_trust', 0, 1, errors);
   const profile = payload.profile_resampled;
   if (profile !== undefined) {
     if (!Array.isArray(profile) || profile.length !== 5) {
       errors.push('profile_resampled must have 5 channels');
-    } else if (!profile.every(channel => Array.isArray(channel) && channel.length <= 100)) {
-      errors.push('profile_resampled channels must be arrays with <=100 samples');
+    } else {
+      validateProfileResampled(profile, payload.beverage_out_g, errors);
     }
   }
 }
@@ -216,6 +238,57 @@ function optionalNumberRange(payload: JsonRecord, key: string, min: number, max:
     return;
   }
   requireNumberRange(payload, key, min, max, errors);
+}
+
+function optionalBoolean(payload: JsonRecord, key: string, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  if (typeof payload[key] !== 'boolean') {
+    errors.push(`${key} must be boolean`);
+  }
+}
+
+function optionalEnum(payload: JsonRecord, key: string, allowed: string[], errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  if (typeof payload[key] !== 'string' || !allowed.includes(String(payload[key]))) {
+    errors.push(`${key} is invalid`);
+  }
+}
+
+function validateProfileResampled(profile: unknown[], beverageOutG: unknown, errors: string[]) {
+  const ranges: Array<[number, number, string]> = [
+    [0, 15, 'pressure'],
+    [0, 15, 'target_pressure'],
+    [0, 20, 'flow'],
+    [0, 20, 'target_flow'],
+    [0, 100, 'weight'],
+  ];
+  for (let channelIndex = 0; channelIndex < 5; channelIndex += 1) {
+    const channel = profile[channelIndex];
+    const [min, max, label] = ranges[channelIndex];
+    if (!Array.isArray(channel) || channel.length !== 100) {
+      errors.push(`profile_resampled ${label} channel must have exactly 100 samples`);
+      continue;
+    }
+    for (const value of channel) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+        errors.push(`profile_resampled ${label} out of range`);
+        break;
+      }
+    }
+  }
+  if (typeof beverageOutG === 'number' && Number.isFinite(beverageOutG)) {
+    const weight = profile[4];
+    if (Array.isArray(weight) && weight.length === 100) {
+      const finalWeight = weight[99];
+      if (typeof finalWeight === 'number' && Number.isFinite(finalWeight) && Math.abs(finalWeight - beverageOutG) > 5) {
+        errors.push('final profile weight does not match beverage_out_g');
+      }
+    }
+  }
 }
 
 async function lookupCredential(

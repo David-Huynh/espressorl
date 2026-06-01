@@ -35,6 +35,19 @@ class PostgresStore:
         for statement in schema_path.read_text().split(";"):
             if statement.strip():
                 self.conn.execute(statement)
+        for column, definition in {
+            "shot_type": "TEXT NOT NULL DEFAULT 'espresso'",
+            "exclude_from_local_optimization": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "optimization_weight": "DOUBLE PRECISION NOT NULL DEFAULT 1.0",
+            "rating_prompt_allowed": "BOOLEAN NOT NULL DEFAULT TRUE",
+            "grind_followed": "BOOLEAN",
+            "dose_followed": "BOOLEAN",
+            "yield_followed": "BOOLEAN",
+            "grind_recommendation_trust": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+            "dose_recommendation_trust": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+            "yield_recommendation_trust": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+        }.items():
+            self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
         self.conn.commit()
 
 
@@ -92,6 +105,29 @@ class PostgresRecommendationRepository:
         row = self._store.conn.execute(
             "SELECT * FROM recommendations WHERE recommendation_id=%s",
             (recommendation_id,),
+        ).fetchone()
+        return _row_to_recommendation(row) if row else None
+
+    def get_latest(
+        self,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str | None,
+    ) -> Recommendation | None:
+        if bean_context_id is None:
+            bean_clause = "bean_context_id IS NULL"
+            params = (install_id, machine_id)
+        else:
+            bean_clause = "bean_context_id=%s"
+            params = (install_id, machine_id, bean_context_id)
+        row = self._store.conn.execute(
+            f"""
+            SELECT * FROM recommendations
+            WHERE install_id=%s AND machine_id=%s AND {bean_clause}
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            params,
         ).fetchone()
         return _row_to_recommendation(row) if row else None
 

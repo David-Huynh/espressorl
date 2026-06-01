@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS shots (
     profile_mse DOUBLE PRECISION,
     reward DOUBLE PRECISION,
     reward_confidence DOUBLE PRECISION NOT NULL,
+    shot_type TEXT NOT NULL DEFAULT 'espresso',
+    exclude_from_local_optimization BOOLEAN NOT NULL DEFAULT FALSE,
+    optimization_weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    rating_prompt_allowed BOOLEAN NOT NULL DEFAULT TRUE,
+    grind_followed BOOLEAN,
+    dose_followed BOOLEAN,
+    yield_followed BOOLEAN,
+    grind_recommendation_trust DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    dose_recommendation_trust DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    yield_recommendation_trust DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL
 );

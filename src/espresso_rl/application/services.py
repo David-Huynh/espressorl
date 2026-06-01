@@ -28,6 +28,7 @@ from espresso_rl.domain.optimization import OptimizationContext
 from espresso_rl.domain.profile import profile_hash, profile_mse, profile_score, resample_profile
 from espresso_rl.domain.reward import compute_reward
 from espresso_rl.domain.staleness import check_recommendation_staleness
+from espresso_rl.domain.utility import classify_shot_profile_event
 from espresso_rl.application.upload_payloads import (
     make_recommendation_upload_item,
     make_shot_upload_item,
@@ -43,7 +44,7 @@ from espresso_rl.ports.repositories import (
 @dataclass(frozen=True)
 class IngestResult:
     shot: ShotRecord
-    recommendation: Recommendation
+    recommendation: Recommendation | None
 
 
 def _recommendation_signature(recommendation: Recommendation) -> tuple:
@@ -96,7 +97,8 @@ class EspressoRLService:
 
     def ingest_shot_profile(self, event: ShotProfileEvent) -> IngestResult:
         now = self._clock()
-        recommendation = self._recommendation_for_event(event, now)
+        classification = classify_shot_profile_event(event)
+        recommendation = self._recommendation_for_event(event, now) if classification.locally_optimizable else None
         profile = resample_profile(event)
         mse = profile_mse(profile)
         score = profile_score(profile)
@@ -120,6 +122,10 @@ class EspressoRLService:
             raw_profile_hash=profile_hash(profile),
             profile_mse=mse,
             profile_score=score,
+            shot_type=classification.shot_type,
+            exclude_from_local_optimization=classification.exclude_from_local_optimization,
+            optimization_weight=classification.optimization_weight,
+            rating_prompt_allowed=classification.rating_prompt_allowed,
             created_at=now,
             updated_at=now,
         )
@@ -148,6 +154,9 @@ class EspressoRLService:
         shot.reward = reward.reward
         shot.reward_confidence = reward.confidence
         self._store_shot(shot, now)
+
+        if not classification.locally_optimizable:
+            return IngestResult(shot=shot, recommendation=None)
 
         next_rec = self.generate_recommendation(
             install_id=event.install_id,
@@ -238,6 +247,8 @@ class EspressoRLService:
     def handle_machine_state(self, event: MachineStateEvent) -> Recommendation | None:
         if event.state not in {MachineState.WAKE, MachineState.IDLE, MachineState.STANDBY}:
             return None
+        if not event.bean_context_id:
+            return None
 
         now = self._clock()
         current_recipe = event.current_recipe()
@@ -293,6 +304,10 @@ class EspressoRLService:
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             now=timestamp,
+        ) or self._recommendations.get_latest(
+            install_id=install_id,
+            machine_id=machine_id,
+            bean_context_id=bean_context_id,
         )
         context = OptimizationContext(
             install_id=install_id,

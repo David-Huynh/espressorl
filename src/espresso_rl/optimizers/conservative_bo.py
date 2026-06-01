@@ -9,6 +9,7 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     RecommendationStatus,
     ShotRecord,
+    ShotType,
     new_id,
 )
 from espresso_rl.domain.optimization import OptimizationContext
@@ -26,7 +27,7 @@ class ConservativeBOOptimizer:
     """
 
     def recommend(self, context: OptimizationContext) -> Recommendation:
-        shots = list(context.shots)
+        shots = self._optimizer_shots(list(context.shots))
         current = context.current_recipe
 
         if not shots:
@@ -155,10 +156,21 @@ class ConservativeBOOptimizer:
                         radius_yield_g,
                         max(dose_radius_g, 0.5),
                     )
+                    if self._repeats_ignored_recommendation(candidate, context):
+                        candidate_score -= 10.0
                     if candidate_score > best_score:
                         best_score = candidate_score
                         best_recipe = candidate
         return best_recipe
+
+    def _optimizer_shots(self, shots: list[ShotRecord]) -> list[ShotRecord]:
+        return [
+            shot
+            for shot in shots
+            if shot.shot_type == ShotType.ESPRESSO
+            and not shot.exclude_from_local_optimization
+            and shot.optimization_weight > 0.0
+        ]
 
     def _single_point_probe(self, shot: ShotRecord) -> tuple[int, float]:
         tags = set(shot.taste_tags)
@@ -194,7 +206,7 @@ class ConservativeBOOptimizer:
                 continue
             distance = self._distance(candidate, shot, radius_steps, radius_yield_g, dose_radius_g)
             min_distance = min(min_distance, distance)
-            weight = (shot.reward_confidence or 0.1) / (0.15 + distance)
+            weight = ((shot.reward_confidence or 0.1) * shot.optimization_weight) / (0.15 + distance)
             weighted_reward += weight * (shot.reward if shot.reward is not None else (shot.profile_score or 0.0))
             weight_sum += weight
         predicted_reward = weighted_reward / weight_sum if weight_sum else 0.0
@@ -221,6 +233,16 @@ class ConservativeBOOptimizer:
         dose_d = abs(candidate.dose_g - shot.dose_in_g) / max(dose_radius_g, 0.5)
         yield_d = abs(candidate.target_yield_g - shot.target_yield_g) / max(radius_yield_g, 1.0)
         return math.sqrt(grind_d * grind_d + dose_d * dose_d + yield_d * yield_d)
+
+    def _repeats_ignored_recommendation(self, candidate, context: OptimizationContext) -> bool:
+        last = context.last_recommendation
+        if last is None or last.status != RecommendationStatus.IGNORED:
+            return False
+        return (
+            abs(candidate.grind_steps - last.next_grind_steps) < 0.5
+            and abs(candidate.dose_g - last.next_dose_g) < 0.05
+            and abs(candidate.target_yield_g - last.target_yield_g) < 0.1
+        )
 
     def _oscillation_penalty(self, candidate, context: OptimizationContext) -> float:
         last = context.last_recommendation
@@ -254,4 +276,3 @@ class ConservativeBOOptimizer:
         )
         base = 0.25 + min(0.35, rated * 0.04) + min(0.25, followed * 0.03)
         return max(0.0, min(0.85, base))
-

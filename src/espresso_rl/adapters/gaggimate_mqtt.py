@@ -185,6 +185,12 @@ class GaggimateMQTTClient:
             shot_time_s=_optional_float(shot_time_s),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
             recommendation_id=payload.get("recommendation_id"),
+            shot_type=payload.get("shot_type", "espresso"),
+            utility=bool(payload.get("utility", False)),
+            exclude_from_local_optimization=bool(payload.get("exclude_from_local_optimization", False)),
+            local_optimization_enabled=bool(payload.get("local_optimization_enabled", True)),
+            optimization_weight=_optional_float(payload.get("optimization_weight")),
+            rating_prompt_allowed=bool(payload.get("rating_prompt_allowed", True)),
         )
 
     def translate_feedback_payload(self, payload: dict[str, Any], mac: str) -> ShotFeedbackEvent:

@@ -50,6 +50,8 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("constantTimeEqual", source)
         self.assertIn("payload hash mismatch", source)
         self.assertIn("timestamp out of range", source)
+        self.assertIn("payload install_id does not match upload credential", source)
+        self.assertIn("payload.install_id = installId", source)
         self.assertIn("consumeRateLimits", source)
         self.assertIn(".from('raw_upload_queue').insert", source)
         self.assertNotIn(".from('validated_shots').insert", source)
@@ -66,6 +68,12 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("requireNumberRange(payload, 'target_yield_g', 5, 100", source)
         self.assertIn("optionalNumberRange(payload, 'shot_time_s', 5, 90", source)
         self.assertIn("requireNumberRange(payload, 'target_ratio', 1.2, 3.5", source)
+        self.assertIn("optionalEnum(payload, 'shot_type', ['espresso', 'utility_flush', 'cleaning', 'calibration', 'unknown']", source)
+        self.assertIn("optionalBoolean(payload, 'exclude_from_local_optimization'", source)
+        self.assertIn("optionalNumberRange(payload, 'optimization_weight', 0, 1", source)
+        self.assertIn("profile_resampled must have 5 channels", source)
+        self.assertIn("profile_resampled ${label} channel must have exactly 100 samples", source)
+        self.assertIn("final profile weight does not match beverage_out_g", source)
 
     def test_edge_function_dedups_before_consuming_rate_limit(self) -> None:
         source = FUNCTION.read_text()

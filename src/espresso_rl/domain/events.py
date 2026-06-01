@@ -8,6 +8,7 @@ from .models import (
     RecommendationApplyStatus,
     RecommendationDecision,
     Recipe,
+    ShotType,
     VALID_TASTE_TAGS,
 )
 
@@ -41,12 +42,19 @@ class ShotProfileEvent:
     shot_time_s: float | None = None
     bean_context_id: str | None = None
     recommendation_id: str | None = None
+    shot_type: ShotType = ShotType.ESPRESSO
+    utility: bool = False
+    exclude_from_local_optimization: bool = False
+    local_optimization_enabled: bool = True
+    optimization_weight: float | None = None
+    rating_prompt_allowed: bool = True
 
     event_type: str = field(default="shot_profile", init=False)
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ValueError("unsupported shot profile schema_version")
+        object.__setattr__(self, "shot_type", ShotType(self.shot_type))
         object.__setattr__(self, "time_ms", _numbers(self.time_ms, "time_ms"))
         for name in ("pressure", "target_pressure", "flow", "target_flow", "weight"):
             object.__setattr__(self, name, _numbers(getattr(self, name), name))
@@ -70,6 +78,8 @@ class ShotProfileEvent:
             raise ValueError("beverage_out_g must be positive when present")
         if self.shot_time_s is not None and self.shot_time_s <= 0:
             raise ValueError("shot_time_s must be positive when present")
+        if self.optimization_weight is not None and not 0.0 <= float(self.optimization_weight) <= 1.0:
+            raise ValueError("optimization_weight must be between 0 and 1")
 
 
 @dataclass(frozen=True)

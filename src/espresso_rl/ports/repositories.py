@@ -38,6 +38,14 @@ class RecommendationRepository(Protocol):
     ) -> Recommendation | None:
         ...
 
+    def get_latest(
+        self,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str | None,
+    ) -> Recommendation | None:
+        ...
+
     def supersede_active(
         self,
         install_id: str,

@@ -20,6 +20,7 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     RecommendationStatus,
     ShotRecord,
+    ShotType,
     UploadQueueItem,
     UploadQueueStatus,
 )
@@ -77,6 +78,21 @@ class MemoryRecommendationRepository:
             and row.machine_id == machine_id
             and row.bean_context_id == bean_context_id
             and row.active_at(now)
+        ]
+        return max(rows, key=lambda row: row.created_at) if rows else None
+
+    def get_latest(
+        self,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str | None,
+    ) -> Recommendation | None:
+        rows = [
+            row
+            for row in self.rows.values()
+            if row.install_id == install_id
+            and row.machine_id == machine_id
+            and row.bean_context_id == bean_context_id
         ]
         return max(rows, key=lambda row: row.created_at) if rows else None
 
@@ -159,6 +175,7 @@ def idle_event(timestamp: int, **overrides) -> MachineStateEvent:
         "machine_adapter": "gaggimate",
         "timestamp": timestamp,
         "state": MachineState.IDLE,
+        "bean_context_id": "bean_1",
         "grind_steps": 42,
         "grinder_step_size_um": 12.5,
         "dose_in_g": 18.0,
@@ -187,6 +204,7 @@ def shot_event(shot_id: str, timestamp: int, **overrides) -> ShotProfileEvent:
         "target_yield_g": 36.0,
         "beverage_out_g": 36.0,
         "shot_time_s": 30.0,
+        "bean_context_id": "bean_1",
     }
     base.update(overrides)
     return ShotProfileEvent(**base)
@@ -205,6 +223,52 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertLessEqual(abs(result.recommendation.grind_delta_steps), 2)
         self.assertLessEqual(abs(result.recommendation.target_yield_g - 36.0), 4.0)
         self.assertLess(shots.get("shot_1").reward_confidence, 1.0)  # type: ignore[union-attr]
+
+    def test_utility_flush_does_not_consume_or_train_active_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        active = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        result = service.ingest_shot_profile(
+            shot_event(
+                "flush_1",
+                2,
+                recommendation_id=active.recommendation_id,
+                shot_time_s=5.0,
+                beverage_out_g=1.0,
+                weight=[0.0, 0.5, 1.0],
+            )
+        )
+
+        self.assertIsNone(result.recommendation)
+        self.assertEqual(result.shot.shot_type, ShotType.UTILITY_FLUSH)
+        self.assertTrue(result.shot.exclude_from_local_optimization)
+        self.assertEqual(result.shot.optimization_weight, 0.0)
+        self.assertFalse(result.shot.rating_prompt_allowed)
+        self.assertEqual(result.shot.recommendation_attribution_weight, 0.0)
+        self.assertEqual(recs.get(active.recommendation_id).status, RecommendationStatus.PENDING)  # type: ignore[union-attr]
+
+    def test_local_optimization_disabled_stores_shot_without_new_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        result = service.ingest_shot_profile(
+            shot_event(
+                "shot_1",
+                1,
+                local_optimization_enabled=False,
+                exclude_from_local_optimization=True,
+            )
+        )
+
+        self.assertIsNone(result.recommendation)
+        self.assertEqual(result.shot.shot_type, ShotType.ESPRESSO)
+        self.assertTrue(result.shot.exclude_from_local_optimization)
+        self.assertEqual(result.shot.optimization_weight, 0.0)
+        self.assertTrue(result.shot.rating_prompt_allowed)
+        self.assertEqual(recs.rows, {})
 
     def test_decision_and_actual_shot_data_drive_follow_through(self) -> None:
         shots = MemoryShotRepository()
@@ -263,6 +327,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 machine_adapter="gaggimate",
                 timestamp=2,
                 state=MachineState.IDLE,
+                bean_context_id="bean_1",
                 grind_steps=42,
                 grinder_step_size_um=12.5,
                 dose_in_g=18.0,
@@ -288,6 +353,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 machine_adapter="gaggimate",
                 timestamp=2,
                 state=MachineState.IDLE,
+                bean_context_id="bean_1",
                 grind_steps=old.next_grind_steps + 10,
                 grinder_step_size_um=12.5,
                 dose_in_g=18.0,
@@ -319,6 +385,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 machine_adapter="gaggimate",
                 timestamp=3,
                 state=MachineState.IDLE,
+                bean_context_id="bean_1",
                 grind_steps=rec.next_grind_steps,
                 grinder_step_size_um=12.5,
                 dose_in_g=rec.next_dose_g,
@@ -376,6 +443,7 @@ class ApplicationServiceTests(unittest.TestCase):
                     machine_adapter="gaggimate",
                     timestamp=shown_count + 1,
                     state=MachineState.IDLE,
+                    bean_context_id="bean_1",
                     grind_steps=42,
                     grinder_step_size_um=12.5,
                     dose_in_g=18.0,

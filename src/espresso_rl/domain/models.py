@@ -65,6 +65,14 @@ class MachineState(str, Enum):
     UNKNOWN = "unknown"
 
 
+class ShotType(str, Enum):
+    ESPRESSO = "espresso"
+    UTILITY_FLUSH = "utility_flush"
+    CLEANING = "cleaning"
+    CALIBRATION = "calibration"
+    UNKNOWN = "unknown"
+
+
 class UploadQueueStatus(str, Enum):
     PENDING = "pending"
     UPLOADING = "uploading"
@@ -275,6 +283,16 @@ class ShotRecord:
     profile_mse: float | None = None
     reward: float | None = None
     reward_confidence: float = 0.0
+    shot_type: ShotType = ShotType.ESPRESSO
+    exclude_from_local_optimization: bool = False
+    optimization_weight: float = 1.0
+    rating_prompt_allowed: bool = True
+    grind_followed: bool | None = None
+    dose_followed: bool | None = None
+    yield_followed: bool | None = None
+    grind_recommendation_trust: float = 0.0
+    dose_recommendation_trust: float = 0.0
+    yield_recommendation_trust: float = 0.0
     created_at: int = field(default_factory=now_ts)
     updated_at: int = field(default_factory=now_ts)
 
@@ -294,8 +312,12 @@ class ShotRecord:
         self.profile = np.asarray(self.profile, dtype=PROFILE_DTYPE)
         if self.profile.shape != PROFILE_SHAPE:
             raise ValueError(f"profile must have shape {PROFILE_SHAPE}")
+        self.shot_type = ShotType(self.shot_type)
         self.recommendation_decision = RecommendationDecision(self.recommendation_decision)
         self.recommendation_followed = FollowThroughState(self.recommendation_followed)
+        self.optimization_weight = float(self.optimization_weight)
+        if not 0.0 <= self.optimization_weight <= 1.0:
+            raise ValueError("optimization_weight must be between 0 and 1")
         if self.grinder_step_size_um <= 0:
             raise ValueError("grinder_step_size_um must be positive")
         if self.dose_in_g <= 0:
@@ -315,6 +337,18 @@ class ShotRecord:
             raise ValueError(f"invalid taste tags: {sorted(invalid_tags)}")
         if self.human_rating is not None and not 1 <= self.human_rating <= 5:
             raise ValueError("human_rating must be 1..5")
+        if self.shot_type != ShotType.ESPRESSO or self.exclude_from_local_optimization:
+            self.optimization_weight = 0.0
+            self.recommendation_attribution_weight = 0.0
+        for field_name in (
+            "grind_recommendation_trust",
+            "dose_recommendation_trust",
+            "yield_recommendation_trust",
+        ):
+            value = float(getattr(self, field_name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be between 0 and 1")
+            setattr(self, field_name, value)
 
     @staticmethod
     def new_id() -> str:

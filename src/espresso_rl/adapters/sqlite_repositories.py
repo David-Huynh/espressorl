@@ -16,6 +16,7 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     RecommendationStatus,
     ShotRecord,
+    ShotType,
     UploadQueueItem,
     UploadQueueStatus,
 )
@@ -66,6 +67,16 @@ class SQLiteStore:
                 profile_mse REAL,
                 reward REAL,
                 reward_confidence REAL NOT NULL,
+                shot_type TEXT NOT NULL DEFAULT 'espresso',
+                exclude_from_local_optimization INTEGER NOT NULL DEFAULT 0,
+                optimization_weight REAL NOT NULL DEFAULT 1.0,
+                rating_prompt_allowed INTEGER NOT NULL DEFAULT 1,
+                grind_followed INTEGER,
+                dose_followed INTEGER,
+                yield_followed INTEGER,
+                grind_recommendation_trust REAL NOT NULL DEFAULT 0.0,
+                dose_recommendation_trust REAL NOT NULL DEFAULT 0.0,
+                yield_recommendation_trust REAL NOT NULL DEFAULT 0.0,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -131,6 +142,16 @@ class SQLiteStore:
         self._ensure_column("recommendations", "applied_fields_json", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column("recommendations", "manual_fields_json", "TEXT NOT NULL DEFAULT '[]'")
         self._ensure_column("recommendations", "apply_error", "TEXT")
+        self._ensure_column("shots", "shot_type", "TEXT NOT NULL DEFAULT 'espresso'")
+        self._ensure_column("shots", "exclude_from_local_optimization", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("shots", "optimization_weight", "REAL NOT NULL DEFAULT 1.0")
+        self._ensure_column("shots", "rating_prompt_allowed", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("shots", "grind_followed", "INTEGER")
+        self._ensure_column("shots", "dose_followed", "INTEGER")
+        self._ensure_column("shots", "yield_followed", "INTEGER")
+        self._ensure_column("shots", "grind_recommendation_trust", "REAL NOT NULL DEFAULT 0.0")
+        self._ensure_column("shots", "dose_recommendation_trust", "REAL NOT NULL DEFAULT 0.0")
+        self._ensure_column("shots", "yield_recommendation_trust", "REAL NOT NULL DEFAULT 0.0")
         self.conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_upload_queue_record
@@ -165,6 +186,10 @@ class SQLiteShotRepository:
                 recommendation_decision, recommendation_followed,
                 recommendation_attribution_weight, human_rating, taste_tags_json,
                 profile_score, profile_mse, reward, reward_confidence,
+                shot_type, exclude_from_local_optimization, optimization_weight,
+                rating_prompt_allowed, grind_followed, dose_followed,
+                yield_followed, grind_recommendation_trust,
+                dose_recommendation_trust, yield_recommendation_trust,
                 created_at, updated_at
             ) VALUES (
                 :shot_id, :timestamp, :install_id, :machine_id, :machine_adapter,
@@ -178,6 +203,10 @@ class SQLiteShotRepository:
                 :recommendation_decision, :recommendation_followed,
                 :recommendation_attribution_weight, :human_rating, :taste_tags_json,
                 :profile_score, :profile_mse, :reward, :reward_confidence,
+                :shot_type, :exclude_from_local_optimization, :optimization_weight,
+                :rating_prompt_allowed, :grind_followed, :dose_followed,
+                :yield_followed, :grind_recommendation_trust,
+                :dose_recommendation_trust, :yield_recommendation_trust,
                 :created_at, :updated_at
             )
             """,
@@ -254,6 +283,30 @@ class SQLiteRecommendationRepository:
         row = self._store.conn.execute(
             "SELECT * FROM recommendations WHERE recommendation_id=?",
             (recommendation_id,),
+        ).fetchone()
+        return _row_to_recommendation(row) if row else None
+
+    def get_latest(
+        self,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str | None,
+    ) -> Recommendation | None:
+        params: tuple
+        if bean_context_id is None:
+            bean_clause = "bean_context_id IS NULL"
+            params = (install_id, machine_id)
+        else:
+            bean_clause = "bean_context_id=?"
+            params = (install_id, machine_id, bean_context_id)
+        row = self._store.conn.execute(
+            f"""
+            SELECT * FROM recommendations
+            WHERE install_id=? AND machine_id=? AND {bean_clause}
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            params,
         ).fetchone()
         return _row_to_recommendation(row) if row else None
 
@@ -461,6 +514,16 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "profile_mse": shot.profile_mse,
         "reward": shot.reward,
         "reward_confidence": shot.reward_confidence,
+        "shot_type": shot.shot_type.value,
+        "exclude_from_local_optimization": bool(shot.exclude_from_local_optimization),
+        "optimization_weight": shot.optimization_weight,
+        "rating_prompt_allowed": bool(shot.rating_prompt_allowed),
+        "grind_followed": _optional_bool_to_int(shot.grind_followed),
+        "dose_followed": _optional_bool_to_int(shot.dose_followed),
+        "yield_followed": _optional_bool_to_int(shot.yield_followed),
+        "grind_recommendation_trust": shot.grind_recommendation_trust,
+        "dose_recommendation_trust": shot.dose_recommendation_trust,
+        "yield_recommendation_trust": shot.yield_recommendation_trust,
         "created_at": shot.created_at,
         "updated_at": shot.updated_at,
     }
@@ -503,9 +566,31 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         profile_mse=row["profile_mse"],
         reward=row["reward"],
         reward_confidence=row["reward_confidence"],
+        shot_type=ShotType(row["shot_type"]),
+        exclude_from_local_optimization=bool(row["exclude_from_local_optimization"]),
+        optimization_weight=row["optimization_weight"],
+        rating_prompt_allowed=bool(row["rating_prompt_allowed"]),
+        grind_followed=_optional_int_to_bool(row["grind_followed"]),
+        dose_followed=_optional_int_to_bool(row["dose_followed"]),
+        yield_followed=_optional_int_to_bool(row["yield_followed"]),
+        grind_recommendation_trust=row["grind_recommendation_trust"],
+        dose_recommendation_trust=row["dose_recommendation_trust"],
+        yield_recommendation_trust=row["yield_recommendation_trust"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _optional_bool_to_int(value: bool | None) -> int | None:
+    if value is None:
+        return None
+    return 1 if value else 0
+
+
+def _optional_int_to_bool(value: int | None) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
 
 
 def _recommendation_to_row(recommendation: Recommendation) -> dict:
