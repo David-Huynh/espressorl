@@ -12,7 +12,7 @@ from espresso_rl.domain.models import (
     ShotType,
     new_id,
 )
-from espresso_rl.domain.optimization import OptimizationContext
+from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
 from espresso_rl.domain.safety import clamp_candidate_recipe, validate_recommendation
 
 
@@ -28,6 +28,7 @@ class ConservativeBOOptimizer:
 
     def recommend(self, context: OptimizationContext) -> Recommendation:
         shots = self._optimizer_shots(list(context.shots))
+        prior_points = self._usable_prior_points(context, len(shots))
         current = context.current_recipe
 
         if not shots:
@@ -38,9 +39,12 @@ class ConservativeBOOptimizer:
             source_shot_id = None
         else:
             radius_steps, radius_yield_g, dose_radius_g, mode = self._trust_region(shots)
+            if prior_points and any(point.source != "local_history" for point in prior_points) and len(shots) <= 4:
+                mode = RecommendationMode.WARM_STARTED_BO
             center = self._center_recipe(shots)
             recipe = self._choose_candidate(
                 shots=shots,
+                prior_points=prior_points,
                 context=context,
                 center=center,
                 radius_steps=radius_steps,
@@ -48,7 +52,11 @@ class ConservativeBOOptimizer:
                 dose_radius_g=dose_radius_g,
             )
             reason = self._reason(shots, recipe.grind_steps - current.grind_steps, recipe.target_yield_g - current.target_yield_g)
+            if mode == RecommendationMode.WARM_STARTED_BO:
+                reason = "Weak warm-start prior plus local shot data; staying inside the trust region."
             confidence = self._confidence(shots)
+            if prior_points and mode == RecommendationMode.WARM_STARTED_BO:
+                confidence = min(0.65, confidence + 0.05)
             source_shot_id = shots[-1].shot_id
 
         recommendation = Recommendation(
@@ -113,6 +121,7 @@ class ConservativeBOOptimizer:
     def _choose_candidate(
         self,
         shots: list[ShotRecord],
+        prior_points: list[PriorPoint],
         context: OptimizationContext,
         center: ShotRecord,
         radius_steps: int,
@@ -120,7 +129,7 @@ class ConservativeBOOptimizer:
         dose_radius_g: float,
     ):
         current = context.current_recipe
-        if len(shots) == 1:
+        if len(shots) == 1 and not prior_points:
             grind_delta, yield_delta = self._single_point_probe(shots[0])
             return clamp_candidate_recipe(
                 current=current,
@@ -151,6 +160,7 @@ class ConservativeBOOptimizer:
                     candidate_score = self._candidate_score(
                         candidate,
                         shots,
+                        prior_points,
                         context,
                         radius_steps,
                         radius_yield_g,
@@ -192,6 +202,7 @@ class ConservativeBOOptimizer:
         self,
         candidate,
         shots: list[ShotRecord],
+        prior_points: list[PriorPoint],
         context: OptimizationContext,
         radius_steps: int,
         radius_yield_g: float,
@@ -210,6 +221,17 @@ class ConservativeBOOptimizer:
             weighted_reward += weight * (shot.reward if shot.reward is not None else (shot.profile_score or 0.0))
             weight_sum += weight
         predicted_reward = weighted_reward / weight_sum if weight_sum else 0.0
+        predicted_reward = self._blend_prior_reward(
+            candidate=candidate,
+            local_predicted_reward=predicted_reward,
+            local_weight_sum=weight_sum,
+            prior_points=prior_points,
+            context=context,
+            local_shot_count=len(shots),
+            radius_steps=radius_steps,
+            radius_yield_g=radius_yield_g,
+            dose_radius_g=dose_radius_g,
+        )
 
         distance_from_current = abs(candidate.grind_steps - context.current_recipe.grind_steps) / max(radius_steps, 1)
         distance_from_current += abs(candidate.target_yield_g - context.current_recipe.target_yield_g) / max(radius_yield_g, 1.0)
@@ -219,6 +241,77 @@ class ConservativeBOOptimizer:
         distance_penalty = 0.04 * distance_from_current
         oscillation_penalty = self._oscillation_penalty(candidate, context)
         return predicted_reward + exploration_bonus - distance_penalty - oscillation_penalty
+
+    def _blend_prior_reward(
+        self,
+        candidate,
+        local_predicted_reward: float,
+        local_weight_sum: float,
+        prior_points: list[PriorPoint],
+        context: OptimizationContext,
+        local_shot_count: int,
+        radius_steps: int,
+        radius_yield_g: float,
+        dose_radius_g: float,
+    ) -> float:
+        if not prior_points:
+            return local_predicted_reward
+        prior_decay = max(0.0, (5 - local_shot_count) / 5.0)
+        if prior_decay <= 0:
+            return local_predicted_reward
+
+        prior_weighted_reward = 0.0
+        prior_weight_sum = 0.0
+        for point in prior_points:
+            prior_grind_steps = (
+                context.current_recipe.grind_steps
+                + point.grind_delta_um / context.current_recipe.grinder_step_size_um
+            )
+            grind_d = abs(candidate.grind_steps - prior_grind_steps) / max(radius_steps, 1)
+            dose_d = abs(candidate.dose_g - point.dose_g) / max(dose_radius_g, 0.5)
+            yield_d = abs(candidate.target_yield_g - point.target_yield_g) / max(radius_yield_g, 1.0)
+            distance = math.sqrt(grind_d * grind_d + dose_d * dose_d + yield_d * yield_d)
+            source_scale = 0.6 if point.source == "local_history" else 0.35
+            weight = (
+                min(point.confidence, 0.8)
+                * prior_decay
+                * source_scale
+                / (point.observation_noise + 0.25 + distance)
+            )
+            prior_weighted_reward += weight * point.predicted_reward
+            prior_weight_sum += weight
+
+        if prior_weight_sum <= 0:
+            return local_predicted_reward
+
+        combined_weight = local_weight_sum + prior_weight_sum
+        if combined_weight <= 0:
+            return prior_weighted_reward / prior_weight_sum
+        return (local_predicted_reward * local_weight_sum + prior_weighted_reward) / combined_weight
+
+    def _usable_prior_points(
+        self,
+        context: OptimizationContext,
+        local_shot_count: int,
+    ) -> list[PriorPoint]:
+        if local_shot_count <= 0:
+            return []
+        if local_shot_count >= 5:
+            return []
+        points: list[PriorPoint] = []
+        for point in context.prior_points:
+            if point.confidence <= 0:
+                continue
+            if point.observation_noise <= 0:
+                continue
+            if not context.safety_bounds.dose_min_g <= point.dose_g <= context.safety_bounds.dose_max_g:
+                continue
+            if not context.safety_bounds.target_yield_min_g <= point.target_yield_g <= context.safety_bounds.target_yield_max_g:
+                continue
+            if not context.safety_bounds.target_ratio_min <= point.target_ratio <= context.safety_bounds.target_ratio_max:
+                continue
+            points.append(point)
+        return points[:10]
 
     def _distance(
         self,

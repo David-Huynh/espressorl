@@ -628,6 +628,19 @@ class PostgresCommunityWarehouse:
         )
         self._store.conn.commit()
 
+    def list_community_priors(self, context_key: str, limit: int = 10) -> list[CommunityPrior]:
+        rows = self._store.conn.execute(
+            """
+            SELECT context_key, prior_json, confidence
+            FROM community_priors
+            WHERE context_key=%s
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (context_key, limit),
+        ).fetchall()
+        return [_row_to_community_prior(row) for row in rows]
+
 
 def _upsert(conn, table: str, key: str, row: dict[str, Any]) -> None:
     columns = list(row)
@@ -675,4 +688,15 @@ def _row_to_training_row(row: dict[str, Any]) -> CommunityTrainingRow:
         payload_json=payload_json,
         trust_weight=float(row["trust_weight"]),
         payload_hash=row.get("payload_hash"),
+    )
+
+
+def _row_to_community_prior(row: dict[str, Any]) -> CommunityPrior:
+    prior_json = row["prior_json"]
+    if isinstance(prior_json, str):
+        prior_json = json.loads(prior_json)
+    return CommunityPrior(
+        context_key=row["context_key"],
+        prior_json=prior_json,
+        confidence=float(row["confidence"]),
     )

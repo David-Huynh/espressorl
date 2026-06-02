@@ -37,6 +37,12 @@ from espresso_rl.application.community_credentials import CommunityCredentialSer
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.community_priors import CommunityPriorGenerationService
 from espresso_rl.application.community_validation import CommunityValidationService
+from espresso_rl.application.prior_providers import (
+    CommunityPriorProvider,
+    CompositePriorProvider,
+    LocalHistoryPriorProvider,
+    RuleBasedPriorProvider,
+)
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
@@ -78,6 +84,7 @@ def main() -> None:
         recommendations=recommendation_repo,
         optimizer=ConservativeBOOptimizer(),
         upload_queue=upload_queue_for_service(config, upload_queue_repo),
+        prior_provider=open_prior_provider(config),
         safety_bounds=SafetyBounds(),
         clock=config.now,
     )
@@ -650,6 +657,17 @@ def upload_queue_for_service(
     if not config.should_enqueue_community_uploads():
         return None
     return upload_queue_repo
+
+
+def open_prior_provider(config: Config) -> CompositePriorProvider:
+    providers = [LocalHistoryPriorProvider(), RuleBasedPriorProvider()]
+    if config.storage_backend == "postgres":
+        providers.append(
+            CommunityPriorProvider(
+                PostgresCommunityWarehouse(PostgresStore(config.postgres_dsn)),
+            )
+        )
+    return CompositePriorProvider(providers)
 
 
 def open_repositories(

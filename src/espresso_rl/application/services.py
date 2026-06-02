@@ -35,7 +35,7 @@ from espresso_rl.application.upload_payloads import (
     make_recommendation_upload_item,
     make_shot_upload_item,
 )
-from espresso_rl.ports.optimizers import Optimizer
+from espresso_rl.ports.optimizers import Optimizer, PriorProvider
 from espresso_rl.ports.repositories import (
     RecommendationRepository,
     ShotRepository,
@@ -87,6 +87,7 @@ class EspressoRLService:
         recommendations: RecommendationRepository,
         optimizer: Optimizer,
         upload_queue: UploadQueueRepository | None = None,
+        prior_provider: PriorProvider | None = None,
         safety_bounds: SafetyBounds | None = None,
         clock: Callable[[], int] = now_ts,
     ) -> None:
@@ -94,6 +95,7 @@ class EspressoRLService:
         self._recommendations = recommendations
         self._optimizer = optimizer
         self._upload_queue = upload_queue
+        self._prior_provider = prior_provider
         self._safety_bounds = safety_bounds or SafetyBounds()
         self._clock = clock
 
@@ -390,6 +392,7 @@ class EspressoRLService:
             bean_context_id=bean_context_id,
             limit=200,
         )
+        machine_adapter = recent[-1].machine_adapter if recent else None
         last_recommendation = self._recommendations.get_current(
             install_id=install_id,
             machine_id=machine_id,
@@ -404,12 +407,27 @@ class EspressoRLService:
             install_id=install_id,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
+            machine_adapter=machine_adapter,
             current_recipe=current_recipe,
             shots=recent,
             safety_bounds=self._safety_bounds,
             now=timestamp,
             last_recommendation=last_recommendation,
         )
+        if self._prior_provider is not None:
+            prior_points = self._prior_provider.get_prior_points(context)
+            context = OptimizationContext(
+                install_id=context.install_id,
+                machine_id=context.machine_id,
+                bean_context_id=context.bean_context_id,
+                machine_adapter=context.machine_adapter,
+                current_recipe=context.current_recipe,
+                shots=context.shots,
+                safety_bounds=context.safety_bounds,
+                now=context.now,
+                last_recommendation=context.last_recommendation,
+                prior_points=tuple(prior_points),
+            )
         recommendation = self._optimizer.recommend(context)
         self._recommendations.supersede_active(
             install_id=install_id,

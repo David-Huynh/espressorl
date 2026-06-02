@@ -78,6 +78,9 @@ class CommunityWarehouseRepository(Protocol):
     def upsert_community_prior(self, prior: CommunityPrior) -> None:
         ...
 
+    def list_community_priors(self, context_key: str, limit: int = 10) -> list[CommunityPrior]:
+        ...
+
 
 class CommunityCredentialRegistrar(Protocol):
     def register_install(self) -> CommunityUploadCredentials:

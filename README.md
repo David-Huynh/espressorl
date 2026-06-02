@@ -268,6 +268,17 @@ valuable when they span many bean contexts, recipe ranges, and profile shapes;
 repetitive data from one narrow context remains stored for diagnostics and
 experiments, but does not dominate released public priors.
 
+## Warm-Started BO Priors
+
+Runtime recommendation generation can consume canonical `PriorPoint` values
+from local history, lightweight rule priors, and released community priors.
+Community prior JSON is treated as hostile at read time: the provider requires
+the expected context key and zero-trust metadata, revalidates numeric fields,
+caps confidence, enforces minimum observation noise, and emits only weak
+canonical prior points. The optimizer uses priors only while local data is
+sparse, keeps the first shot as `zero_observe`, applies normal trust-region and
+safety bounds, and stops using external priors once enough local shots exist.
+
 Run local verification with:
 
 ```bash
