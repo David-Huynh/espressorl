@@ -13,7 +13,7 @@ from espresso_rl.adapters.supabase_community_queue import (
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityRawUpload
-from espresso_rl.main import maybe_start_admin_collector_worker
+from espresso_rl.main import maybe_start_admin_collector_worker, maybe_start_admin_dashboard
 
 
 HASH = "a" * 64
@@ -98,6 +98,36 @@ class AdminCollectorTests(unittest.TestCase):
         self.assertIn('"status":"mirrored"', calls[1].data.decode("utf-8"))  # type: ignore[union-attr]
         self.assertIn('"mirror_completed_at"', calls[1].data.decode("utf-8"))  # type: ignore[union-attr]
 
+    def test_supabase_queue_purge_calls_retention_rpc(self) -> None:
+        calls: list[request.Request] = []
+
+        def transport(req: request.Request, timeout_s: float) -> HttpResponse:
+            calls.append(req)
+            return HttpResponse(200, "7")
+
+        client = SupabaseCommunityQueueClient(
+            SupabaseCommunityQueueConfig(
+                rest_url="https://example.supabase.co/rest/v1",
+                service_role_key="service-role",
+                admin_id="admin_a",
+            ),
+            transport=transport,
+        )
+
+        purged = client.purge_retained_queue(
+            mirrored_retention_days=14,
+            rejected_retention_days=30,
+            failed_retention_days=90,
+        )
+
+        self.assertEqual(purged, 7)
+        self.assertEqual(calls[0].get_method(), "POST")
+        self.assertTrue(calls[0].full_url.endswith("/rpc/espressorl_purge_raw_upload_queue"))
+        body = calls[0].data.decode("utf-8")  # type: ignore[union-attr]
+        self.assertIn('"p_mirrored_retention_days":14', body)
+        self.assertIn('"p_rejected_retention_days":30', body)
+        self.assertIn('"p_failed_retention_days":90', body)
+
     def test_admin_collector_worker_requires_admin_role_and_supabase_credentials(self) -> None:
         public_config = Config(
             mqtt_host="localhost",
@@ -115,6 +145,24 @@ class AdminCollectorTests(unittest.TestCase):
         )
         self.assertIsNone(maybe_start_admin_collector_worker(admin_config, threading.Event()))
 
+    def test_admin_dashboard_requires_admin_role_postgres_and_token(self) -> None:
+        public_config = Config(
+            mqtt_host="localhost",
+            deployment_role="public",
+            admin_dashboard_enabled=True,
+            admin_dashboard_token="a" * 32,
+        )
+        self.assertIsNone(maybe_start_admin_dashboard(public_config, threading.Event()))
+
+        admin_config = Config(
+            mqtt_host="localhost",
+            deployment_role="admin",
+            admin_dashboard_enabled=True,
+            storage_backend="postgres",
+            postgres_dsn="postgresql://example",
+        )
+        self.assertIsNone(maybe_start_admin_dashboard(admin_config, threading.Event()))
+
 
 class FakeSource:
     def __init__(self, rows: list[CommunityRawUpload]) -> None:
@@ -130,6 +178,15 @@ class FakeSource:
 
     def mark_failed(self, upload: CommunityRawUpload, error_message: str) -> None:
         self.failed.append((upload, error_message))
+
+    def purge_retained_queue(
+        self,
+        *,
+        mirrored_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+        failed_retention_days: int = 90,
+    ) -> int:
+        return 0
 
 
 class FakeWarehouse:

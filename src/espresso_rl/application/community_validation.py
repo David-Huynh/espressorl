@@ -32,7 +32,7 @@ class CommunityValidationService:
     def __init__(self, warehouse: CommunityWarehouseRepository) -> None:
         self._warehouse = warehouse
 
-    def validate_once(self, limit: int = 100) -> CommunityValidationResult:
+    def validate_once(self, limit: int = 100, *, dry_run: bool = False) -> CommunityValidationResult:
         uploads = self._warehouse.list_raw_uploads(status="mirrored", limit=limit)
         validated_shots = 0
         stored_recommendations = 0
@@ -40,24 +40,29 @@ class CommunityValidationService:
         training_rows = 0
 
         for upload in uploads:
-            outcome = self._validate_upload(upload)
+            outcome = self._validate_upload(upload, mutate=not dry_run)
             if outcome.errors:
-                self._reject_upload(upload, outcome.errors)
+                if not dry_run:
+                    self._reject_upload(upload, outcome.errors)
                 rejected += 1
                 continue
 
             if upload.event_type == "shot_record":
-                validation_id = self._store_validated_shot(upload, outcome.payload)
+                validation_id = None
+                if not dry_run:
+                    validation_id = self._store_validated_shot(upload, outcome.payload)
                 if outcome.trust_weight > 0:
-                    self._warehouse.upsert_training_row(
-                        validation_id,
-                        outcome.payload,
-                        outcome.trust_weight,
-                    )
+                    if validation_id is not None:
+                        self._warehouse.upsert_training_row(
+                            validation_id,
+                            outcome.payload,
+                            outcome.trust_weight,
+                        )
                     training_rows += 1
                 validated_shots += 1
             elif upload.event_type == "recommendation_record":
-                self._store_recommendation(upload, outcome.payload)
+                if not dry_run:
+                    self._store_recommendation(upload, outcome.payload)
                 stored_recommendations += 1
 
         return CommunityValidationResult(
@@ -68,7 +73,7 @@ class CommunityValidationService:
             training_rows=training_rows,
         )
 
-    def _validate_upload(self, upload: CommunityRawUpload) -> "_ValidationOutcome":
+    def _validate_upload(self, upload: CommunityRawUpload, *, mutate: bool) -> "_ValidationOutcome":
         errors: list[str] = []
         payload = dict(upload.payload_json)
 
@@ -102,13 +107,14 @@ class CommunityValidationService:
                 abuse_events=stats.abuse_events,
             )
         )
-        self._warehouse.upsert_install_trust_score(
-            InstallTrustScore(
-                install_id=upload.install_id,
-                trust_score=install_trust,
-                reason="validated_upload_history",
+        if mutate:
+            self._warehouse.upsert_install_trust_score(
+                InstallTrustScore(
+                    install_id=upload.install_id,
+                    trust_score=install_trust,
+                    reason="validated_upload_history",
+                )
             )
-        )
         trust_weight = (
             payload_trust_weight(payload, install_trust)
             if upload.event_type == "shot_record"

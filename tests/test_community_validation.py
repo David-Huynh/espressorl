@@ -38,6 +38,34 @@ class CommunityValidationTests(unittest.TestCase):
         self.assertLessEqual(warehouse.validated_shots[0].trust_weight, 0.25)
         self.assertEqual(warehouse.training_rows[0][0], 1)
 
+    def test_dry_run_validation_reports_proposed_changes_without_mutating_state(self) -> None:
+        upload = raw_upload(payload=shot_payload())
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once(limit=10, dry_run=True)
+
+        self.assertEqual(result.processed, 1)
+        self.assertEqual(result.validated_shots, 1)
+        self.assertEqual(result.training_rows, 1)
+        self.assertEqual(result.rejected, 0)
+        self.assertEqual(warehouse.statuses[upload.upload_id], "mirrored")
+        self.assertEqual(warehouse.validated_shots, [])
+        self.assertEqual(warehouse.training_rows, [])
+        self.assertEqual(warehouse.trust_scores, [])
+
+    def test_dry_run_rejection_does_not_mark_raw_row_or_log_abuse(self) -> None:
+        payload = shot_payload()
+        payload["install_id"] = "spoofed_install"
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once(limit=10, dry_run=True)
+
+        self.assertEqual(result.rejected, 1)
+        self.assertEqual(warehouse.statuses[upload.upload_id], "mirrored")
+        self.assertEqual(warehouse.rejections, {})
+        self.assertEqual(warehouse.abuse_events, [])
+
     def test_payload_install_id_mismatch_is_rejected(self) -> None:
         payload = shot_payload()
         payload["install_id"] = "spoofed_install"

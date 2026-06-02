@@ -236,10 +236,19 @@ Admin settings:
 {
   "deployment_role": "admin",
   "admin_collector_enabled": true,
+  "admin_dashboard_enabled": true,
+  "admin_dashboard_port": 8080,
   "supabase_rest_url": "https://PROJECT_REF.supabase.co/rest/v1",
-  "supabase_service_role_key": "SERVICE_ROLE_KEY"
+  "supabase_service_role_key": "SERVICE_ROLE_KEY",
+  "admin_dashboard_token": "AT_LEAST_32_RANDOM_CHARS"
 }
 ```
+
+For Docker/TrueNAS, prefer setting `ESPRESSORL_ADMIN_DASHBOARD_TOKEN` as a
+secret/environment value instead of putting it in a visible app form. The
+dashboard never renders tokens, upload secrets, Supabase service-role keys, raw
+HMAC material, raw request headers, or raw payloads. The browser keeps the
+admin token only in page memory and sends it as a bearer token for API calls.
 
 The admin mirror claims rows with `espressorl_claim_raw_uploads`, which uses a
 short lease and `FOR UPDATE SKIP LOCKED`. Multiple admin mirrors can poll at the
@@ -267,6 +276,21 @@ shots can override the prior quickly. High-volume installs are allowed and
 valuable when they span many bean contexts, recipe ranges, and profile shapes;
 repetitive data from one narrow context remains stored for diagnostics and
 experiments, but does not dominate released public priors.
+
+Manual dashboard actions are locked per job type. If `Run validation now`,
+`Generate priors now`, `Purge queue now`, or another manual action is clicked
+while that same job is already running, the service returns the current status
+instead of starting a second run. Manual actions support `dry_run=true` where
+practical: validation and prior generation report proposed counts without
+mutating trusted training state or released priors; mirror dry-run does not
+claim Supabase rows because claiming takes a remote lease; purge dry-run does
+not call the Supabase purge RPC because that RPC deletes rows. Each manual
+action writes an `admin_action_log` entry containing action type, requester
+label, dry-run flag, status, row counts,
+warning count, and a short sanitized error summary. Rejection summaries exposed
+by the dashboard are category-only, such as `invalid_schema`,
+`invalid_signature`, `rate_limited`, `impossible_flow`, `duplicate_shot_id`, and
+`payload_too_large`.
 
 ## Warm-Started BO Priors
 

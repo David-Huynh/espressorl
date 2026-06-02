@@ -83,6 +83,30 @@ class SupabaseCommunityQueueClient:
             },
         )
 
+    def purge_retained_queue(
+        self,
+        *,
+        mirrored_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+        failed_retention_days: int = 90,
+    ) -> int:
+        result = self._request_json(
+            "POST",
+            self._rpc_url("espressorl_purge_raw_upload_queue"),
+            {
+                "p_mirrored_retention_days": max(1, int(mirrored_retention_days)),
+                "p_rejected_retention_days": max(1, int(rejected_retention_days)),
+                "p_failed_retention_days": max(1, int(failed_retention_days)),
+            },
+        )
+        if isinstance(result, int):
+            return result
+        if isinstance(result, list) and result and isinstance(result[0], int):
+            return result[0]
+        if isinstance(result, dict) and isinstance(result.get("espressorl_purge_raw_upload_queue"), int):
+            return int(result["espressorl_purge_raw_upload_queue"])
+        return 0
+
     def _patch_status(
         self,
         upload: CommunityRawUpload,

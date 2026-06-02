@@ -186,3 +186,20 @@ CREATE TABLE IF NOT EXISTS community_priors (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_community_priors_context_key
     ON community_priors (context_key);
+
+CREATE TABLE IF NOT EXISTS admin_action_log (
+    action_id BIGSERIAL PRIMARY KEY,
+    action_type TEXT NOT NULL,
+    requested_at BIGINT NOT NULL,
+    requested_by TEXT NOT NULL,
+    dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+    status TEXT NOT NULL,
+    rows_seen INTEGER NOT NULL DEFAULT 0,
+    rows_changed INTEGER NOT NULL DEFAULT 0,
+    warnings_count INTEGER NOT NULL DEFAULT 0,
+    error_summary TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_action_log_requested_at
+    ON admin_action_log (requested_at DESC, action_id DESC);

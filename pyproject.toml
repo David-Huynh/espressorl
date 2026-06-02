@@ -16,6 +16,8 @@ dependencies = [
     "botorch>=0.10",
     "gpytorch>=1.11",
     "psycopg[binary]>=3.1",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.scripts]

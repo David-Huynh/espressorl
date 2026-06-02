@@ -73,7 +73,7 @@ class CommunityPriorGenerationService:
         self._min_diverse_buckets_for_single_install = min_diverse_buckets_for_single_install
         self._max_points_per_install_per_bucket = max_points_per_install_per_bucket
 
-    def generate_once(self, limit: int = 5000) -> CommunityPriorGenerationResult:
+    def generate_once(self, limit: int = 5000, *, dry_run: bool = False) -> CommunityPriorGenerationResult:
         rows = self._warehouse.list_training_rows(limit=limit)
         groups: dict[str, list[_PriorCandidate]] = {}
         rejected = 0
@@ -105,7 +105,8 @@ class CommunityPriorGenerationService:
             )
             if prior.confidence <= 0:
                 continue
-            self._warehouse.upsert_community_prior(prior)
+            if not dry_run:
+                self._warehouse.upsert_community_prior(prior)
             priors_written += 1
 
         return CommunityPriorGenerationResult(

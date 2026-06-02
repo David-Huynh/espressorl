@@ -13,14 +13,17 @@ from espresso_rl.adapters.sqlite_repositories import (
     _upload_item_to_row,
 )
 from espresso_rl.domain.community import (
+    AdminActionLogEntry,
     CommunityAbuseEvent,
     CommunityInstallStats,
     CommunityPrior,
     CommunityRawUpload,
     CommunityRecommendationRecord,
+    CommunityRejectionSummary,
     CommunityTrainingRow,
     CommunityValidatedShot,
     InstallTrustScore,
+    community_rejection_categories,
 )
 from espresso_rl.domain.models import Recommendation, ShotRecord, UploadQueueItem, UploadQueueStatus
 
@@ -641,6 +644,72 @@ class PostgresCommunityWarehouse:
         ).fetchall()
         return [_row_to_community_prior(row) for row in rows]
 
+    def raw_upload_counts_by_status(self) -> dict[str, int]:
+        rows = self._store.conn.execute(
+            "SELECT status, COUNT(*) AS count FROM community_raw_uploads GROUP BY status"
+        ).fetchall()
+        return {str(row["status"]): int(row["count"]) for row in rows}
+
+    def validated_shot_count(self) -> int:
+        return _count_table(self._store.conn, "community_validated_shots")
+
+    def training_row_count(self) -> int:
+        return _count_table(self._store.conn, "training_dataset")
+
+    def community_prior_count(self) -> int:
+        return _count_table(self._store.conn, "community_priors")
+
+    def abuse_event_count(self) -> int:
+        return _count_table(self._store.conn, "abuse_events")
+
+    def latest_rejections(self, limit: int = 10) -> list[CommunityRejectionSummary]:
+        rows = self._store.conn.execute(
+            """
+            SELECT install_id, upload_id, event_type, validation_errors, rejected_at
+            FROM community_raw_uploads
+            WHERE status='rejected'
+            ORDER BY rejected_at DESC NULLS LAST, mirrored_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
+        return [_row_to_rejection_summary(row) for row in rows]
+
+    def record_admin_action(self, entry: AdminActionLogEntry) -> None:
+        self._store.conn.execute(
+            """
+            INSERT INTO admin_action_log (
+                action_type, requested_at, requested_by, dry_run, status,
+                rows_seen, rows_changed, warnings_count, error_summary
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                entry.action_type,
+                entry.requested_at,
+                entry.requested_by,
+                entry.dry_run,
+                entry.status,
+                entry.rows_seen,
+                entry.rows_changed,
+                entry.warnings_count,
+                entry.error_summary,
+            ),
+        )
+        self._store.conn.commit()
+
+    def latest_admin_actions(self, limit: int = 10) -> list[AdminActionLogEntry]:
+        rows = self._store.conn.execute(
+            """
+            SELECT action_type, requested_at, requested_by, dry_run, status,
+                   rows_seen, rows_changed, warnings_count, error_summary
+            FROM admin_action_log
+            ORDER BY requested_at DESC, action_id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
+        return [_row_to_admin_action(row) for row in rows]
+
 
 def _upsert(conn, table: str, key: str, row: dict[str, Any]) -> None:
     columns = list(row)
@@ -660,6 +729,18 @@ def _upsert(conn, table: str, key: str, row: dict[str, Any]) -> None:
     except Exception:
         conn.rollback()
         raise
+
+
+def _count_table(conn, table: str) -> int:
+    if table not in {
+        "community_validated_shots",
+        "training_dataset",
+        "community_priors",
+        "abuse_events",
+    }:
+        raise ValueError("unsupported count table")
+    row = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
+    return int(row["count"])
 
 
 def _row_to_community_raw_upload(row: dict[str, Any]) -> CommunityRawUpload:
@@ -699,4 +780,34 @@ def _row_to_community_prior(row: dict[str, Any]) -> CommunityPrior:
         context_key=row["context_key"],
         prior_json=prior_json,
         confidence=float(row["confidence"]),
+    )
+
+
+def _row_to_rejection_summary(row: dict[str, Any]) -> CommunityRejectionSummary:
+    validation_errors = row["validation_errors"]
+    if isinstance(validation_errors, str):
+        validation_errors = json.loads(validation_errors)
+    if not isinstance(validation_errors, list):
+        validation_errors = []
+    rejected_at = row.get("rejected_at")
+    return CommunityRejectionSummary(
+        install_id=row["install_id"],
+        upload_id=row["upload_id"],
+        event_type=row["event_type"],
+        validation_errors=community_rejection_categories(validation_errors[:20]),
+        rejected_at=str(rejected_at) if rejected_at is not None else None,
+    )
+
+
+def _row_to_admin_action(row: dict[str, Any]) -> AdminActionLogEntry:
+    return AdminActionLogEntry(
+        action_type=row["action_type"],
+        requested_at=int(row["requested_at"]),
+        requested_by=row["requested_by"],
+        dry_run=bool(row["dry_run"]),
+        status=row["status"],
+        rows_seen=int(row["rows_seen"]),
+        rows_changed=int(row["rows_changed"]),
+        warnings_count=int(row["warnings_count"]),
+        error_summary=row.get("error_summary"),
     )

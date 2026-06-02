@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import Protocol
-
-from typing import Any
+from typing import Any, Protocol
 
 from espresso_rl.domain.community import (
+    AdminActionLogEntry,
     CommunityAbuseEvent,
     CommunityInstallStats,
     CommunityPrior,
     CommunityRawUpload,
     CommunityRecommendationRecord,
+    CommunityRejectionSummary,
     CommunityTrainingRow,
     CommunityUploadCredentials,
     CommunityValidatedShot,
@@ -25,6 +25,15 @@ class CommunityUploadSource(Protocol):
         ...
 
     def mark_failed(self, upload: CommunityRawUpload, error_message: str) -> None:
+        ...
+
+    def purge_retained_queue(
+        self,
+        *,
+        mirrored_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+        failed_retention_days: int = 90,
+    ) -> int:
         ...
 
 
@@ -79,6 +88,30 @@ class CommunityWarehouseRepository(Protocol):
         ...
 
     def list_community_priors(self, context_key: str, limit: int = 10) -> list[CommunityPrior]:
+        ...
+
+    def raw_upload_counts_by_status(self) -> dict[str, int]:
+        ...
+
+    def validated_shot_count(self) -> int:
+        ...
+
+    def training_row_count(self) -> int:
+        ...
+
+    def community_prior_count(self) -> int:
+        ...
+
+    def abuse_event_count(self) -> int:
+        ...
+
+    def latest_rejections(self, limit: int = 10) -> list[CommunityRejectionSummary]:
+        ...
+
+    def record_admin_action(self, entry: AdminActionLogEntry) -> None:
+        ...
+
+    def latest_admin_actions(self, limit: int = 10) -> list[AdminActionLogEntry]:
         ...
 
 

@@ -33,6 +33,7 @@ from espresso_rl.adapters.supabase_credentials import (
     SupabaseCredentialRegistrar,
     SupabaseCredentialRegistrarConfig,
 )
+from espresso_rl.application.admin_pipeline import AdminPipelineService
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.community_priors import CommunityPriorGenerationService
@@ -91,8 +92,18 @@ def main() -> None:
     upload_maintenance = UploadQueueMaintenanceService(upload_queue_repo, clock=config.now)
 
     stop_event = threading.Event()
+    admin_pipeline = maybe_build_admin_pipeline_service(config)
     upload_thread = maybe_start_upload_worker(config, upload_queue_repo, stop_event)
-    collector_thread = maybe_start_admin_collector_worker(config, stop_event)
+    collector_thread = maybe_start_admin_collector_worker(
+        config,
+        stop_event,
+        admin_pipeline=admin_pipeline,
+    )
+    dashboard_thread = maybe_start_admin_dashboard(
+        config,
+        stop_event,
+        admin_pipeline=admin_pipeline,
+    )
 
     mqtt_client: GaggimateMQTTClient
 
@@ -272,6 +283,8 @@ def main() -> None:
             upload_thread.join(timeout=5)
         if collector_thread is not None:
             collector_thread.join(timeout=5)
+        if dashboard_thread is not None:
+            dashboard_thread.join(timeout=5)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
@@ -583,6 +596,7 @@ def _apply_upload_credentials(
 def maybe_start_admin_collector_worker(
     config: Config,
     stop_event: threading.Event,
+    admin_pipeline: AdminPipelineService | None = None,
 ) -> threading.Thread | None:
     if config.deployment_role != "admin":
         return None
@@ -596,33 +610,34 @@ def maybe_start_admin_collector_worker(
         logger.warning("Admin collector enabled but Supabase REST URL/service-role key is missing.")
         return None
 
-    source = SupabaseCommunityQueueClient(
-        SupabaseCommunityQueueConfig(
-            rest_url=config.supabase_rest_url,
-            service_role_key=config.supabase_service_role_key,
-            admin_id=config.admin_collector_id,
-            claim_lease_seconds=config.admin_collector_lease_seconds,
-        )
-    )
-    warehouse = PostgresCommunityWarehouse(PostgresStore(config.postgres_dsn))
-    mirror = CommunityMirrorService(source=source, warehouse=warehouse)
-    validator = CommunityValidationService(warehouse=warehouse)
-    prior_generator = CommunityPriorGenerationService(warehouse=warehouse)
+    pipeline = admin_pipeline or build_admin_pipeline_service(config)
 
     def loop() -> None:
         logger.info("Admin community mirror/validation worker started")
         while not stop_event.is_set():
             try:
-                result = mirror.mirror_once(limit=config.admin_collector_batch_size)
-                if result.claimed:
+                mirror_action = pipeline.mirror_once(
+                    limit=config.admin_collector_batch_size,
+                    requested_by="admin_collector",
+                )
+                result = mirror_action.mirror
+                if mirror_action.already_running:
+                    logger.info("Admin mirror skipped because the job is already running")
+                elif result is not None and result.claimed:
                     logger.info(
                         "Mirrored community uploads claimed=%d mirrored=%d failed=%d",
                         result.claimed,
                         result.mirrored,
                         result.failed,
                     )
-                validation = validator.validate_once(limit=config.admin_collector_batch_size)
-                if validation.processed:
+                validation_action = pipeline.validate_once(
+                    limit=config.admin_collector_batch_size,
+                    requested_by="admin_collector",
+                )
+                validation = validation_action.validation
+                if validation_action.already_running:
+                    logger.info("Admin validation skipped because the job is already running")
+                elif validation is not None and validation.processed:
                     logger.info(
                         "Validated community uploads processed=%d shots=%d recommendations=%d rejected=%d training_rows=%d",
                         validation.processed,
@@ -631,8 +646,14 @@ def maybe_start_admin_collector_worker(
                         validation.rejected,
                         validation.training_rows,
                     )
-                priors = prior_generator.generate_once(limit=max(config.admin_collector_batch_size * 50, 5000))
-                if priors.priors_written:
+                prior_action = pipeline.generate_priors_once(
+                    limit=max(config.admin_collector_batch_size * 50, 5000),
+                    requested_by="admin_collector",
+                )
+                priors = prior_action.priors
+                if prior_action.already_running:
+                    logger.info("Admin prior generation skipped because the job is already running")
+                elif priors is not None and priors.priors_written:
                     logger.info(
                         "Generated community priors examined=%d eligible=%d rejected=%d contexts=%d written=%d",
                         priors.examined,
@@ -648,6 +669,80 @@ def maybe_start_admin_collector_worker(
     thread = threading.Thread(target=loop, name="espresso-rl-admin-mirror", daemon=True)
     thread.start()
     return thread
+
+
+def maybe_start_admin_dashboard(
+    config: Config,
+    stop_event: threading.Event,
+    admin_pipeline: AdminPipelineService | None = None,
+) -> threading.Thread | None:
+    if config.deployment_role != "admin":
+        return None
+    if not config.admin_dashboard_enabled:
+        logger.info("Admin dashboard disabled.")
+        return None
+    if config.storage_backend != "postgres":
+        logger.warning("Admin dashboard requires Postgres storage.")
+        return None
+    if len(config.admin_dashboard_token) < 32:
+        logger.warning(
+            "Admin dashboard enabled but ESPRESSORL_ADMIN_DASHBOARD_TOKEN/admin_dashboard_token is missing or too short."
+        )
+        return None
+
+    service = admin_pipeline or build_admin_pipeline_service(config)
+    from espresso_rl.adapters.admin_dashboard import start_admin_dashboard
+
+    logger.info(
+        "Starting admin dashboard on %s:%d",
+        config.admin_dashboard_host,
+        config.admin_dashboard_port,
+    )
+    return start_admin_dashboard(
+        service,
+        admin_token=config.admin_dashboard_token,
+        host=config.admin_dashboard_host,
+        port=config.admin_dashboard_port,
+        stop_event=stop_event,
+    )
+
+
+def maybe_build_admin_pipeline_service(config: Config) -> AdminPipelineService | None:
+    if config.deployment_role != "admin":
+        return None
+    if config.storage_backend != "postgres":
+        return None
+    collector_ready = (
+        config.admin_collector_enabled
+        and bool(config.supabase_rest_url)
+        and bool(config.supabase_service_role_key)
+    )
+    dashboard_ready = config.admin_dashboard_enabled and len(config.admin_dashboard_token) >= 32
+    if not collector_ready and not dashboard_ready:
+        return None
+    return build_admin_pipeline_service(config)
+
+
+def build_admin_pipeline_service(config: Config) -> AdminPipelineService:
+    warehouse = PostgresCommunityWarehouse(PostgresStore(config.postgres_dsn))
+    mirror = None
+    if config.supabase_rest_url and config.supabase_service_role_key:
+        source = SupabaseCommunityQueueClient(
+            SupabaseCommunityQueueConfig(
+                rest_url=config.supabase_rest_url,
+                service_role_key=config.supabase_service_role_key,
+                admin_id=config.admin_collector_id,
+                claim_lease_seconds=config.admin_collector_lease_seconds,
+            )
+        )
+        mirror = CommunityMirrorService(source=source, warehouse=warehouse)
+    return AdminPipelineService(
+        warehouse=warehouse,
+        mirror=mirror,
+        validator=CommunityValidationService(warehouse=warehouse),
+        prior_generator=CommunityPriorGenerationService(warehouse=warehouse),
+        clock=config.now,
+    )
 
 
 def upload_queue_for_service(

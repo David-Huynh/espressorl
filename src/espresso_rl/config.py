@@ -50,6 +50,10 @@ class Config:
     admin_collector_lease_seconds: int = 300
     admin_collector_interval_s: float = 30.0
     admin_collector_batch_size: int = 100
+    admin_dashboard_enabled: bool = False
+    admin_dashboard_host: str = "0.0.0.0"
+    admin_dashboard_port: int = 8080
+    admin_dashboard_token: str = ""
     data_dir: Path = field(default_factory=lambda: _DATA_DIR)
 
     def now(self) -> int:
@@ -137,6 +141,24 @@ class Config:
             admin_collector_lease_seconds=int(opts.get("admin_collector_lease_seconds", 300)),
             admin_collector_interval_s=float(opts.get("admin_collector_interval_s", 30.0)),
             admin_collector_batch_size=int(opts.get("admin_collector_batch_size", 100)),
+            admin_dashboard_enabled=bool(
+                opts.get(
+                    "admin_dashboard_enabled",
+                    os.getenv("ESPRESSORL_ADMIN_DASHBOARD_ENABLED", "").lower()
+                    in {"1", "true", "yes"},
+                )
+            ),
+            admin_dashboard_host=opts.get(
+                "admin_dashboard_host",
+                os.getenv("ESPRESSORL_ADMIN_DASHBOARD_HOST", "0.0.0.0"),
+            ),
+            admin_dashboard_port=int(
+                opts.get("admin_dashboard_port", os.getenv("ESPRESSORL_ADMIN_DASHBOARD_PORT", 8080))
+            ),
+            admin_dashboard_token=opts.get(
+                "admin_dashboard_token",
+                os.getenv("ESPRESSORL_ADMIN_DASHBOARD_TOKEN", ""),
+            ),
             data_dir=data_dir,
         )
 

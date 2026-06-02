@@ -12,6 +12,11 @@ class CommunityMirrorResult:
     failed: int
 
 
+@dataclass(frozen=True)
+class CommunityQueuePurgeResult:
+    purged: int
+
+
 class CommunityMirrorService:
     def __init__(
         self,
@@ -37,4 +42,19 @@ class CommunityMirrorService:
             claimed=len(uploads),
             mirrored=mirrored,
             failed=failed,
+        )
+
+    def purge_retained_queue(
+        self,
+        *,
+        mirrored_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+        failed_retention_days: int = 90,
+    ) -> CommunityQueuePurgeResult:
+        return CommunityQueuePurgeResult(
+            purged=self._source.purge_retained_queue(
+                mirrored_retention_days=mirrored_retention_days,
+                rejected_retention_days=rejected_retention_days,
+                failed_retention_days=failed_retention_days,
+            )
         )

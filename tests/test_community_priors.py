@@ -77,6 +77,27 @@ class CommunityPriorTests(unittest.TestCase):
         self.assertEqual(prior.prior_json["zero_trust"]["per_install_contribution_bucket_cap"], 2)
         self.assertIn("diminishing-install-weight", prior.prior_json["aggregation"]["method"])
 
+    def test_dry_run_reports_proposed_priors_without_writing(self) -> None:
+        rows = [
+            training_row(1, install_id="install_a", rating=5, reward=1.0),
+            training_row(2, install_id="install_a", rating=5, reward=0.9),
+            training_row(3, install_id="install_b", rating=4, reward=0.75),
+            training_row(4, install_id="install_b", rating=4, reward=0.7),
+            training_row(5, install_id="install_c", rating=4, reward=0.8),
+            training_row(6, install_id="install_c", rating=3, reward=0.5),
+        ]
+        warehouse = FakeWarehouse(rows)
+
+        result = CommunityPriorGenerationService(
+            warehouse,
+            min_independent_installs=3,
+            min_context_points=6,
+            max_points_per_install_per_context=2,
+        ).generate_once(dry_run=True)
+
+        self.assertEqual(result.priors_written, 1)
+        self.assertEqual(warehouse.priors, [])
+
     def test_revalidates_training_rows_and_rejects_spoofed_or_impossible_payloads(self) -> None:
         bad_install = training_row(1, install_id="install_a")
         bad_install.payload_json["install_id"] = "spoofed_install"
