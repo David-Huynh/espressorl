@@ -183,3 +183,6 @@ CREATE TABLE IF NOT EXISTS community_priors (
     confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_community_priors_context_key
+    ON community_priors (context_key);

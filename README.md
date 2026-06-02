@@ -256,6 +256,18 @@ with a capped low trust weight and are copied into `training_dataset` only when
 their trust weight is non-zero. Recommendation uploads are stored for audit and
 follow-through analysis, but they are not training rows by themselves.
 
+The admin worker can also generate released community priors into
+`community_priors`. These are weak prior summaries, not trusted commands. The
+generator rereads and revalidates each training row, requires multiple
+independent installs or sufficient within-install diversity for a context, caps
+repeated per-install contribution inside narrow context/action/profile buckets,
+applies diminishing per-install influence within each context key, uses robust
+median/trimmed aggregation, and caps confidence at a low value so real local
+shots can override the prior quickly. High-volume installs are allowed and
+valuable when they span many bean contexts, recipe ranges, and profile shapes;
+repetitive data from one narrow context remains stored for diagnostics and
+experiments, but does not dominate released public priors.
+
 Run local verification with:
 
 ```bash

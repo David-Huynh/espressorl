@@ -7,8 +7,10 @@ from typing import Any
 from espresso_rl.domain.community import (
     CommunityAbuseEvent,
     CommunityInstallStats,
+    CommunityPrior,
     CommunityRawUpload,
     CommunityRecommendationRecord,
+    CommunityTrainingRow,
     CommunityUploadCredentials,
     CommunityValidatedShot,
     InstallTrustScore,
@@ -68,6 +70,12 @@ class CommunityWarehouseRepository(Protocol):
         payload_json: dict[str, Any],
         trust_weight: float,
     ) -> None:
+        ...
+
+    def list_training_rows(self, limit: int = 5000) -> list[CommunityTrainingRow]:
+        ...
+
+    def upsert_community_prior(self, prior: CommunityPrior) -> None:
         ...
 
 

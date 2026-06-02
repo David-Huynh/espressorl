@@ -15,8 +15,10 @@ from espresso_rl.adapters.sqlite_repositories import (
 from espresso_rl.domain.community import (
     CommunityAbuseEvent,
     CommunityInstallStats,
+    CommunityPrior,
     CommunityRawUpload,
     CommunityRecommendationRecord,
+    CommunityTrainingRow,
     CommunityValidatedShot,
     InstallTrustScore,
 )
@@ -68,6 +70,12 @@ class PostgresStore:
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_training_dataset_source_validation_id
                 ON training_dataset (source_validation_id)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_community_priors_context_key
+                ON community_priors (context_key)
             """
         )
         self.conn.commit()
@@ -579,6 +587,47 @@ class PostgresCommunityWarehouse:
         )
         self._store.conn.commit()
 
+    def list_training_rows(self, limit: int = 5000) -> list[CommunityTrainingRow]:
+        rows = self._store.conn.execute(
+            """
+            SELECT
+                td.training_row_id,
+                td.source_validation_id,
+                cvs.install_id,
+                td.payload_json,
+                td.trust_weight,
+                cru.payload_hash
+            FROM training_dataset td
+            JOIN community_validated_shots cvs
+                ON cvs.validation_id = td.source_validation_id
+            LEFT JOIN community_raw_uploads cru
+                ON cru.install_id = cvs.install_id AND cru.upload_id = cvs.upload_id
+            WHERE td.trust_weight > 0
+            ORDER BY td.created_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
+        return [_row_to_training_row(row) for row in rows]
+
+    def upsert_community_prior(self, prior: CommunityPrior) -> None:
+        self._store.conn.execute(
+            """
+            INSERT INTO community_priors (context_key, prior_json, confidence, created_at)
+            VALUES (%s, %s::jsonb, %s, now())
+            ON CONFLICT (context_key) DO UPDATE SET
+                prior_json=EXCLUDED.prior_json,
+                confidence=EXCLUDED.confidence,
+                created_at=now()
+            """,
+            (
+                prior.context_key,
+                json.dumps(prior.prior_json, sort_keys=True),
+                prior.confidence,
+            ),
+        )
+        self._store.conn.commit()
+
 
 def _upsert(conn, table: str, key: str, row: dict[str, Any]) -> None:
     columns = list(row)
@@ -612,4 +661,18 @@ def _row_to_community_raw_upload(row: dict[str, Any]) -> CommunityRawUpload:
         event_type=row["event_type"],
         payload_json=payload_json,
         received_at=str(received_at) if received_at is not None else None,
+    )
+
+
+def _row_to_training_row(row: dict[str, Any]) -> CommunityTrainingRow:
+    payload_json = row["payload_json"]
+    if isinstance(payload_json, str):
+        payload_json = json.loads(payload_json)
+    return CommunityTrainingRow(
+        training_row_id=int(row["training_row_id"]),
+        source_validation_id=int(row["source_validation_id"]),
+        install_id=row["install_id"],
+        payload_json=payload_json,
+        trust_weight=float(row["trust_weight"]),
+        payload_hash=row.get("payload_hash"),
     )

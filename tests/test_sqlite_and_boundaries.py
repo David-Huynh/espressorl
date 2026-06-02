@@ -387,6 +387,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("validation_summary JSONB", schema)
         self.assertIn("validation_errors JSONB", schema)
         self.assertIn("UNIQUE (source_validation_id)", schema)
+        self.assertIn("idx_community_priors_context_key", schema)
 
     def test_core_layers_do_not_import_adapters_or_infrastructure(self) -> None:
         root = Path(__file__).resolve().parents[1] / "src" / "espresso_rl"

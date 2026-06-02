@@ -35,6 +35,7 @@ from espresso_rl.adapters.supabase_credentials import (
 )
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
+from espresso_rl.application.community_priors import CommunityPriorGenerationService
 from espresso_rl.application.community_validation import CommunityValidationService
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
@@ -599,6 +600,7 @@ def maybe_start_admin_collector_worker(
     warehouse = PostgresCommunityWarehouse(PostgresStore(config.postgres_dsn))
     mirror = CommunityMirrorService(source=source, warehouse=warehouse)
     validator = CommunityValidationService(warehouse=warehouse)
+    prior_generator = CommunityPriorGenerationService(warehouse=warehouse)
 
     def loop() -> None:
         logger.info("Admin community mirror/validation worker started")
@@ -621,6 +623,16 @@ def maybe_start_admin_collector_worker(
                         validation.stored_recommendations,
                         validation.rejected,
                         validation.training_rows,
+                    )
+                priors = prior_generator.generate_once(limit=max(config.admin_collector_batch_size * 50, 5000))
+                if priors.priors_written:
+                    logger.info(
+                        "Generated community priors examined=%d eligible=%d rejected=%d contexts=%d written=%d",
+                        priors.examined,
+                        priors.eligible,
+                        priors.rejected,
+                        priors.contexts_seen,
+                        priors.priors_written,
                     )
             except Exception:
                 logger.exception("Admin community mirror/validation cycle failed")
