@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import threading
+import tempfile
 import unittest
 from unittest import mock
+from pathlib import Path
 from urllib import request
 
+import espresso_rl.config as config_module
 import espresso_rl.main as main_module
 from espresso_rl.adapters.supabase_community_queue import (
     HttpResponse,
@@ -177,6 +180,43 @@ class AdminCollectorTests(unittest.TestCase):
 
         run_admin.assert_called_once_with(admin_config)
         resolve_credentials.assert_not_called()
+
+    def test_blank_option_values_fall_back_to_secret_env_vars(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            options_path = Path(temp_dir) / "options.json"
+            options_path.write_text(
+                json.dumps(
+                    {
+                        "mqtt_host": "unused",
+                        "deployment_role": "admin",
+                        "storage_backend": "postgres",
+                        "postgres_dsn": "",
+                        "supabase_rest_url": "",
+                        "supabase_service_role_key": "",
+                        "admin_dashboard_token": "",
+                    }
+                )
+            )
+            with (
+                mock.patch.object(config_module, "_OPTIONS_PATH", options_path),
+                mock.patch.object(config_module, "_DATA_DIR", Path(temp_dir) / "data"),
+                mock.patch.dict(
+                    "os.environ",
+                    {
+                        "ESPRESSORL_POSTGRES_DSN": "postgresql://env",
+                        "ESPRESSORL_SUPABASE_REST_URL": "https://example.supabase.co/rest/v1",
+                        "ESPRESSORL_SUPABASE_SERVICE_ROLE_KEY": "service-role-env",
+                        "ESPRESSORL_ADMIN_DASHBOARD_TOKEN": "a" * 32,
+                    },
+                    clear=False,
+                ),
+            ):
+                config = Config.load()
+
+        self.assertEqual(config.postgres_dsn, "postgresql://env")
+        self.assertEqual(config.supabase_rest_url, "https://example.supabase.co/rest/v1")
+        self.assertEqual(config.supabase_service_role_key, "service-role-env")
+        self.assertEqual(config.admin_dashboard_token, "a" * 32)
 
 
 class FakeSource:

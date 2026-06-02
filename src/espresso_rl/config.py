@@ -116,17 +116,22 @@ class Config:
             alpha=float(opts.get("alpha", 0.5)),
             training_mode=bool(opts.get("training_mode", False)),
             community_upload_enabled=bool(opts.get("community_upload_enabled", False)),
-            supabase_registration_url=opts.get(
+            supabase_registration_url=_option_string_or_env(
+                opts,
                 "supabase_registration_url",
-                os.getenv("ESPRESSORL_SUPABASE_REGISTRATION_URL", ""),
+                "ESPRESSORL_SUPABASE_REGISTRATION_URL",
             ),
-            supabase_ingest_url=opts.get("supabase_ingest_url", ""),
-            upload_secret=opts.get("upload_secret", ""),
-            upload_token_id=opts.get("upload_token_id", ""),
+            supabase_ingest_url=_option_string_or_env(
+                opts,
+                "supabase_ingest_url",
+                "ESPRESSORL_SUPABASE_INGEST_URL",
+            ),
+            upload_secret=_option_string_or_env(opts, "upload_secret", "ESPRESSORL_UPLOAD_SECRET"),
+            upload_token_id=_option_string_or_env(opts, "upload_token_id", "ESPRESSORL_UPLOAD_TOKEN_ID"),
             upload_worker_interval_s=float(opts.get("upload_worker_interval_s", 30.0)),
             upload_max_payload_bytes=int(opts.get("upload_max_payload_bytes", 2_000_000)),
             storage_backend=storage_backend,
-            postgres_dsn=opts.get("postgres_dsn", os.getenv("ESPRESSORL_POSTGRES_DSN", "")),
+            postgres_dsn=_option_string_or_env(opts, "postgres_dsn", "ESPRESSORL_POSTGRES_DSN"),
             deployment_role=deployment_role,
             admin_collector_enabled=bool(
                 opts.get(
@@ -135,10 +140,15 @@ class Config:
                     in {"1", "true", "yes"},
                 )
             ),
-            supabase_rest_url=opts.get("supabase_rest_url", os.getenv("ESPRESSORL_SUPABASE_REST_URL", "")),
-            supabase_service_role_key=opts.get(
+            supabase_rest_url=_option_string_or_env(
+                opts,
+                "supabase_rest_url",
+                "ESPRESSORL_SUPABASE_REST_URL",
+            ),
+            supabase_service_role_key=_option_string_or_env(
+                opts,
                 "supabase_service_role_key",
-                os.getenv("ESPRESSORL_SUPABASE_SERVICE_ROLE_KEY", ""),
+                "ESPRESSORL_SUPABASE_SERVICE_ROLE_KEY",
             ),
             admin_collector_id=opts.get(
                 "admin_collector_id",
@@ -176,9 +186,10 @@ class Config:
             admin_dashboard_port=int(
                 opts.get("admin_dashboard_port", os.getenv("ESPRESSORL_ADMIN_DASHBOARD_PORT", 8080))
             ),
-            admin_dashboard_token=opts.get(
+            admin_dashboard_token=_option_string_or_env(
+                opts,
                 "admin_dashboard_token",
-                os.getenv("ESPRESSORL_ADMIN_DASHBOARD_TOKEN", ""),
+                "ESPRESSORL_ADMIN_DASHBOARD_TOKEN",
             ),
             data_dir=data_dir,
         )
@@ -189,6 +200,18 @@ def _optional_string(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _option_string_or_env(
+    opts: dict,
+    option_name: str,
+    env_name: str,
+    default: str = "",
+) -> str:
+    option_value = _optional_string(opts.get(option_name))
+    if option_value is not None:
+        return option_value
+    return os.getenv(env_name, default)
 
 
 def _optional_number(value: object) -> float | None:
