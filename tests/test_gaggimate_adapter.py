@@ -67,6 +67,12 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "exclude_from_local_optimization": True,
                 "optimization_weight": 0.0,
                 "rating_prompt_allowed": True,
+                "weight_source": "hardware_scale",
+                "flow_source": "beverage_weight_derivative",
+                "flow_units": "g_per_s",
+                "pump_flow_source": "gaggimate_pump_model",
+                "pump_flow_units": "ml_per_s",
+                "pump_flow_calibration_required": False,
                 "recommendation_id": "rec_1",
             },
             mac="AA_BB",
@@ -84,6 +90,12 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertTrue(event.exclude_from_local_optimization)
         self.assertEqual(event.optimization_weight, 0.0)
         self.assertTrue(event.rating_prompt_allowed)
+        self.assertEqual(event.weight_source, "hardware_scale")
+        self.assertEqual(event.flow_source, "beverage_weight_derivative")
+        self.assertEqual(event.flow_units, "g_per_s")
+        self.assertEqual(event.pump_flow_source, "gaggimate_pump_model")
+        self.assertEqual(event.pump_flow_units, "ml_per_s")
+        self.assertFalse(event.pump_flow_calibration_required)
 
     def test_shot_profile_payload_treats_zero_final_weight_as_missing(self) -> None:
         client = GaggimateMQTTClient(

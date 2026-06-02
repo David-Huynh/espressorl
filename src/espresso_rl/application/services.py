@@ -130,6 +130,12 @@ class EspressoRLService:
             exclude_from_local_optimization=classification.exclude_from_local_optimization,
             optimization_weight=classification.optimization_weight,
             rating_prompt_allowed=classification.rating_prompt_allowed,
+            weight_source=event.weight_source,
+            flow_source=event.flow_source,
+            flow_units=event.flow_units,
+            pump_flow_source=event.pump_flow_source,
+            pump_flow_units=event.pump_flow_units,
+            pump_flow_calibration_required=event.pump_flow_calibration_required,
             created_at=now,
             updated_at=now,
         )
@@ -546,7 +552,7 @@ class EspressoRLService:
 
     def _store_shot(self, shot: ShotRecord, now: int) -> None:
         self._shots.upsert(shot)
-        if self._upload_queue is not None and shot.shot_type == ShotType.ESPRESSO:
+        if self._upload_queue is not None and _shot_is_community_uploadable(shot):
             self._upload_queue.enqueue(make_shot_upload_item(shot, now))
 
     def _store_recommendation(
@@ -564,3 +570,11 @@ class EspressoRLService:
         if prior is not None and _recommendation_signature(prior) == _recommendation_signature(recommendation):
             return
         self._upload_queue.enqueue(make_recommendation_upload_item(recommendation, now))
+
+
+def _shot_is_community_uploadable(shot: ShotRecord) -> bool:
+    return (
+        shot.shot_type == ShotType.ESPRESSO
+        and not shot.exclude_from_local_optimization
+        and shot.optimization_weight > 0.0
+    )

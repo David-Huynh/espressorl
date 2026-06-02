@@ -77,6 +77,14 @@ class SQLiteStore:
                 grind_recommendation_trust REAL NOT NULL DEFAULT 0.0,
                 dose_recommendation_trust REAL NOT NULL DEFAULT 0.0,
                 yield_recommendation_trust REAL NOT NULL DEFAULT 0.0,
+                weight_source TEXT,
+                flow_source TEXT,
+                flow_units TEXT,
+                pump_flow_source TEXT,
+                pump_flow_units TEXT,
+                pump_flow_calibration_required INTEGER NOT NULL DEFAULT 0,
+                profile_flow_valid INTEGER NOT NULL DEFAULT 1,
+                profile_flow_masked INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -152,6 +160,14 @@ class SQLiteStore:
         self._ensure_column("shots", "grind_recommendation_trust", "REAL NOT NULL DEFAULT 0.0")
         self._ensure_column("shots", "dose_recommendation_trust", "REAL NOT NULL DEFAULT 0.0")
         self._ensure_column("shots", "yield_recommendation_trust", "REAL NOT NULL DEFAULT 0.0")
+        self._ensure_column("shots", "weight_source", "TEXT")
+        self._ensure_column("shots", "flow_source", "TEXT")
+        self._ensure_column("shots", "flow_units", "TEXT")
+        self._ensure_column("shots", "pump_flow_source", "TEXT")
+        self._ensure_column("shots", "pump_flow_units", "TEXT")
+        self._ensure_column("shots", "pump_flow_calibration_required", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("shots", "profile_flow_valid", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("shots", "profile_flow_masked", "INTEGER NOT NULL DEFAULT 0")
         self.conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_upload_queue_record
@@ -526,6 +542,33 @@ class SQLiteUploadQueueRepository:
         )
         self._store.conn.commit()
 
+    def mark_rejected_preflight_failed(
+        self,
+        upload_id: str,
+        now: int,
+        error_message: str,
+    ) -> None:
+        existing = self._store.conn.execute(
+            "SELECT 1 FROM upload_queue WHERE upload_id=? AND status=?",
+            (upload_id, UploadQueueStatus.REJECTED.value),
+        ).fetchone()
+        if existing is None:
+            raise ValueError(f"unknown rejected upload_id {upload_id}")
+        self._store.conn.execute(
+            """
+            UPDATE upload_queue
+            SET error_message=?, updated_at=?
+            WHERE upload_id=? AND status=?
+            """,
+            (
+                error_message[:500],
+                now,
+                upload_id,
+                UploadQueueStatus.REJECTED.value,
+            ),
+        )
+        self._store.conn.commit()
+
 
 def _shot_to_row(shot: ShotRecord) -> dict:
     return {
@@ -573,6 +616,14 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "grind_recommendation_trust": shot.grind_recommendation_trust,
         "dose_recommendation_trust": shot.dose_recommendation_trust,
         "yield_recommendation_trust": shot.yield_recommendation_trust,
+        "weight_source": shot.weight_source,
+        "flow_source": shot.flow_source,
+        "flow_units": shot.flow_units,
+        "pump_flow_source": shot.pump_flow_source,
+        "pump_flow_units": shot.pump_flow_units,
+        "pump_flow_calibration_required": bool(shot.pump_flow_calibration_required),
+        "profile_flow_valid": bool(shot.profile_flow_valid),
+        "profile_flow_masked": bool(shot.profile_flow_masked),
         "created_at": shot.created_at,
         "updated_at": shot.updated_at,
     }
@@ -625,6 +676,14 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         grind_recommendation_trust=row["grind_recommendation_trust"],
         dose_recommendation_trust=row["dose_recommendation_trust"],
         yield_recommendation_trust=row["yield_recommendation_trust"],
+        weight_source=row["weight_source"],
+        flow_source=row["flow_source"],
+        flow_units=row["flow_units"],
+        pump_flow_source=row["pump_flow_source"],
+        pump_flow_units=row["pump_flow_units"],
+        pump_flow_calibration_required=bool(row["pump_flow_calibration_required"]),
+        profile_flow_valid=bool(row["profile_flow_valid"]),
+        profile_flow_masked=bool(row["profile_flow_masked"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

@@ -35,6 +35,32 @@ def validate_upload_payload(payload: dict[str, Any]) -> UploadPayloadValidation:
     return UploadPayloadValidation(ok=not errors, errors=errors)
 
 
+def mask_untrusted_profile_channels(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a trusted-storage copy with unusable inactive channels masked.
+
+    Raw uploads are intentionally preserved in the raw queue. This function is
+    only for the validated/training copy after the upload credential and schema
+    checks have already passed. It avoids letting a corrupt, non-targeted flow
+    channel poison community priors or model input.
+    """
+    copied = dict(payload)
+    profile = copied.get("profile_resampled")
+    if not isinstance(profile, list) or len(profile) != 5:
+        return copied
+    channels = [list(channel) if isinstance(channel, list) else channel for channel in profile]
+    target_flow = channels[3]
+    flow = channels[2]
+    target_flow_active = _channel_active(target_flow)
+    flow_valid = _channel_in_range(flow, 0, 20)
+    copied["profile_flow_valid"] = flow_valid
+    copied["profile_flow_masked"] = False
+    if not target_flow_active and not flow_valid:
+        channels[2] = [0.0 for _ in range(100)]
+        copied["profile_resampled"] = channels
+        copied["profile_flow_masked"] = True
+    return copied
+
+
 def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _require_string(payload, "shot_id", errors)
     _require_string(payload, "install_id", errors)
@@ -57,6 +83,14 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_bool(payload, "grind_followed", errors)
     _optional_bool(payload, "dose_followed", errors)
     _optional_bool(payload, "yield_followed", errors)
+    _optional_bool(payload, "pump_flow_calibration_required", errors)
+    _optional_bool(payload, "profile_flow_valid", errors)
+    _optional_bool(payload, "profile_flow_masked", errors)
+    _optional_string(payload, "weight_source", 80, errors)
+    _optional_string(payload, "flow_source", 80, errors)
+    _optional_string(payload, "flow_units", 40, errors)
+    _optional_string(payload, "pump_flow_source", 80, errors)
+    _optional_string(payload, "pump_flow_units", 40, errors)
     _optional_string_list_enum(payload, "taste_tags", VALID_TASTE_TAGS, errors)
     _optional_enum(
         payload,
@@ -89,15 +123,18 @@ def _validate_profile_resampled(profile: Any, beverage_out_g: Any, errors: list[
     if not isinstance(profile, list) or len(profile) != 5:
         errors.append("profile_resampled must have 5 channels")
         return
+    target_flow_active = False
+    if isinstance(profile, list) and len(profile) == 5:
+        target_flow_active = _channel_active(profile[3])
     for channel_index, (minimum, maximum, label) in enumerate(ranges):
         channel = profile[channel_index]
         if not isinstance(channel, list) or len(channel) != 100:
             errors.append(f"profile_resampled {label} channel must have exactly 100 samples")
             continue
-        for value in channel:
-            if not isinstance(value, (int, float)) or not minimum <= float(value) <= maximum:
-                errors.append(f"profile_resampled {label} out of range")
-                break
+        if not _channel_in_range(channel, minimum, maximum):
+            if label == "flow" and not target_flow_active:
+                continue
+            errors.append(f"profile_resampled {label} out of range")
     weight = profile[4]
     if isinstance(beverage_out_g, (int, float)) and isinstance(weight, list) and len(weight) == 100:
         final_weight = weight[-1]
@@ -141,6 +178,14 @@ def _optional_bool(payload: dict[str, Any], key: str, errors: list[str]) -> None
         errors.append(f"{key} must be boolean")
 
 
+def _optional_string(payload: dict[str, Any], key: str, max_len: int, errors: list[str]) -> None:
+    value = payload.get(key)
+    if value is None:
+        return
+    if not isinstance(value, str) or len(value) > max_len:
+        errors.append(f"{key} must be a short string")
+
+
 def _optional_enum(
     payload: dict[str, Any],
     key: str,
@@ -168,3 +213,21 @@ def _optional_string_list_enum(
     invalid = [item for item in value if not isinstance(item, str) or item not in allowed]
     if invalid:
         errors.append(f"{key} contains invalid values")
+
+
+def _channel_active(channel: Any) -> bool:
+    if not isinstance(channel, list) or len(channel) != 100:
+        return False
+    return any(isinstance(value, (int, float)) and abs(float(value)) > 1e-6 for value in channel)
+
+
+def _channel_in_range(channel: Any, minimum: float, maximum: float) -> bool:
+    if not isinstance(channel, list) or len(channel) != 100:
+        return False
+    for value in channel:
+        if not isinstance(value, (int, float)):
+            return False
+        parsed = float(value)
+        if not minimum <= parsed <= maximum:
+            return False
+    return True

@@ -207,6 +207,12 @@ class GaggimateMQTTClient:
             local_optimization_enabled=bool(payload.get("local_optimization_enabled", True)),
             optimization_weight=_optional_float(payload.get("optimization_weight")),
             rating_prompt_allowed=bool(payload.get("rating_prompt_allowed", True)),
+            weight_source=_optional_string(payload.get("weight_source")),
+            flow_source=_optional_string(payload.get("flow_source")),
+            flow_units=_optional_string(payload.get("flow_units")),
+            pump_flow_source=_optional_string(payload.get("pump_flow_source")),
+            pump_flow_units=_optional_string(payload.get("pump_flow_units")),
+            pump_flow_calibration_required=bool(payload.get("pump_flow_calibration_required", False)),
         )
 
     def translate_feedback_payload(self, payload: dict[str, Any], mac: str) -> ShotFeedbackEvent:
@@ -310,6 +316,13 @@ def _optional_bool(value: Any) -> bool | None:
     if value is None:
         return None
     return bool(value)
+
+
+def _optional_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
 
 
 def _positive_optional_float(value: Any) -> float | None:

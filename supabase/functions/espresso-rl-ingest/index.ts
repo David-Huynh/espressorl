@@ -198,6 +198,14 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalBoolean(payload, 'grind_followed', errors);
   optionalBoolean(payload, 'dose_followed', errors);
   optionalBoolean(payload, 'yield_followed', errors);
+  optionalBoolean(payload, 'pump_flow_calibration_required', errors);
+  optionalBoolean(payload, 'profile_flow_valid', errors);
+  optionalBoolean(payload, 'profile_flow_masked', errors);
+  optionalString(payload, 'weight_source', 80, errors);
+  optionalString(payload, 'flow_source', 80, errors);
+  optionalString(payload, 'flow_units', 40, errors);
+  optionalString(payload, 'pump_flow_source', 80, errors);
+  optionalString(payload, 'pump_flow_units', 40, errors);
   optionalNumberRange(payload, 'grind_recommendation_trust', 0, 1, errors);
   optionalNumberRange(payload, 'dose_recommendation_trust', 0, 1, errors);
   optionalNumberRange(payload, 'yield_recommendation_trust', 0, 1, errors);
@@ -249,6 +257,15 @@ function optionalBoolean(payload: JsonRecord, key: string, errors: string[]) {
   }
 }
 
+function optionalString(payload: JsonRecord, key: string, maxLength: number, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  if (typeof payload[key] !== 'string' || String(payload[key]).length > maxLength) {
+    errors.push(`${key} must be a short string`);
+  }
+}
+
 function optionalEnum(payload: JsonRecord, key: string, allowed: string[], errors: string[]) {
   if (payload[key] === undefined || payload[key] === null) {
     return;
@@ -266,6 +283,7 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
     [0, 20, 'target_flow'],
     [0, 100, 'weight'],
   ];
+  const targetFlowActive = channelActive(profile[3]);
   for (let channelIndex = 0; channelIndex < 5; channelIndex += 1) {
     const channel = profile[channelIndex];
     const [min, max, label] = ranges[channelIndex];
@@ -273,11 +291,11 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
       errors.push(`profile_resampled ${label} channel must have exactly 100 samples`);
       continue;
     }
-    for (const value of channel) {
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
-        errors.push(`profile_resampled ${label} out of range`);
-        break;
+    if (!channelInRange(channel, min, max)) {
+      if (label === 'flow' && !targetFlowActive) {
+        continue;
       }
+      errors.push(`profile_resampled ${label} out of range`);
     }
   }
   if (typeof beverageOutG === 'number' && Number.isFinite(beverageOutG)) {
@@ -289,6 +307,19 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
       }
     }
   }
+}
+
+function channelActive(channel: unknown): boolean {
+  if (!Array.isArray(channel) || channel.length !== 100) {
+    return false;
+  }
+  return channel.some(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) > 1e-6);
+}
+
+function channelInRange(channel: unknown[], min: number, max: number): boolean {
+  return channel.every(
+    value => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max,
+  );
 }
 
 async function lookupCredential(

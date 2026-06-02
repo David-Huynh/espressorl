@@ -293,6 +293,14 @@ class ShotRecord:
     grind_recommendation_trust: float = 0.0
     dose_recommendation_trust: float = 0.0
     yield_recommendation_trust: float = 0.0
+    weight_source: str | None = None
+    flow_source: str | None = None
+    flow_units: str | None = None
+    pump_flow_source: str | None = None
+    pump_flow_units: str | None = None
+    pump_flow_calibration_required: bool = False
+    profile_flow_valid: bool = True
+    profile_flow_masked: bool = False
     created_at: int = field(default_factory=now_ts)
     updated_at: int = field(default_factory=now_ts)
 

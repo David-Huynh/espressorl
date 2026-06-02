@@ -58,6 +58,14 @@ class PostgresStore:
             "grind_recommendation_trust": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
             "dose_recommendation_trust": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
             "yield_recommendation_trust": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+            "weight_source": "TEXT",
+            "flow_source": "TEXT",
+            "flow_units": "TEXT",
+            "pump_flow_source": "TEXT",
+            "pump_flow_units": "TEXT",
+            "pump_flow_calibration_required": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "profile_flow_valid": "BOOLEAN NOT NULL DEFAULT TRUE",
+            "profile_flow_masked": "BOOLEAN NOT NULL DEFAULT FALSE",
         }.items():
             self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
         for column, definition in {
@@ -381,6 +389,33 @@ class PostgresUploadQueueRepository:
                 error_message,
                 now,
                 upload_id,
+            ),
+        )
+        self._store.conn.commit()
+
+    def mark_rejected_preflight_failed(
+        self,
+        upload_id: str,
+        now: int,
+        error_message: str,
+    ) -> None:
+        existing = self._store.conn.execute(
+            "SELECT 1 FROM upload_queue WHERE upload_id=%s AND status=%s",
+            (upload_id, UploadQueueStatus.REJECTED.value),
+        ).fetchone()
+        if existing is None:
+            raise ValueError(f"unknown rejected upload_id {upload_id}")
+        self._store.conn.execute(
+            """
+            UPDATE upload_queue
+            SET error_message=%s, updated_at=%s
+            WHERE upload_id=%s AND status=%s
+            """,
+            (
+                error_message[:500],
+                now,
+                upload_id,
+                UploadQueueStatus.REJECTED.value,
             ),
         )
         self._store.conn.commit()

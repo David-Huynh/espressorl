@@ -5,9 +5,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTER_FUNCTION = ROOT / "supabase" / "functions" / "espresso-rl-register" / "index.ts"
+CONFIG = ROOT / "supabase" / "config.toml"
 
 
 class SupabaseRegistrationContractTests(unittest.TestCase):
+    def test_registration_function_disables_platform_jwt_check_for_hmac_actions(self) -> None:
+        config = CONFIG.read_text()
+
+        self.assertIn("[functions.espresso-rl-register]", config)
+        self.assertIn("verify_jwt = false", config)
+
     def test_registration_function_issues_rotates_and_revokes_credentials(self) -> None:
         source = REGISTER_FUNCTION.read_text()
 

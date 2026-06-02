@@ -7,7 +7,10 @@ from pathlib import Path
 
 from espresso_rl.adapters.sqlite_repositories import SQLiteStore, SQLiteUploadQueueRepository
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
-from espresso_rl.application.upload_validation import validate_upload_payload_json
+from espresso_rl.application.upload_validation import (
+    mask_untrusted_profile_channels,
+    validate_upload_payload_json,
+)
 from espresso_rl.domain.models import UploadQueueItem, UploadQueueStatus
 
 
@@ -27,6 +30,23 @@ def payload(**overrides) -> str:
     }
     data.update(overrides)
     return json.dumps(data, sort_keys=True)
+
+
+def payload_dict(**overrides) -> dict:
+    data = json.loads(payload())
+    data.update(overrides)
+    return data
+
+
+def valid_profile() -> list[list[float]]:
+    profile = [[0.0 for _ in range(100)] for _ in range(5)]
+    profile[0] = [9.0 for _ in range(100)]
+    profile[1] = [9.0 for _ in range(100)]
+    profile[2] = [2.0 for _ in range(100)]
+    profile[3] = [0.0 for _ in range(100)]
+    profile[4] = [i * 0.36 for i in range(100)]
+    profile[4][-1] = 36.0
+    return profile
 
 
 def queue_item(
@@ -71,6 +91,35 @@ class UploadMaintenanceTests(unittest.TestCase):
         self.assertIn("beverage_out_g out of range", result.errors)
         self.assertIn("shot_time_s out of range", result.errors)
 
+    def test_preflight_allows_invalid_flow_when_flow_target_is_inactive(self) -> None:
+        profile = valid_profile()
+        profile[2] = [100_000.0 for _ in range(100)]
+
+        result = validate_upload_payload_json(payload(profile_resampled=profile))
+
+        self.assertTrue(result.ok)
+
+    def test_preflight_rejects_invalid_flow_when_flow_target_is_active(self) -> None:
+        profile = valid_profile()
+        profile[2] = [100_000.0 for _ in range(100)]
+        profile[3] = [2.0 for _ in range(100)]
+
+        result = validate_upload_payload_json(payload(profile_resampled=profile))
+
+        self.assertFalse(result.ok)
+        self.assertIn("profile_resampled flow out of range", result.errors)
+
+    def test_trusted_payload_copy_masks_invalid_inactive_flow(self) -> None:
+        profile = valid_profile()
+        profile[2] = [100_000.0 for _ in range(100)]
+        raw = payload_dict(profile_resampled=profile)
+
+        trusted = mask_untrusted_profile_channels(raw)
+
+        self.assertEqual(trusted["profile_resampled"][2], [0.0 for _ in range(100)])
+        self.assertFalse(trusted["profile_flow_valid"])
+        self.assertTrue(trusted["profile_flow_masked"])
+
     def test_requeue_valid_rejected_uploads_leaves_invalid_rows_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteStore(Path(tmp) / "espresso.db")
@@ -94,8 +143,16 @@ class UploadMaintenanceTests(unittest.TestCase):
                 row["upload_id"]: row["status"]
                 for row in store.conn.execute("SELECT upload_id, status FROM upload_queue").fetchall()
             }
+            invalid = store.conn.execute(
+                "SELECT attempt_count, error_message, updated_at FROM upload_queue WHERE upload_id=?",
+                ("invalid",),
+            ).fetchone()
             self.assertEqual(statuses["valid"], "pending")
             self.assertEqual(statuses["invalid"], "rejected")
+            self.assertEqual(invalid["attempt_count"], 3)
+            self.assertEqual(invalid["updated_at"], 10)
+            self.assertIn("preflight failed", invalid["error_message"])
+            self.assertIn("beverage_out_g out of range", invalid["error_message"])
 
     def test_latest_rejected_summary_does_not_expose_payload_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

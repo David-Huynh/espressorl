@@ -14,7 +14,7 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     ShotRecord,
 )
-from espresso_rl.domain.profile import resample_profile
+from espresso_rl.domain.profile import profile_mse, profile_score, resample_profile
 from espresso_rl.domain.reward import compute_reward
 from espresso_rl.domain.staleness import check_recommendation_staleness
 
@@ -53,6 +53,24 @@ class DomainCoreTests(unittest.TestCase):
         self.assertEqual(profile.shape, (5, 100))
         self.assertEqual(profile.dtype, np.float32)
         self.assertAlmostEqual(float(profile[4, -1]), 36.0)
+
+    def test_profile_mse_ignores_inactive_zero_flow_target(self) -> None:
+        profile = resample_profile(event(flow=[100_000.0, 100_000.0, 100_000.0], target_flow=[0.0, 0.0, 0.0]))
+
+        self.assertEqual(profile_mse(profile), 0.0)
+        self.assertEqual(profile_score(profile), 1.0)
+
+    def test_profile_mse_uses_only_active_valid_target_channels(self) -> None:
+        profile = resample_profile(
+            event(
+                pressure=[3.0, 3.0, 3.0],
+                target_pressure=[0.0, 0.0, 0.0],
+                flow=[1.0, 2.0, 3.0],
+                target_flow=[1.0, 2.0, 3.0],
+            )
+        )
+
+        self.assertEqual(profile_mse(profile), 0.0)
 
     def test_ignored_recommendation_is_not_followed(self) -> None:
         rec = Recommendation(

@@ -7,12 +7,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "supabase" / "migrations" / "202605290001_espresso_rl_raw_queue.sql"
 FUNCTION = ROOT / "supabase" / "functions" / "espresso-rl-ingest" / "index.ts"
+CONFIG = ROOT / "supabase" / "config.toml"
 RATE_LIMIT_MIGRATION = (
     ROOT / "supabase" / "migrations" / "202605310001_espressorl_rate_limit_no_overcount.sql"
 )
 
 
 class SupabaseIngestionContractTests(unittest.TestCase):
+    def test_ingest_function_disables_platform_jwt_check_for_hmac_uploads(self) -> None:
+        config = CONFIG.read_text()
+
+        self.assertIn("[functions.espresso-rl-ingest]", config)
+        self.assertIn("verify_jwt = false", config)
+
     def test_raw_queue_migration_blocks_public_table_access(self) -> None:
         sql = MIGRATION.read_text()
 

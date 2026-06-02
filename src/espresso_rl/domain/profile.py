@@ -8,6 +8,9 @@ from .events import ShotProfileEvent
 from .models import PROFILE_DTYPE, PROFILE_SHAPE
 
 CHANNEL_NAMES = ("pressure", "target_pressure", "flow", "target_flow", "weight")
+PRESSURE_RANGE = (0.0, 15.0)
+FLOW_RANGE = (0.0, 20.0)
+TARGET_ACTIVE_EPSILON = 1e-6
 
 
 def resample_profile(event: ShotProfileEvent, n_points: int = PROFILE_SHAPE[1]) -> np.ndarray:
@@ -30,9 +33,14 @@ def profile_mse(profile: np.ndarray) -> float:
     profile = np.asarray(profile, dtype=PROFILE_DTYPE)
     if profile.shape != PROFILE_SHAPE:
         raise ValueError(f"profile must have shape {PROFILE_SHAPE}")
-    pressure_mse = float(np.mean((profile[0] - profile[1]) ** 2))
-    flow_mse = float(np.mean((profile[2] - profile[3]) ** 2))
-    return (pressure_mse + flow_mse) / 2.0
+    channel_mses: list[float] = []
+    if _channel_pair_usable(profile[0], profile[1], PRESSURE_RANGE):
+        channel_mses.append(float(np.mean((profile[0] - profile[1]) ** 2)))
+    if _channel_pair_usable(profile[2], profile[3], FLOW_RANGE):
+        channel_mses.append(float(np.mean((profile[2] - profile[3]) ** 2)))
+    if not channel_mses:
+        return 1.0
+    return float(np.mean(channel_mses))
 
 
 def profile_score(profile: np.ndarray) -> float:
@@ -43,3 +51,19 @@ def profile_hash(profile: np.ndarray) -> str:
     profile = np.asarray(profile, dtype=PROFILE_DTYPE)
     return hashlib.sha256(profile.tobytes()).hexdigest()
 
+
+def _channel_pair_usable(
+    actual: np.ndarray,
+    target: np.ndarray,
+    allowed_range: tuple[float, float],
+) -> bool:
+    minimum, maximum = allowed_range
+    if not _channel_values_valid(actual, minimum, maximum):
+        return False
+    if not _channel_values_valid(target, minimum, maximum):
+        return False
+    return bool(np.any(np.abs(target) > TARGET_ACTIVE_EPSILON))
+
+
+def _channel_values_valid(channel: np.ndarray, minimum: float, maximum: float) -> bool:
+    return bool(np.all(np.isfinite(channel)) and np.all(channel >= minimum) and np.all(channel <= maximum))

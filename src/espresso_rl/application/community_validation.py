@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from espresso_rl.application.upload_validation import validate_upload_payload
+from espresso_rl.application.upload_validation import (
+    mask_untrusted_profile_channels,
+    validate_upload_payload,
+)
 from espresso_rl.domain.community import (
     CommunityAbuseEvent,
     CommunityInstallStats,
@@ -90,6 +93,8 @@ class CommunityValidationService:
 
         validation = validate_upload_payload(payload)
         errors.extend(validation.errors)
+        if not errors and upload.event_type == "shot_record":
+            payload = mask_untrusted_profile_channels(payload)
 
         if upload.event_type == "shot_record":
             shot_type = payload.get("shot_type", "espresso")
@@ -224,6 +229,8 @@ def payload_trust_weight(payload: dict[str, Any], install_trust: float) -> float
     taste_tags = payload.get("taste_tags")
     if isinstance(taste_tags, list) and "channeling_suspected" in taste_tags:
         quality *= 0.7
+    if payload.get("profile_flow_masked") is True or payload.get("profile_flow_valid") is False:
+        quality *= 0.7
 
     return round(_clamp(install_trust * quality, 0.0, MAX_COMMUNITY_TRAINING_WEIGHT), 6)
 
@@ -241,6 +248,8 @@ def validation_summary(
         "rating_present": payload.get("human_rating") is not None,
         "recommendation_followed": payload.get("recommendation_followed"),
         "optimization_weight": _optional_float(payload.get("optimization_weight"), default=1.0),
+        "profile_flow_valid": payload.get("profile_flow_valid", True),
+        "profile_flow_masked": payload.get("profile_flow_masked", False),
     }
 
 

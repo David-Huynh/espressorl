@@ -87,3 +87,11 @@ class UploadQueueRepository(Protocol):
         error_message: str | None = None,
     ) -> None:
         ...
+
+    def mark_rejected_preflight_failed(
+        self,
+        upload_id: str,
+        now: int,
+        error_message: str,
+    ) -> None:
+        ...

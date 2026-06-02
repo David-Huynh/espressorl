@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS shots (
     grind_recommendation_trust DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     dose_recommendation_trust DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     yield_recommendation_trust DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    weight_source TEXT,
+    flow_source TEXT,
+    flow_units TEXT,
+    pump_flow_source TEXT,
+    pump_flow_units TEXT,
+    pump_flow_calibration_required BOOLEAN NOT NULL DEFAULT FALSE,
+    profile_flow_valid BOOLEAN NOT NULL DEFAULT TRUE,
+    profile_flow_masked BOOLEAN NOT NULL DEFAULT FALSE,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL
 );

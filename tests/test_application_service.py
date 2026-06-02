@@ -324,6 +324,26 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertTrue(result.shot.rating_prompt_allowed)
         self.assertEqual(recs.rows, {})
 
+    def test_local_optimization_disabled_shot_is_not_queued_for_community_upload(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        uploads = MemoryUploadQueue()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), upload_queue=uploads, clock=lambda: 10)
+
+        result = service.ingest_shot_profile(
+            shot_event(
+                "hot_water_1",
+                1,
+                local_optimization_enabled=False,
+                exclude_from_local_optimization=True,
+            )
+        )
+
+        self.assertEqual(result.shot.shot_type, ShotType.ESPRESSO)
+        self.assertTrue(result.shot.exclude_from_local_optimization)
+        self.assertEqual(result.shot.optimization_weight, 0.0)
+        self.assertFalse(any(item.local_record_id == "hot_water_1" for item in uploads.rows.values()))
+
     def test_shot_correction_excludes_stored_shot_from_local_optimization(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()

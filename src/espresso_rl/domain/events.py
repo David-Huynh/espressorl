@@ -58,6 +58,12 @@ class ShotProfileEvent:
     local_optimization_enabled: bool = True
     optimization_weight: float | None = None
     rating_prompt_allowed: bool = True
+    weight_source: str | None = None
+    flow_source: str | None = None
+    flow_units: str | None = None
+    pump_flow_source: str | None = None
+    pump_flow_units: str | None = None
+    pump_flow_calibration_required: bool = False
 
     event_type: str = field(default="shot_profile", init=False)
 

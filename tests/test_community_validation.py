@@ -142,6 +142,22 @@ class CommunityValidationTests(unittest.TestCase):
         self.assertEqual(result.rejected, 1)
         self.assertIn("pressure out of range", " ".join(warehouse.rejections[upload.upload_id]))
 
+    def test_invalid_inactive_flow_is_masked_before_trusted_storage(self) -> None:
+        payload = shot_payload()
+        payload["profile_resampled"][2] = [100_000.0 for _ in range(100)]
+        payload["profile_resampled"][3] = [0.0 for _ in range(100)]
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.validated_shots, 1)
+        stored = warehouse.validated_shots[0].payload_json
+        self.assertEqual(stored["profile_resampled"][2], [0.0 for _ in range(100)])
+        self.assertFalse(stored["profile_flow_valid"])
+        self.assertTrue(stored["profile_flow_masked"])
+        self.assertTrue(warehouse.validated_summaries[upload.upload_id]["profile_flow_masked"])
+
     def test_community_trust_remains_capped_and_penalized_by_rejections(self) -> None:
         self.assertEqual(
             install_trust_score(
@@ -222,6 +238,7 @@ class FakeWarehouse:
         self.trust_scores: list[InstallTrustScore] = []
         self.abuse_events: list[CommunityAbuseEvent] = []
         self.training_rows: list[tuple[int, dict[str, Any], float]] = []
+        self.validated_summaries: dict[str, dict[str, Any]] = {}
 
     def upsert_raw_upload(self, upload: CommunityRawUpload) -> None:
         self.uploads.append(upload)
@@ -236,6 +253,7 @@ class FakeWarehouse:
         validation_summary: dict[str, Any],
     ) -> None:
         self.statuses[upload.upload_id] = "validated"
+        self.validated_summaries[upload.upload_id] = validation_summary
 
     def mark_raw_upload_rejected(
         self,

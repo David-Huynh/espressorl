@@ -56,13 +56,19 @@ class UploadQueueMaintenanceService:
                 requeued += 1
                 continue
 
+            error_message = "preflight failed: " + "; ".join(validation.errors[:3])
+            self._queue.mark_rejected_preflight_failed(
+                item.upload_id,
+                now=now,
+                error_message=error_message,
+            )
             skipped_uploads.append(
                 RejectedUploadSummary(
                     upload_id=item.upload_id,
                     local_record_type=item.local_record_type,
                     local_record_id=item.local_record_id,
                     attempt_count=item.attempt_count,
-                    error_message="preflight failed: " + "; ".join(validation.errors[:3]),
+                    error_message=error_message,
                     updated_at=item.updated_at,
                 )
             )
