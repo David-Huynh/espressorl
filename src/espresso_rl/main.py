@@ -72,6 +72,10 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     config = Config.load()
+    if config.deployment_role == "admin":
+        run_admin(config)
+        return
+
     maybe_resolve_community_upload_credentials(config)
     logger.info("EspressoRL starting [training_mode=%s]", config.training_mode)
     if config.training_mode:
@@ -300,6 +304,38 @@ def main() -> None:
         upload_queue_repo=upload_queue_repo,
     )
     logger.info("Listening for canonical events via Gaggimate MQTT adapter")
+    signal.pause()
+
+
+def run_admin(config: Config) -> None:
+    logger.info("EspressoRL admin runtime starting")
+    stop_event = threading.Event()
+    admin_pipeline = maybe_build_admin_pipeline_service(config)
+    collector_thread = maybe_start_admin_collector_worker(
+        config,
+        stop_event,
+        admin_pipeline=admin_pipeline,
+    )
+    dashboard_thread = maybe_start_admin_dashboard(
+        config,
+        stop_event,
+        admin_pipeline=admin_pipeline,
+    )
+
+    def shutdown(sig: int, frame: object) -> None:
+        logger.info("Shutting down admin runtime (signal %d)", sig)
+        stop_event.set()
+        if collector_thread is not None:
+            collector_thread.join(timeout=5)
+        if dashboard_thread is not None:
+            dashboard_thread.join(timeout=5)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    if collector_thread is None and dashboard_thread is None:
+        logger.warning("Admin runtime has no enabled collector or dashboard; waiting for shutdown.")
     signal.pause()
 
 

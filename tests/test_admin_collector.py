@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import threading
 import unittest
+from unittest import mock
 from urllib import request
 
+import espresso_rl.main as main_module
 from espresso_rl.adapters.supabase_community_queue import (
     HttpResponse,
     SupabaseCommunityQueueClient,
@@ -162,6 +164,19 @@ class AdminCollectorTests(unittest.TestCase):
             postgres_dsn="postgresql://example",
         )
         self.assertIsNone(maybe_start_admin_dashboard(admin_config, threading.Event()))
+
+    def test_main_dispatches_admin_role_before_public_machine_runtime(self) -> None:
+        admin_config = Config(mqtt_host="unused", deployment_role="admin")
+
+        with (
+            mock.patch.object(main_module.Config, "load", return_value=admin_config),
+            mock.patch.object(main_module, "run_admin") as run_admin,
+            mock.patch.object(main_module, "maybe_resolve_community_upload_credentials") as resolve_credentials,
+        ):
+            main_module.main()
+
+        run_admin.assert_called_once_with(admin_config)
+        resolve_credentials.assert_not_called()
 
 
 class FakeSource:
