@@ -128,7 +128,13 @@ class Config:
             storage_backend=storage_backend,
             postgres_dsn=opts.get("postgres_dsn", os.getenv("ESPRESSORL_POSTGRES_DSN", "")),
             deployment_role=deployment_role,
-            admin_collector_enabled=bool(opts.get("admin_collector_enabled", False)),
+            admin_collector_enabled=bool(
+                opts.get(
+                    "admin_collector_enabled",
+                    os.getenv("ESPRESSORL_ADMIN_COLLECTOR_ENABLED", "").lower()
+                    in {"1", "true", "yes"},
+                )
+            ),
             supabase_rest_url=opts.get("supabase_rest_url", os.getenv("ESPRESSORL_SUPABASE_REST_URL", "")),
             supabase_service_role_key=opts.get(
                 "supabase_service_role_key",
@@ -138,9 +144,24 @@ class Config:
                 "admin_collector_id",
                 os.getenv("ESPRESSORL_ADMIN_COLLECTOR_ID", "espresso-rl-admin"),
             ),
-            admin_collector_lease_seconds=int(opts.get("admin_collector_lease_seconds", 300)),
-            admin_collector_interval_s=float(opts.get("admin_collector_interval_s", 30.0)),
-            admin_collector_batch_size=int(opts.get("admin_collector_batch_size", 100)),
+            admin_collector_lease_seconds=int(
+                opts.get(
+                    "admin_collector_lease_seconds",
+                    os.getenv("ESPRESSORL_ADMIN_COLLECTOR_LEASE_SECONDS", 300),
+                )
+            ),
+            admin_collector_interval_s=float(
+                opts.get(
+                    "admin_collector_interval_s",
+                    os.getenv("ESPRESSORL_ADMIN_COLLECTOR_INTERVAL_S", 30.0),
+                )
+            ),
+            admin_collector_batch_size=int(
+                opts.get(
+                    "admin_collector_batch_size",
+                    os.getenv("ESPRESSORL_ADMIN_COLLECTOR_BATCH_SIZE", 100),
+                )
+            ),
             admin_dashboard_enabled=bool(
                 opts.get(
                     "admin_dashboard_enabled",
