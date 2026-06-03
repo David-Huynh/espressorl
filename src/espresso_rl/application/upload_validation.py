@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,12 +37,12 @@ def validate_upload_payload(payload: dict[str, Any]) -> UploadPayloadValidation:
 
 
 def mask_untrusted_profile_channels(payload: dict[str, Any]) -> dict[str, Any]:
-    """Return a trusted-storage copy with unusable inactive channels masked.
+    """Return a trusted-storage copy with unusable flow channels masked.
 
     Raw uploads are intentionally preserved in the raw queue. This function is
     only for the validated/training copy after the upload credential and schema
-    checks have already passed. It avoids letting a corrupt, non-targeted flow
-    channel poison community priors or model input.
+    checks have already passed. It avoids letting corrupt or differently-scaled
+    flow telemetry poison community priors or model input.
     """
     copied = dict(payload)
     profile = copied.get("profile_resampled")
@@ -50,12 +51,13 @@ def mask_untrusted_profile_channels(payload: dict[str, Any]) -> dict[str, Any]:
     channels = [list(channel) if isinstance(channel, list) else channel for channel in profile]
     target_flow = channels[3]
     flow = channels[2]
-    target_flow_active = _channel_active(target_flow)
     flow_valid = _channel_in_range(flow, 0, 20)
+    target_flow_valid = _channel_in_range(target_flow, 0, 20)
     copied["profile_flow_valid"] = flow_valid
     copied["profile_flow_masked"] = False
-    if not target_flow_active and not flow_valid:
+    if not flow_valid or not target_flow_valid:
         channels[2] = [0.0 for _ in range(100)]
+        channels[3] = [0.0 for _ in range(100)]
         copied["profile_resampled"] = channels
         copied["profile_flow_masked"] = True
     return copied
@@ -123,16 +125,16 @@ def _validate_profile_resampled(profile: Any, beverage_out_g: Any, errors: list[
     if not isinstance(profile, list) or len(profile) != 5:
         errors.append("profile_resampled must have 5 channels")
         return
-    target_flow_active = False
-    if isinstance(profile, list) and len(profile) == 5:
-        target_flow_active = _channel_active(profile[3])
     for channel_index, (minimum, maximum, label) in enumerate(ranges):
         channel = profile[channel_index]
         if not isinstance(channel, list) or len(channel) != 100:
             errors.append(f"profile_resampled {label} channel must have exactly 100 samples")
             continue
+        if not _channel_numeric_finite(channel):
+            errors.append(f"profile_resampled {label} contains non-finite or nonnumeric values")
+            continue
         if not _channel_in_range(channel, minimum, maximum):
-            if label == "flow" and not target_flow_active:
+            if label in {"flow", "target_flow"}:
                 continue
             errors.append(f"profile_resampled {label} out of range")
     weight = profile[4]
@@ -155,7 +157,11 @@ def _require_number_range(
     errors: list[str],
 ) -> None:
     value = payload.get(key)
-    if not isinstance(value, (int, float)) or not minimum <= float(value) <= maximum:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        errors.append(f"{key} out of range")
+        return
+    parsed = float(value)
+    if not math.isfinite(parsed) or not minimum <= parsed <= maximum:
         errors.append(f"{key} out of range")
 
 
@@ -215,19 +221,23 @@ def _optional_string_list_enum(
         errors.append(f"{key} contains invalid values")
 
 
-def _channel_active(channel: Any) -> bool:
-    if not isinstance(channel, list) or len(channel) != 100:
-        return False
-    return any(isinstance(value, (int, float)) and abs(float(value)) > 1e-6 for value in channel)
-
-
 def _channel_in_range(channel: Any, minimum: float, maximum: float) -> bool:
+    if not _channel_numeric_finite(channel):
+        return False
+    for value in channel:
+        parsed = float(value)
+        if not minimum <= parsed <= maximum:
+            return False
+    return True
+
+
+def _channel_numeric_finite(channel: Any) -> bool:
     if not isinstance(channel, list) or len(channel) != 100:
         return False
     for value in channel:
-        if not isinstance(value, (int, float)):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
             return False
         parsed = float(value)
-        if not minimum <= parsed <= maximum:
+        if not math.isfinite(parsed):
             return False
     return True

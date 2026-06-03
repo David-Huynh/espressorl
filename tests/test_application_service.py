@@ -278,6 +278,28 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertLessEqual(abs(result.recommendation.target_yield_g - 36.0), 4.0)
         self.assertLess(shots.get("shot_1").reward_confidence, 1.0)  # type: ignore[union-attr]
 
+    def test_ingest_masks_invalid_flow_without_dropping_espresso_shot(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        result = service.ingest_shot_profile(
+            shot_event(
+                "shot_1",
+                1,
+                flow=[100_000.0, 100_000.0, 100_000.0],
+                target_flow=[2.0, 2.0, 2.0],
+            )
+        )
+
+        self.assertTrue(result.stored)
+        shot = shots.get("shot_1")
+        self.assertIsNotNone(shot)
+        self.assertFalse(shot.profile_flow_valid)  # type: ignore[union-attr]
+        self.assertTrue(shot.profile_flow_masked)  # type: ignore[union-attr]
+        self.assertEqual(float(shot.profile[2].max()), 0.0)  # type: ignore[union-attr]
+        self.assertEqual(float(shot.profile[3].max()), 0.0)  # type: ignore[union-attr]
+
     def test_utility_flush_does_not_consume_or_train_active_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
@@ -296,14 +318,13 @@ class ApplicationServiceTests(unittest.TestCase):
         )
 
         self.assertIsNone(result.recommendation)
-        self.assertEqual(result.shot.shot_type, ShotType.UTILITY_FLUSH)
-        self.assertTrue(result.shot.exclude_from_local_optimization)
-        self.assertEqual(result.shot.optimization_weight, 0.0)
-        self.assertFalse(result.shot.rating_prompt_allowed)
-        self.assertEqual(result.shot.recommendation_attribution_weight, 0.0)
+        self.assertIsNone(result.shot)
+        self.assertFalse(result.stored)
+        self.assertEqual(result.dropped_reason, "not_locally_optimizable:utility_flush")
+        self.assertIsNone(shots.get("flush_1"))
         self.assertEqual(recs.get(active.recommendation_id).status, RecommendationStatus.PENDING)  # type: ignore[union-attr]
 
-    def test_local_optimization_disabled_stores_shot_without_new_recommendation(self) -> None:
+    def test_local_optimization_disabled_drops_shot_without_new_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
@@ -318,10 +339,10 @@ class ApplicationServiceTests(unittest.TestCase):
         )
 
         self.assertIsNone(result.recommendation)
-        self.assertEqual(result.shot.shot_type, ShotType.ESPRESSO)
-        self.assertTrue(result.shot.exclude_from_local_optimization)
-        self.assertEqual(result.shot.optimization_weight, 0.0)
-        self.assertTrue(result.shot.rating_prompt_allowed)
+        self.assertIsNone(result.shot)
+        self.assertFalse(result.stored)
+        self.assertEqual(result.dropped_reason, "local_optimization_disabled")
+        self.assertEqual(shots.rows, {})
         self.assertEqual(recs.rows, {})
 
     def test_local_optimization_disabled_shot_is_not_queued_for_community_upload(self) -> None:
@@ -339,9 +360,8 @@ class ApplicationServiceTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.shot.shot_type, ShotType.ESPRESSO)
-        self.assertTrue(result.shot.exclude_from_local_optimization)
-        self.assertEqual(result.shot.optimization_weight, 0.0)
+        self.assertIsNone(result.shot)
+        self.assertEqual(shots.rows, {})
         self.assertFalse(any(item.local_record_id == "hot_water_1" for item in uploads.rows.values()))
 
     def test_shot_correction_excludes_stored_shot_from_local_optimization(self) -> None:
@@ -433,7 +453,8 @@ class ApplicationServiceTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.shot.shot_type, ShotType.UTILITY_FLUSH)
+        self.assertIsNone(result.shot)
+        self.assertEqual(shots.rows, {})
         self.assertFalse(any(item.local_record_id == "flush_1" for item in uploads.rows.values()))
 
     def test_decision_and_actual_shot_data_drive_follow_through(self) -> None:

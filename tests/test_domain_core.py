@@ -14,7 +14,12 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     ShotRecord,
 )
-from espresso_rl.domain.profile import profile_mse, profile_score, resample_profile
+from espresso_rl.domain.profile import (
+    profile_mse,
+    profile_score,
+    resample_profile,
+    resample_profile_with_quality,
+)
 from espresso_rl.domain.reward import compute_reward
 from espresso_rl.domain.staleness import check_recommendation_staleness
 
@@ -71,6 +76,27 @@ class DomainCoreTests(unittest.TestCase):
         )
 
         self.assertEqual(profile_mse(profile), 0.0)
+
+    def test_sanitized_profile_masks_invalid_active_flow_pair(self) -> None:
+        quality = resample_profile_with_quality(
+            event(flow=[100_000.0, 100_000.0, 100_000.0], target_flow=[2.0, 2.0, 2.0])
+        )
+
+        self.assertFalse(quality.flow_valid)
+        self.assertTrue(quality.flow_masked)
+        self.assertEqual(float(quality.profile[2].max()), 0.0)
+        self.assertEqual(float(quality.profile[3].max()), 0.0)
+        self.assertEqual(profile_mse(quality.profile), 0.0)
+
+    def test_sanitized_profile_masks_invalid_target_flow(self) -> None:
+        quality = resample_profile_with_quality(
+            event(flow=[1.0, 2.0, 2.0], target_flow=[100_000.0, 100_000.0, 100_000.0])
+        )
+
+        self.assertTrue(quality.flow_valid)
+        self.assertTrue(quality.flow_masked)
+        self.assertEqual(float(quality.profile[2].max()), 0.0)
+        self.assertEqual(float(quality.profile[3].max()), 0.0)
 
     def test_ignored_recommendation_is_not_followed(self) -> None:
         rec = Recommendation(

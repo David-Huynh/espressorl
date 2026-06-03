@@ -139,6 +139,13 @@ def main() -> None:
 
     def on_shot(event: ShotProfileEvent) -> None:
         result = service.ingest_shot_profile(event)
+        if result.shot is None:
+            logger.info(
+                "Shot %s dropped before local storage reason=%s",
+                event.shot_id,
+                result.dropped_reason or "unknown",
+            )
+            return
         if result.recommendation is None:
             logger.info(
                 "Shot %s stored type=%s local_optimization=%s; no BO recommendation generated",

@@ -158,6 +158,34 @@ class CommunityValidationTests(unittest.TestCase):
         self.assertTrue(stored["profile_flow_masked"])
         self.assertTrue(warehouse.validated_summaries[upload.upload_id]["profile_flow_masked"])
 
+    def test_invalid_active_flow_pair_is_masked_before_trusted_storage(self) -> None:
+        payload = shot_payload()
+        payload["profile_resampled"][2] = [100_000.0 for _ in range(100)]
+        payload["profile_resampled"][3] = [2.0 for _ in range(100)]
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.validated_shots, 1)
+        stored = warehouse.validated_shots[0].payload_json
+        self.assertEqual(stored["profile_resampled"][2], [0.0 for _ in range(100)])
+        self.assertEqual(stored["profile_resampled"][3], [0.0 for _ in range(100)])
+        self.assertFalse(stored["profile_flow_valid"])
+        self.assertTrue(stored["profile_flow_masked"])
+        self.assertTrue(warehouse.validated_summaries[upload.upload_id]["profile_flow_masked"])
+
+    def test_nonfinite_flow_is_rejected_not_masked(self) -> None:
+        payload = shot_payload()
+        payload["profile_resampled"][2] = [float("nan") for _ in range(100)]
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.rejected, 1)
+        self.assertIn("non-finite", " ".join(warehouse.rejections[upload.upload_id]))
+
     def test_community_trust_remains_capped_and_penalized_by_rejections(self) -> None:
         self.assertEqual(
             install_trust_score(

@@ -27,7 +27,7 @@ from espresso_rl.domain.models import (
     now_ts,
 )
 from espresso_rl.domain.optimization import OptimizationContext
-from espresso_rl.domain.profile import profile_hash, profile_mse, profile_score, resample_profile
+from espresso_rl.domain.profile import profile_hash, profile_mse, profile_score, resample_profile_with_quality
 from espresso_rl.domain.reward import compute_reward
 from espresso_rl.domain.staleness import check_recommendation_staleness
 from espresso_rl.domain.utility import classify_shot_profile_event
@@ -45,8 +45,13 @@ from espresso_rl.ports.repositories import (
 
 @dataclass(frozen=True)
 class IngestResult:
-    shot: ShotRecord
+    shot: ShotRecord | None
     recommendation: Recommendation | None
+    dropped_reason: str | None = None
+
+    @property
+    def stored(self) -> bool:
+        return self.shot is not None
 
 
 def _recommendation_signature(recommendation: Recommendation) -> tuple:
@@ -102,8 +107,16 @@ class EspressoRLService:
     def ingest_shot_profile(self, event: ShotProfileEvent) -> IngestResult:
         now = self._clock()
         classification = classify_shot_profile_event(event)
-        recommendation = self._recommendation_for_event(event, now) if classification.locally_optimizable else None
-        profile = resample_profile(event)
+        if not classification.locally_optimizable:
+            reason = (
+                "local_optimization_disabled"
+                if not event.local_optimization_enabled or event.exclude_from_local_optimization
+                else f"not_locally_optimizable:{classification.shot_type.value}"
+            )
+            return IngestResult(shot=None, recommendation=None, dropped_reason=reason)
+        recommendation = self._recommendation_for_event(event, now)
+        profile_quality = resample_profile_with_quality(event)
+        profile = profile_quality.profile
         mse = profile_mse(profile)
         score = profile_score(profile)
 
@@ -136,6 +149,8 @@ class EspressoRLService:
             pump_flow_source=event.pump_flow_source,
             pump_flow_units=event.pump_flow_units,
             pump_flow_calibration_required=event.pump_flow_calibration_required,
+            profile_flow_valid=profile_quality.flow_valid,
+            profile_flow_masked=profile_quality.flow_masked,
             created_at=now,
             updated_at=now,
         )

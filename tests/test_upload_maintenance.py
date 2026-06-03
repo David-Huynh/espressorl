@@ -99,15 +99,23 @@ class UploadMaintenanceTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
 
-    def test_preflight_rejects_invalid_flow_when_flow_target_is_active(self) -> None:
+    def test_preflight_allows_invalid_flow_when_flow_target_is_active(self) -> None:
         profile = valid_profile()
         profile[2] = [100_000.0 for _ in range(100)]
         profile[3] = [2.0 for _ in range(100)]
 
         result = validate_upload_payload_json(payload(profile_resampled=profile))
 
+        self.assertTrue(result.ok)
+
+    def test_preflight_rejects_nonfinite_flow_even_when_maskable(self) -> None:
+        profile = valid_profile()
+        profile[2] = [float("inf") for _ in range(100)]
+
+        result = validate_upload_payload_json(payload(profile_resampled=profile))
+
         self.assertFalse(result.ok)
-        self.assertIn("profile_resampled flow out of range", result.errors)
+        self.assertIn("profile_resampled flow contains non-finite or nonnumeric values", result.errors)
 
     def test_trusted_payload_copy_masks_invalid_inactive_flow(self) -> None:
         profile = valid_profile()
@@ -117,6 +125,20 @@ class UploadMaintenanceTests(unittest.TestCase):
         trusted = mask_untrusted_profile_channels(raw)
 
         self.assertEqual(trusted["profile_resampled"][2], [0.0 for _ in range(100)])
+        self.assertEqual(trusted["profile_resampled"][3], [0.0 for _ in range(100)])
+        self.assertFalse(trusted["profile_flow_valid"])
+        self.assertTrue(trusted["profile_flow_masked"])
+
+    def test_trusted_payload_copy_masks_invalid_active_flow_pair(self) -> None:
+        profile = valid_profile()
+        profile[2] = [100_000.0 for _ in range(100)]
+        profile[3] = [2.0 for _ in range(100)]
+        raw = payload_dict(profile_resampled=profile)
+
+        trusted = mask_untrusted_profile_channels(raw)
+
+        self.assertEqual(trusted["profile_resampled"][2], [0.0 for _ in range(100)])
+        self.assertEqual(trusted["profile_resampled"][3], [0.0 for _ in range(100)])
         self.assertFalse(trusted["profile_flow_valid"])
         self.assertTrue(trusted["profile_flow_masked"])
 
