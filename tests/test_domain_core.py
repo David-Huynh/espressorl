@@ -53,6 +53,18 @@ class DomainCoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             event(flow=[0.0, 1.0])
 
+    def test_canonical_profile_rejects_nonfinite_profile_values(self) -> None:
+        with self.assertRaises(ValueError):
+            event(flow=[0.0, float("nan"), 2.0])
+
+    def test_canonical_profile_rejects_nonfinite_scalar_values(self) -> None:
+        with self.assertRaises(ValueError):
+            event(dose_in_g=float("inf"))
+
+    def test_canonical_profile_rejects_boolean_numeric_values(self) -> None:
+        with self.assertRaises(ValueError):
+            event(flow=[0.0, True, 2.0])
+
     def test_profile_resamples_to_fixed_shape(self) -> None:
         profile = resample_profile(event())
         self.assertEqual(profile.shape, (5, 100))

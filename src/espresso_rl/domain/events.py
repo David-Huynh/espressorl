@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,11 +24,23 @@ VALID_CORRECTION_TAGS = {
 }
 
 
+def _number(value: Any, field_name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must contain only finite numbers")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must contain only finite numbers") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{field_name} must contain only finite numbers")
+    return parsed
+
+
 def _numbers(values: list[Any], field_name: str) -> list[float]:
     try:
-        return [float(v) for v in values]
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field_name} must contain only numbers") from exc
+        return [_number(v, field_name) for v in values]
+    except TypeError as exc:
+        raise ValueError(f"{field_name} must contain only finite numbers") from exc
 
 
 @dataclass(frozen=True)
@@ -74,6 +87,17 @@ class ShotProfileEvent:
         object.__setattr__(self, "time_ms", _numbers(self.time_ms, "time_ms"))
         for name in ("pressure", "target_pressure", "flow", "target_flow", "weight"):
             object.__setattr__(self, name, _numbers(getattr(self, name), name))
+        object.__setattr__(self, "grinder_step_size_um", _number(self.grinder_step_size_um, "grinder_step_size_um"))
+        object.__setattr__(self, "dose_in_g", _number(self.dose_in_g, "dose_in_g"))
+        object.__setattr__(self, "target_yield_g", _number(self.target_yield_g, "target_yield_g"))
+        if self.grind_steps is not None:
+            object.__setattr__(self, "grind_steps", _number(self.grind_steps, "grind_steps"))
+        if self.beverage_out_g is not None:
+            object.__setattr__(self, "beverage_out_g", _number(self.beverage_out_g, "beverage_out_g"))
+        if self.shot_time_s is not None:
+            object.__setattr__(self, "shot_time_s", _number(self.shot_time_s, "shot_time_s"))
+        if self.optimization_weight is not None:
+            object.__setattr__(self, "optimization_weight", _number(self.optimization_weight, "optimization_weight"))
         lengths = {
             len(self.time_ms),
             len(self.pressure),
@@ -94,7 +118,7 @@ class ShotProfileEvent:
             raise ValueError("beverage_out_g must be positive when present")
         if self.shot_time_s is not None and self.shot_time_s <= 0:
             raise ValueError("shot_time_s must be positive when present")
-        if self.optimization_weight is not None and not 0.0 <= float(self.optimization_weight) <= 1.0:
+        if self.optimization_weight is not None and not 0.0 <= self.optimization_weight <= 1.0:
             raise ValueError("optimization_weight must be between 0 and 1")
 
 
