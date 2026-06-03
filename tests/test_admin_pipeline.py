@@ -5,7 +5,7 @@ import unittest
 
 from espresso_rl.adapters.postgres_repositories import _row_to_rejection_summary
 from espresso_rl.application.admin_pipeline import AdminPipelineService
-from espresso_rl.application.community_mirror import CommunityMirrorResult
+from espresso_rl.application.community_mirror import CommunityMirrorResult, CommunityQueuePurgeResult
 from espresso_rl.application.community_priors import CommunityPriorGenerationResult
 from espresso_rl.application.community_validation import CommunityValidationResult
 from espresso_rl.domain.community import AdminActionLogEntry, CommunityRejectionSummary
@@ -63,7 +63,7 @@ class AdminPipelineTests(unittest.TestCase):
         self.assertEqual(warehouse.admin_actions[-1].requested_by, "dashboard_user_with_spaces")
 
     def test_purge_dry_run_is_locked_and_audited_without_changes(self) -> None:
-        warehouse = FakeWarehouse()
+        warehouse = FakeWarehouse(purge_eligible={"validated": 4, "rejected": 2})
         service = AdminPipelineService(
             warehouse=warehouse,
             mirror=FakeMirror(),
@@ -76,8 +76,45 @@ class AdminPipelineTests(unittest.TestCase):
 
         self.assertTrue(result.dry_run)
         self.assertIsNotNone(result.status_snapshot)
+        self.assertEqual(result.purge.local_eligible, 6)  # type: ignore[union-attr]
+        self.assertFalse(warehouse.purged)
         self.assertEqual(warehouse.admin_actions[-1].action_type, "purge_queue_once")
         self.assertEqual(warehouse.admin_actions[-1].rows_changed, 0)
+
+    def test_purge_deletes_local_terminal_rows_and_source_queue_when_enabled(self) -> None:
+        warehouse = FakeWarehouse(purge_eligible={"validated": 3, "rejected": 1})
+        service = AdminPipelineService(
+            warehouse=warehouse,
+            mirror=PurgingMirror(source_purged=5),
+            validator=FakeValidator(),
+            prior_generator=FakePriorGenerator(),
+            clock=FakeClock(),
+        )
+
+        result = service.purge_queue_once(requested_by="dashboard")
+
+        self.assertEqual(result.purge.local_eligible, 4)  # type: ignore[union-attr]
+        self.assertEqual(result.purge.local_purged, 4)  # type: ignore[union-attr]
+        self.assertEqual(result.purge.source_purged, 5)  # type: ignore[union-attr]
+        self.assertEqual(result.purge.purged, 9)  # type: ignore[union-attr]
+        self.assertEqual(warehouse.admin_actions[-1].rows_changed, 9)
+
+    def test_purge_can_clean_local_terminal_rows_without_supabase_credentials(self) -> None:
+        warehouse = FakeWarehouse(purge_eligible={"rejected": 2})
+        service = AdminPipelineService(
+            warehouse=warehouse,
+            mirror=None,
+            validator=FakeValidator(),
+            prior_generator=FakePriorGenerator(),
+            clock=FakeClock(),
+        )
+
+        result = service.purge_queue_once(requested_by="dashboard")
+
+        self.assertEqual(result.purge.local_purged, 2)  # type: ignore[union-attr]
+        self.assertEqual(result.purge.source_purged, 0)  # type: ignore[union-attr]
+        self.assertFalse(result.purge.source_enabled)  # type: ignore[union-attr]
+        self.assertIn("Supabase source purge is disabled", result.warnings[0])
 
     def test_status_uses_safe_rejection_categories_only(self) -> None:
         warehouse = FakeWarehouse(
@@ -126,12 +163,37 @@ class AdminPipelineTests(unittest.TestCase):
 
 
 class FakeWarehouse:
-    def __init__(self, rejections: list[CommunityRejectionSummary] | None = None) -> None:
+    def __init__(
+        self,
+        rejections: list[CommunityRejectionSummary] | None = None,
+        purge_eligible: dict[str, int] | None = None,
+    ) -> None:
         self.admin_actions: list[AdminActionLogEntry] = []
         self.rejections = rejections or []
+        self.purge_eligible = purge_eligible or {}
+        self.purged = False
 
     def raw_upload_counts_by_status(self) -> dict[str, int]:
         return {"mirrored": 2}
+
+    def raw_upload_purge_eligible_counts(
+        self,
+        *,
+        validated_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+    ) -> dict[str, int]:
+        return dict(self.purge_eligible)
+
+    def purge_raw_uploads(
+        self,
+        *,
+        validated_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+    ) -> int:
+        self.purged = True
+        purged = sum(self.purge_eligible.values())
+        self.purge_eligible = {}
+        return purged
 
     def validated_shot_count(self) -> int:
         return 3
@@ -175,6 +237,17 @@ class FakeMirror:
 
     def purge_retained_queue(self):
         raise AssertionError("dry-run purge must not call the purge RPC")
+
+
+class PurgingMirror:
+    def __init__(self, source_purged: int) -> None:
+        self.source_purged = source_purged
+
+    def mirror_once(self, limit: int = 100) -> CommunityMirrorResult:
+        return CommunityMirrorResult(claimed=0, mirrored=0, failed=0)
+
+    def purge_retained_queue(self) -> CommunityQueuePurgeResult:
+        return CommunityQueuePurgeResult(purged=self.source_purged, source_purged=self.source_purged)
 
 
 class FakeValidator:

@@ -6,7 +6,11 @@ import unittest
 from espresso_rl.application.admin_pipeline import AdminPipelineStatus
 
 
-@unittest.skipUnless(importlib.util.find_spec("fastapi"), "FastAPI is not installed in the local test env")
+@unittest.skipUnless(
+    importlib.util.find_spec("fastapi")
+    and (importlib.util.find_spec("httpx2") or importlib.util.find_spec("httpx")),
+    "FastAPI TestClient dependencies are not installed in the local test env",
+)
 class AdminDashboardTests(unittest.TestCase):
     def test_status_requires_bearer_token_and_does_not_render_secret_fields(self) -> None:
         from fastapi.testclient import TestClient
@@ -31,6 +35,7 @@ class FakeAdminService:
     def status(self) -> AdminPipelineStatus:
         return AdminPipelineStatus(
             raw_upload_counts={},
+            local_raw_upload_purge_eligible_counts={},
             validated_shot_count=0,
             training_row_count=0,
             community_prior_count=0,

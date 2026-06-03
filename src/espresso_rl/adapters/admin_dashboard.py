@@ -224,10 +224,13 @@ _DASHBOARD_HTML = """
     }
     function renderStatus(data) {
       const raw = data.raw_upload_counts || {};
+      const purge = data.local_raw_upload_purge_eligible_counts || {};
       const metrics = {
         mirrored: raw.mirrored || 0,
         rejected: raw.rejected || 0,
         validated: raw.validated || 0,
+        purge_validated: purge.validated || 0,
+        purge_rejected: purge.rejected || 0,
         validated_shots: data.validated_shot_count || 0,
         training_rows: data.training_row_count || 0,
         community_priors: data.community_prior_count || 0,

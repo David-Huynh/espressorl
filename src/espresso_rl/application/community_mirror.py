@@ -15,6 +15,10 @@ class CommunityMirrorResult:
 @dataclass(frozen=True)
 class CommunityQueuePurgeResult:
     purged: int
+    source_purged: int = 0
+    local_purged: int = 0
+    local_eligible: int = 0
+    source_enabled: bool = True
 
 
 class CommunityMirrorService:
@@ -51,10 +55,9 @@ class CommunityMirrorService:
         rejected_retention_days: int = 30,
         failed_retention_days: int = 90,
     ) -> CommunityQueuePurgeResult:
-        return CommunityQueuePurgeResult(
-            purged=self._source.purge_retained_queue(
-                mirrored_retention_days=mirrored_retention_days,
-                rejected_retention_days=rejected_retention_days,
-                failed_retention_days=failed_retention_days,
-            )
+        source_purged = self._source.purge_retained_queue(
+            mirrored_retention_days=mirrored_retention_days,
+            rejected_retention_days=rejected_retention_days,
+            failed_retention_days=failed_retention_days,
         )
+        return CommunityQueuePurgeResult(purged=source_purged, source_purged=source_purged)

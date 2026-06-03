@@ -20,6 +20,7 @@ from espresso_rl.ports.community import CommunityWarehouseRepository
 @dataclass(frozen=True)
 class AdminPipelineStatus:
     raw_upload_counts: dict[str, int]
+    local_raw_upload_purge_eligible_counts: dict[str, int]
     validated_shot_count: int
     training_row_count: int
     community_prior_count: int
@@ -74,6 +75,7 @@ class AdminPipelineService:
     def status(self) -> AdminPipelineStatus:
         return AdminPipelineStatus(
             raw_upload_counts=self._warehouse.raw_upload_counts_by_status(),
+            local_raw_upload_purge_eligible_counts=self._warehouse.raw_upload_purge_eligible_counts(),
             validated_shot_count=self._warehouse.validated_shot_count(),
             training_row_count=self._warehouse.training_row_count(),
             community_prior_count=self._warehouse.community_prior_count(),
@@ -193,24 +195,43 @@ class AdminPipelineService:
         )
 
     def _purge_queue_once_unlocked(self, *, dry_run: bool) -> AdminPipelineActionResult:
-        if self._mirror is None:
-            return AdminPipelineActionResult(
-                action="purge_queue_once",
-                dry_run=dry_run,
-                warnings=["purge is disabled because Supabase admin credentials are not configured"],
-            )
+        source_enabled = self._mirror is not None
+        local_eligible_counts = self._warehouse.raw_upload_purge_eligible_counts()
+        local_eligible = sum(local_eligible_counts.values())
         if dry_run:
+            warnings: list[str] = []
+            if not source_enabled:
+                warnings.append("Supabase source purge is disabled because admin credentials are not configured")
+            warnings.append("purge dry_run reports local terminal rows eligible for deletion but does not delete them")
             return AdminPipelineActionResult(
                 action="purge_queue_once",
+                purge=CommunityQueuePurgeResult(
+                    purged=local_eligible,
+                    local_eligible=local_eligible,
+                    source_enabled=source_enabled,
+                ),
                 dry_run=True,
                 status_snapshot=self.status(),
-                warnings=[
-                    "purge dry_run does not call Supabase purge RPC because that RPC deletes queue rows"
-                ],
+                warnings=warnings,
             )
+        local_purged = self._warehouse.purge_raw_uploads()
+        source_purged = 0
+        warnings = []
+        if self._mirror is not None:
+            source_result = self._mirror.purge_retained_queue()
+            source_purged = source_result.source_purged or source_result.purged
+        else:
+            warnings.append("Supabase source purge is disabled because admin credentials are not configured")
         return AdminPipelineActionResult(
             action="purge_queue_once",
-            purge=self._mirror.purge_retained_queue(),
+            purge=CommunityQueuePurgeResult(
+                purged=local_purged + source_purged,
+                source_purged=source_purged,
+                local_purged=local_purged,
+                local_eligible=local_eligible,
+                source_enabled=source_enabled,
+            ),
+            warnings=warnings,
         )
 
     def _run_locked_action(

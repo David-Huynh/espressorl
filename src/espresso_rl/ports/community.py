@@ -93,6 +93,22 @@ class CommunityWarehouseRepository(Protocol):
     def raw_upload_counts_by_status(self) -> dict[str, int]:
         ...
 
+    def raw_upload_purge_eligible_counts(
+        self,
+        *,
+        validated_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+    ) -> dict[str, int]:
+        ...
+
+    def purge_raw_uploads(
+        self,
+        *,
+        validated_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+    ) -> int:
+        ...
+
     def validated_shot_count(self) -> int:
         ...
 

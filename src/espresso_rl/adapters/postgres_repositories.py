@@ -685,6 +685,67 @@ class PostgresCommunityWarehouse:
         ).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
 
+    def raw_upload_purge_eligible_counts(
+        self,
+        *,
+        validated_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+    ) -> dict[str, int]:
+        rows = self._store.conn.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM community_raw_uploads
+            WHERE (
+                    status='validated'
+                    AND validated_at IS NOT NULL
+                    AND validated_at < now() - make_interval(days => %s)
+                )
+                OR (
+                    status='rejected'
+                    AND rejected_at IS NOT NULL
+                    AND rejected_at < now() - make_interval(days => %s)
+                )
+            GROUP BY status
+            """,
+            (
+                max(1, int(validated_retention_days)),
+                max(1, int(rejected_retention_days)),
+            ),
+        ).fetchall()
+        return {str(row["status"]): int(row["count"]) for row in rows}
+
+    def purge_raw_uploads(
+        self,
+        *,
+        validated_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+    ) -> int:
+        try:
+            cursor = self._store.conn.execute(
+                """
+                DELETE FROM community_raw_uploads
+                WHERE (
+                        status='validated'
+                        AND validated_at IS NOT NULL
+                        AND validated_at < now() - make_interval(days => %s)
+                    )
+                    OR (
+                        status='rejected'
+                        AND rejected_at IS NOT NULL
+                        AND rejected_at < now() - make_interval(days => %s)
+                    )
+                """,
+                (
+                    max(1, int(validated_retention_days)),
+                    max(1, int(rejected_retention_days)),
+                ),
+            )
+            self._store.conn.commit()
+            return max(0, int(cursor.rowcount or 0))
+        except Exception:
+            self._store.conn.rollback()
+            raise
+
     def validated_shot_count(self) -> int:
         return _count_table(self._store.conn, "community_validated_shots")
 
