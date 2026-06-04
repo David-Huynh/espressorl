@@ -65,6 +65,36 @@ class DomainCoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             event(flow=[0.0, True, 2.0])
 
+    def test_canonical_profile_accepts_sanitized_execution_metadata(self) -> None:
+        parsed = event(
+            profile_id="profile_1",
+            profile_label="Cremina lever machine",
+            profile_phase_count=5,
+            final_phase_index=3,
+            final_phase_name="ramp",
+            final_phase_type="brew",
+            final_phase_elapsed_s=8.5,
+            final_pump_target="pressure",
+            final_target_pressure=9.0,
+            final_target_flow=0.0,
+            final_valve_open=True,
+            profile_temperature_c=86.5,
+            final_phase_temperature_c=86.5,
+            shot_end_state="manual_or_interrupted",
+        )
+
+        self.assertEqual(parsed.final_phase_name, "ramp")
+        self.assertEqual(parsed.final_pump_target, "pressure")
+        self.assertEqual(parsed.shot_end_state, "manual_or_interrupted")
+
+    def test_canonical_profile_rejects_invalid_execution_metadata(self) -> None:
+        with self.assertRaises(ValueError):
+            event(final_phase_type="steam")
+        with self.assertRaises(ValueError):
+            event(final_target_pressure=99.0)
+        with self.assertRaises(ValueError):
+            event(profile_phase_count=1.5)
+
     def test_profile_resamples_to_fixed_shape(self) -> None:
         profile = resample_profile(event())
         self.assertEqual(profile.shape, (5, 100))

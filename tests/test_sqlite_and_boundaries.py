@@ -46,6 +46,27 @@ def shot_event() -> ShotProfileEvent:
         target_yield_g=36.0,
         beverage_out_g=36.0,
         shot_time_s=30.0,
+        weight_source="hardware_scale",
+        flow_source="beverage_weight_derivative",
+        flow_units="g_per_s",
+        pump_flow_source="gaggimate_pump_model",
+        pump_flow_units="ml_per_s",
+        pump_flow_calibration_required=False,
+        profile_id="profile_1",
+        profile_label="Cremina lever machine",
+        profile_type="pro",
+        profile_phase_count=5,
+        final_phase_index=3,
+        final_phase_name="ramp",
+        final_phase_type="brew",
+        final_phase_elapsed_s=8.5,
+        final_pump_target="pressure",
+        final_target_pressure=9.0,
+        final_target_flow=0.0,
+        final_valve_open=True,
+        profile_temperature_c=86.5,
+        final_phase_temperature_c=86.5,
+        shot_end_state="manual_or_interrupted",
     )
 
 
@@ -94,6 +115,11 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertIsNotNone(stored_shot)
             self.assertIsNotNone(stored_rec)
             self.assertEqual(stored_shot.profile.shape, (5, 100))  # type: ignore[union-attr]
+            self.assertEqual(stored_shot.weight_source, "hardware_scale")  # type: ignore[union-attr]
+            self.assertEqual(stored_shot.profile_label, "Cremina lever machine")  # type: ignore[union-attr]
+            self.assertEqual(stored_shot.final_phase_name, "ramp")  # type: ignore[union-attr]
+            self.assertTrue(stored_shot.final_valve_open)  # type: ignore[union-attr]
+            self.assertEqual(stored_shot.shot_end_state, "manual_or_interrupted")  # type: ignore[union-attr]
             self.assertEqual(stored_rec.reason, result.recommendation.reason)  # type: ignore[union-attr]
             self.assertEqual(stored_rec.apply_status, RecommendationApplyStatus.MANUAL_REQUIRED)  # type: ignore[union-attr]
             self.assertEqual(stored_rec.manual_fields, ["next_grind_steps", "next_dose_g"])  # type: ignore[union-attr]

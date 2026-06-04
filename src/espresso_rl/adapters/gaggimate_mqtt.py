@@ -213,6 +213,21 @@ class GaggimateMQTTClient:
             pump_flow_source=_optional_string(payload.get("pump_flow_source")),
             pump_flow_units=_optional_string(payload.get("pump_flow_units")),
             pump_flow_calibration_required=bool(payload.get("pump_flow_calibration_required", False)),
+            profile_id=_optional_string(payload.get("profile_id")),
+            profile_label=_optional_string(payload.get("profile_label")),
+            profile_type=_optional_string(payload.get("profile_type")),
+            profile_phase_count=_optional_int(payload.get("profile_phase_count")),
+            final_phase_index=_optional_int(payload.get("final_phase_index")),
+            final_phase_name=_optional_string(payload.get("final_phase_name")),
+            final_phase_type=_optional_string(payload.get("final_phase_type")),
+            final_phase_elapsed_s=_optional_float(payload.get("final_phase_elapsed_s")),
+            final_pump_target=_optional_string(payload.get("final_pump_target")),
+            final_target_pressure=_optional_float(payload.get("final_target_pressure")),
+            final_target_flow=_optional_float(payload.get("final_target_flow")),
+            final_valve_open=_optional_bool(payload.get("final_valve_open")),
+            profile_temperature_c=_optional_float(payload.get("profile_temperature_c")),
+            final_phase_temperature_c=_optional_float(payload.get("final_phase_temperature_c")),
+            shot_end_state=_optional_string(payload.get("shot_end_state")),
         )
 
     def translate_feedback_payload(self, payload: dict[str, Any], mac: str) -> ShotFeedbackEvent:
@@ -309,13 +324,31 @@ class GaggimateMQTTClient:
 def _optional_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
+    if isinstance(value, bool):
+        raise ValueError("optional numeric fields cannot be boolean")
     return float(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("optional integer fields cannot be boolean")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    raise ValueError("optional integer field is invalid")
 
 
 def _optional_bool(value: Any) -> bool | None:
     if value is None:
         return None
-    return bool(value)
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1):
+        return bool(value)
+    raise ValueError("optional boolean field is invalid")
 
 
 def _optional_string(value: Any) -> str | None:

@@ -85,6 +85,21 @@ class SQLiteStore:
                 pump_flow_calibration_required INTEGER NOT NULL DEFAULT 0,
                 profile_flow_valid INTEGER NOT NULL DEFAULT 1,
                 profile_flow_masked INTEGER NOT NULL DEFAULT 0,
+                profile_id TEXT,
+                profile_label TEXT,
+                profile_type TEXT,
+                profile_phase_count INTEGER,
+                final_phase_index INTEGER,
+                final_phase_name TEXT,
+                final_phase_type TEXT,
+                final_phase_elapsed_s REAL,
+                final_pump_target TEXT,
+                final_target_pressure REAL,
+                final_target_flow REAL,
+                final_valve_open INTEGER,
+                profile_temperature_c REAL,
+                final_phase_temperature_c REAL,
+                shot_end_state TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -168,6 +183,21 @@ class SQLiteStore:
         self._ensure_column("shots", "pump_flow_calibration_required", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("shots", "profile_flow_valid", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("shots", "profile_flow_masked", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("shots", "profile_id", "TEXT")
+        self._ensure_column("shots", "profile_label", "TEXT")
+        self._ensure_column("shots", "profile_type", "TEXT")
+        self._ensure_column("shots", "profile_phase_count", "INTEGER")
+        self._ensure_column("shots", "final_phase_index", "INTEGER")
+        self._ensure_column("shots", "final_phase_name", "TEXT")
+        self._ensure_column("shots", "final_phase_type", "TEXT")
+        self._ensure_column("shots", "final_phase_elapsed_s", "REAL")
+        self._ensure_column("shots", "final_pump_target", "TEXT")
+        self._ensure_column("shots", "final_target_pressure", "REAL")
+        self._ensure_column("shots", "final_target_flow", "REAL")
+        self._ensure_column("shots", "final_valve_open", "INTEGER")
+        self._ensure_column("shots", "profile_temperature_c", "REAL")
+        self._ensure_column("shots", "final_phase_temperature_c", "REAL")
+        self._ensure_column("shots", "shot_end_state", "TEXT")
         self.conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_upload_queue_record
@@ -206,6 +236,15 @@ class SQLiteShotRepository:
                 rating_prompt_allowed, grind_followed, dose_followed,
                 yield_followed, grind_recommendation_trust,
                 dose_recommendation_trust, yield_recommendation_trust,
+                weight_source, flow_source, flow_units, pump_flow_source,
+                pump_flow_units, pump_flow_calibration_required,
+                profile_flow_valid, profile_flow_masked, profile_id,
+                profile_label, profile_type, profile_phase_count,
+                final_phase_index, final_phase_name, final_phase_type,
+                final_phase_elapsed_s, final_pump_target,
+                final_target_pressure, final_target_flow, final_valve_open,
+                profile_temperature_c, final_phase_temperature_c,
+                shot_end_state,
                 created_at, updated_at
             ) VALUES (
                 :shot_id, :timestamp, :install_id, :machine_id, :machine_adapter,
@@ -223,6 +262,15 @@ class SQLiteShotRepository:
                 :rating_prompt_allowed, :grind_followed, :dose_followed,
                 :yield_followed, :grind_recommendation_trust,
                 :dose_recommendation_trust, :yield_recommendation_trust,
+                :weight_source, :flow_source, :flow_units, :pump_flow_source,
+                :pump_flow_units, :pump_flow_calibration_required,
+                :profile_flow_valid, :profile_flow_masked, :profile_id,
+                :profile_label, :profile_type, :profile_phase_count,
+                :final_phase_index, :final_phase_name, :final_phase_type,
+                :final_phase_elapsed_s, :final_pump_target,
+                :final_target_pressure, :final_target_flow, :final_valve_open,
+                :profile_temperature_c, :final_phase_temperature_c,
+                :shot_end_state,
                 :created_at, :updated_at
             )
             """,
@@ -683,9 +731,9 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "exclude_from_local_optimization": bool(shot.exclude_from_local_optimization),
         "optimization_weight": shot.optimization_weight,
         "rating_prompt_allowed": bool(shot.rating_prompt_allowed),
-        "grind_followed": _optional_bool_to_int(shot.grind_followed),
-        "dose_followed": _optional_bool_to_int(shot.dose_followed),
-        "yield_followed": _optional_bool_to_int(shot.yield_followed),
+        "grind_followed": shot.grind_followed,
+        "dose_followed": shot.dose_followed,
+        "yield_followed": shot.yield_followed,
         "grind_recommendation_trust": shot.grind_recommendation_trust,
         "dose_recommendation_trust": shot.dose_recommendation_trust,
         "yield_recommendation_trust": shot.yield_recommendation_trust,
@@ -697,6 +745,21 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "pump_flow_calibration_required": bool(shot.pump_flow_calibration_required),
         "profile_flow_valid": bool(shot.profile_flow_valid),
         "profile_flow_masked": bool(shot.profile_flow_masked),
+        "profile_id": shot.profile_id,
+        "profile_label": shot.profile_label,
+        "profile_type": shot.profile_type,
+        "profile_phase_count": shot.profile_phase_count,
+        "final_phase_index": shot.final_phase_index,
+        "final_phase_name": shot.final_phase_name,
+        "final_phase_type": shot.final_phase_type,
+        "final_phase_elapsed_s": shot.final_phase_elapsed_s,
+        "final_pump_target": shot.final_pump_target,
+        "final_target_pressure": shot.final_target_pressure,
+        "final_target_flow": shot.final_target_flow,
+        "final_valve_open": shot.final_valve_open,
+        "profile_temperature_c": shot.profile_temperature_c,
+        "final_phase_temperature_c": shot.final_phase_temperature_c,
+        "shot_end_state": shot.shot_end_state,
         "created_at": shot.created_at,
         "updated_at": shot.updated_at,
     }
@@ -757,6 +820,21 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         pump_flow_calibration_required=bool(row["pump_flow_calibration_required"]),
         profile_flow_valid=bool(row["profile_flow_valid"]),
         profile_flow_masked=bool(row["profile_flow_masked"]),
+        profile_id=row["profile_id"],
+        profile_label=row["profile_label"],
+        profile_type=row["profile_type"],
+        profile_phase_count=row["profile_phase_count"],
+        final_phase_index=row["final_phase_index"],
+        final_phase_name=row["final_phase_name"],
+        final_phase_type=row["final_phase_type"],
+        final_phase_elapsed_s=row["final_phase_elapsed_s"],
+        final_pump_target=row["final_pump_target"],
+        final_target_pressure=row["final_target_pressure"],
+        final_target_flow=row["final_target_flow"],
+        final_valve_open=_optional_int_to_bool(row["final_valve_open"]),
+        profile_temperature_c=row["profile_temperature_c"],
+        final_phase_temperature_c=row["final_phase_temperature_c"],
+        shot_end_state=row["shot_end_state"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

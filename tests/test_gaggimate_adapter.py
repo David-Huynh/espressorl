@@ -73,6 +73,21 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "pump_flow_source": "gaggimate_pump_model",
                 "pump_flow_units": "ml_per_s",
                 "pump_flow_calibration_required": False,
+                "profile_id": "profile_1",
+                "profile_label": "Cremina lever machine",
+                "profile_type": "pro",
+                "profile_phase_count": 5,
+                "final_phase_index": 3,
+                "final_phase_name": "ramp",
+                "final_phase_type": "brew",
+                "final_phase_elapsed_s": 8.5,
+                "final_pump_target": "pressure",
+                "final_target_pressure": 9.0,
+                "final_target_flow": 0.0,
+                "final_valve_open": True,
+                "profile_temperature_c": 86.5,
+                "final_phase_temperature_c": 86.5,
+                "shot_end_state": "manual_or_interrupted",
                 "recommendation_id": "rec_1",
             },
             mac="AA_BB",
@@ -96,6 +111,21 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.pump_flow_source, "gaggimate_pump_model")
         self.assertEqual(event.pump_flow_units, "ml_per_s")
         self.assertFalse(event.pump_flow_calibration_required)
+        self.assertEqual(event.profile_id, "profile_1")
+        self.assertEqual(event.profile_label, "Cremina lever machine")
+        self.assertEqual(event.profile_type, "pro")
+        self.assertEqual(event.profile_phase_count, 5)
+        self.assertEqual(event.final_phase_index, 3)
+        self.assertEqual(event.final_phase_name, "ramp")
+        self.assertEqual(event.final_phase_type, "brew")
+        self.assertEqual(event.final_phase_elapsed_s, 8.5)
+        self.assertEqual(event.final_pump_target, "pressure")
+        self.assertEqual(event.final_target_pressure, 9.0)
+        self.assertEqual(event.final_target_flow, 0.0)
+        self.assertTrue(event.final_valve_open)
+        self.assertEqual(event.profile_temperature_c, 86.5)
+        self.assertEqual(event.final_phase_temperature_c, 86.5)
+        self.assertEqual(event.shot_end_state, "manual_or_interrupted")
 
     def test_shot_profile_payload_treats_zero_final_weight_as_missing(self) -> None:
         client = GaggimateMQTTClient(
@@ -128,6 +158,38 @@ class GaggimateAdapterTests(unittest.TestCase):
         )
 
         self.assertIsNone(event.beverage_out_g)
+
+    def test_shot_profile_payload_rejects_malformed_execution_metadata(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        with self.assertRaises(ValueError):
+            client.translate_shot_payload(
+                {
+                    "shot_id": "shot_1",
+                    "timestamp": 100,
+                    "time_ms": [0, 250, 500],
+                    "pressure": [0, 4, 9],
+                    "target_pressure": [0, 4, 9],
+                    "flow": [0, 1, 2],
+                    "target_flow": [0, 1, 2],
+                    "weight": [0, 8, 36],
+                    "dose_in_g": 18.0,
+                    "target_yield_g": 36.0,
+                    "beverage_out_g": 36.0,
+                    "shot_time_s": 30.0,
+                    "final_phase_index": 1.5,
+                },
+                mac="AA_BB",
+            )
 
     def test_recommendation_payload_keeps_completed_shot_id_for_rating_popup(self) -> None:
         client = GaggimateMQTTClient(

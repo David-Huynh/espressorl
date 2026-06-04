@@ -93,6 +93,21 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_string(payload, "flow_units", 40, errors)
     _optional_string(payload, "pump_flow_source", 80, errors)
     _optional_string(payload, "pump_flow_units", 40, errors)
+    _optional_string(payload, "profile_id", 120, errors)
+    _optional_string(payload, "profile_label", 120, errors)
+    _optional_string(payload, "profile_type", 80, errors)
+    _optional_int_range(payload, "profile_phase_count", 0, 100, errors)
+    _optional_int_range(payload, "final_phase_index", 0, 100, errors)
+    _optional_string(payload, "final_phase_name", 120, errors)
+    _optional_enum(payload, "final_phase_type", {"preinfusion", "brew"}, errors)
+    _optional_number_range(payload, "final_phase_elapsed_s", 0, 600, errors)
+    _optional_enum(payload, "final_pump_target", {"simple", "pressure", "flow"}, errors)
+    _optional_number_range(payload, "final_target_pressure", 0, 15, errors)
+    _optional_number_range(payload, "final_target_flow", 0, 25, errors)
+    _optional_bool(payload, "final_valve_open", errors)
+    _optional_number_range(payload, "profile_temperature_c", 0, 160, errors)
+    _optional_number_range(payload, "final_phase_temperature_c", 0, 160, errors)
+    _optional_enum(payload, "shot_end_state", {"finished", "manual_or_interrupted", "unknown"}, errors)
     _optional_string_list_enum(payload, "taste_tags", VALID_TASTE_TAGS, errors)
     _optional_enum(
         payload,
@@ -175,6 +190,23 @@ def _optional_number_range(
     if payload.get(key) is None:
         return
     _require_number_range(payload, key, minimum, maximum, errors)
+
+
+def _optional_int_range(
+    payload: dict[str, Any],
+    key: str,
+    minimum: int,
+    maximum: int,
+    errors: list[str],
+) -> None:
+    value = payload.get(key)
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        errors.append(f"{key} out of range")
+        return
+    if not minimum <= value <= maximum:
+        errors.append(f"{key} out of range")
 
 
 def _optional_bool(payload: dict[str, Any], key: str, errors: list[str]) -> None:

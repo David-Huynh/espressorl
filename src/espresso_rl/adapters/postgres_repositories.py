@@ -66,6 +66,21 @@ class PostgresStore:
             "pump_flow_calibration_required": "BOOLEAN NOT NULL DEFAULT FALSE",
             "profile_flow_valid": "BOOLEAN NOT NULL DEFAULT TRUE",
             "profile_flow_masked": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "profile_id": "TEXT",
+            "profile_label": "TEXT",
+            "profile_type": "TEXT",
+            "profile_phase_count": "INTEGER",
+            "final_phase_index": "INTEGER",
+            "final_phase_name": "TEXT",
+            "final_phase_type": "TEXT",
+            "final_phase_elapsed_s": "DOUBLE PRECISION",
+            "final_pump_target": "TEXT",
+            "final_target_pressure": "DOUBLE PRECISION",
+            "final_target_flow": "DOUBLE PRECISION",
+            "final_valve_open": "BOOLEAN",
+            "profile_temperature_c": "DOUBLE PRECISION",
+            "final_phase_temperature_c": "DOUBLE PRECISION",
+            "shot_end_state": "TEXT",
         }.items():
             self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
         for column, definition in {

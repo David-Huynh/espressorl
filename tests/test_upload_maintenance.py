@@ -79,6 +79,46 @@ class UploadMaintenanceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.errors, [])
 
+    def test_preflight_accepts_safe_execution_metadata(self) -> None:
+        result = validate_upload_payload_json(
+            payload(
+                profile_id="profile_1",
+                profile_label="Cremina lever machine",
+                profile_type="pro",
+                profile_phase_count=5,
+                final_phase_index=3,
+                final_phase_name="ramp",
+                final_phase_type="brew",
+                final_phase_elapsed_s=8.5,
+                final_pump_target="pressure",
+                final_target_pressure=9.0,
+                final_target_flow=0.0,
+                final_valve_open=True,
+                profile_temperature_c=86.5,
+                final_phase_temperature_c=86.5,
+                shot_end_state="manual_or_interrupted",
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, [])
+
+    def test_preflight_rejects_invalid_execution_metadata(self) -> None:
+        result = validate_upload_payload_json(
+            payload(
+                profile_phase_count=1.5,
+                final_phase_type="steam",
+                final_target_pressure=99.0,
+                final_valve_open="true",
+            )
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("profile_phase_count out of range", result.errors)
+        self.assertIn("final_phase_type is invalid", result.errors)
+        self.assertIn("final_target_pressure out of range", result.errors)
+        self.assertIn("final_valve_open must be boolean", result.errors)
+
     def test_preflight_rejects_utility_flush_payload(self) -> None:
         result = validate_upload_payload_json(
             payload(

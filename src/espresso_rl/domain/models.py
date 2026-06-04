@@ -301,6 +301,21 @@ class ShotRecord:
     pump_flow_calibration_required: bool = False
     profile_flow_valid: bool = True
     profile_flow_masked: bool = False
+    profile_id: str | None = None
+    profile_label: str | None = None
+    profile_type: str | None = None
+    profile_phase_count: int | None = None
+    final_phase_index: int | None = None
+    final_phase_name: str | None = None
+    final_phase_type: str | None = None
+    final_phase_elapsed_s: float | None = None
+    final_pump_target: str | None = None
+    final_target_pressure: float | None = None
+    final_target_flow: float | None = None
+    final_valve_open: bool | None = None
+    profile_temperature_c: float | None = None
+    final_phase_temperature_c: float | None = None
+    shot_end_state: str | None = None
     created_at: int = field(default_factory=now_ts)
     updated_at: int = field(default_factory=now_ts)
 
