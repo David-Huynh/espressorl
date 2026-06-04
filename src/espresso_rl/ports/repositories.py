@@ -95,3 +95,6 @@ class UploadQueueRepository(Protocol):
         error_message: str,
     ) -> None:
         ...
+
+    def purge_rejected_artifacts(self, now: int, limit: int = 100) -> dict[str, int]:
+        ...

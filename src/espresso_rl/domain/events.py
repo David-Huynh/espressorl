@@ -193,7 +193,7 @@ class UploadQueueMaintenanceEvent:
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ValueError("unsupported upload maintenance schema_version")
-        if self.action != "requeue_valid_rejected":
+        if self.action not in {"requeue_valid_rejected", "purge_rejected"}:
             raise ValueError("unsupported upload maintenance action")
         if not 1 <= int(self.limit) <= 500:
             raise ValueError("upload maintenance limit must be between 1 and 500")

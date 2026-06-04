@@ -214,14 +214,27 @@ def main() -> None:
         )
 
     def on_upload_maintenance(event: UploadQueueMaintenanceEvent) -> None:
-        result = upload_maintenance.requeue_valid_rejected(limit=event.limit)
-        logger.info(
-            "Upload queue maintenance action=%s inspected=%d requeued=%d skipped=%d",
-            event.action,
-            result.inspected,
-            result.requeued,
-            result.skipped,
-        )
+        if event.action == "purge_rejected":
+            result = upload_maintenance.purge_rejected(limit=event.limit)
+            logger.info(
+                "Upload queue maintenance action=%s inspected=%d purged_uploads=%d purged_shots=%d "
+                "purged_recommendations=%d kept_linked_records=%d",
+                event.action,
+                result.inspected,
+                result.purged_uploads,
+                result.purged_shots,
+                result.purged_recommendations,
+                result.kept_linked_records,
+            )
+        else:
+            result = upload_maintenance.requeue_valid_rejected(limit=event.limit)
+            logger.info(
+                "Upload queue maintenance action=%s inspected=%d requeued=%d skipped=%d",
+                event.action,
+                result.inspected,
+                result.requeued,
+                result.skipped,
+            )
         publish_status(event.machine_id, event.bean_context_id)
 
     def on_decision(event: RecommendationDecisionEvent) -> None:
@@ -437,10 +450,14 @@ def build_status_payload(
         if shot_repo is not None
         else []
     )
+    last_shot_record = None
     if recent and last_shot_id is None:
         last_shot = recent[-1]
+        last_shot_record = last_shot
         last_shot_id = last_shot.shot_id
         last_shot_at = last_shot.timestamp
+    elif recent and last_shot_id is not None:
+        last_shot_record = next((shot for shot in reversed(recent) if shot.shot_id == last_shot_id), None)
 
     optimizer_shots = [
         shot
@@ -479,6 +496,11 @@ def build_status_payload(
         "timestamp": now,
         "last_shot_id": last_shot_id,
         "last_shot_at": last_shot_at,
+        "last_shot_type": last_shot_record.shot_type.value if last_shot_record else None,
+        "last_shot_time_s": last_shot_record.shot_time_s if last_shot_record else None,
+        "last_shot_beverage_out_g": last_shot_record.beverage_out_g if last_shot_record else None,
+        "last_shot_target_yield_g": last_shot_record.target_yield_g if last_shot_record else None,
+        "last_shot_human_rating": last_shot_record.human_rating if last_shot_record else None,
         "last_recommendation_id": last_recommendation_id,
         "last_recommendation_at": last_recommendation_at,
         "recommendation_apply_status": apply_status,

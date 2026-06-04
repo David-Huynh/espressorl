@@ -319,6 +319,34 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.action, "requeue_valid_rejected")
         self.assertEqual(event.limit, 50)
 
+    def test_upload_maintenance_payload_can_request_safe_purge(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp"), install_id="install_1"),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_upload_maintenance_payload(
+            {
+                "event_type": "upload_queue_maintenance",
+                "schema_version": 1,
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 12,
+                "action": "purge_rejected",
+                "limit": 50,
+                "source": "gaggimate_webui",
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.action, "purge_rejected")
+        self.assertEqual(event.limit, 50)
+
     def test_current_gaggimate_payload_drives_local_bo_data_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(

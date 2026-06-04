@@ -420,6 +420,85 @@ class PostgresUploadQueueRepository:
         )
         self._store.conn.commit()
 
+    def purge_rejected_artifacts(self, now: int, limit: int = 100) -> dict[str, int]:
+        del now  # The delete itself is intentionally timestamp-free; audit stays in logs/UI events.
+        conn = self._store.conn
+        inspected = 0
+        purged_uploads = 0
+        purged_shots = 0
+        purged_recommendations = 0
+        kept_linked_records = 0
+        try:
+            rows = conn.execute(
+                """
+                SELECT upload_id, local_record_type, local_record_id
+                FROM upload_queue
+                WHERE status=%s
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT %s
+                """,
+                (UploadQueueStatus.REJECTED.value, limit),
+            ).fetchall()
+            inspected = len(rows)
+            for row in rows:
+                record_type = row["local_record_type"]
+                record_id = row["local_record_id"]
+                deleted_linked = False
+                if record_type == "shot":
+                    shot = conn.execute(
+                        """
+                        DELETE FROM shots
+                        WHERE shot_id=%s
+                          AND (
+                            shot_type != 'espresso'
+                            OR exclude_from_local_optimization = TRUE
+                            OR optimization_weight <= 0
+                          )
+                        RETURNING shot_id
+                        """,
+                        (record_id,),
+                    ).fetchone()
+                    if shot is not None:
+                        purged_shots += 1
+                        deleted_linked = True
+                elif record_type == "recommendation":
+                    recommendation = conn.execute(
+                        """
+                        DELETE FROM recommendations
+                        WHERE recommendation_id=%s
+                          AND status IN ('ignored', 'expired', 'superseded')
+                          AND NOT EXISTS (
+                            SELECT 1 FROM shots
+                            WHERE shots.recommendation_id = recommendations.recommendation_id
+                          )
+                        RETURNING recommendation_id
+                        """,
+                        (record_id,),
+                    ).fetchone()
+                    if recommendation is not None:
+                        purged_recommendations += 1
+                        deleted_linked = True
+                if record_type in {"shot", "recommendation"} and not deleted_linked:
+                    kept_linked_records += 1
+
+                deleted = conn.execute(
+                    "DELETE FROM upload_queue WHERE upload_id=%s AND status=%s RETURNING upload_id",
+                    (row["upload_id"], UploadQueueStatus.REJECTED.value),
+                ).fetchone()
+                if deleted is not None:
+                    purged_uploads += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return {
+            "inspected": inspected,
+            "purged_uploads": purged_uploads,
+            "purged_shots": purged_shots,
+            "purged_recommendations": purged_recommendations,
+            "kept_linked_records": kept_linked_records,
+        }
+
 
 class PostgresCommunityWarehouse:
     def __init__(self, store: PostgresStore) -> None:

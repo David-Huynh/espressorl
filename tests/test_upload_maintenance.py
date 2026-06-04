@@ -5,13 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from espresso_rl.adapters.sqlite_repositories import SQLiteStore, SQLiteUploadQueueRepository
+import numpy as np
+
+from espresso_rl.adapters.sqlite_repositories import SQLiteShotRepository, SQLiteStore, SQLiteUploadQueueRepository
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.application.upload_validation import (
     mask_untrusted_profile_channels,
     validate_upload_payload_json,
 )
-from espresso_rl.domain.models import UploadQueueItem, UploadQueueStatus
+from espresso_rl.domain.models import ShotRecord, ShotType, UploadQueueItem, UploadQueueStatus
 
 
 def payload(**overrides) -> str:
@@ -188,6 +190,61 @@ class UploadMaintenanceTests(unittest.TestCase):
             self.assertEqual(summary.upload_id, "rejected")  # type: ignore[union-attr]
             self.assertEqual(summary.local_record_id, "shot_1")  # type: ignore[union-attr]
             self.assertFalse(hasattr(summary, "payload_json"))
+
+    def test_purge_rejected_deletes_useless_shots_but_keeps_local_optimizer_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            shots = SQLiteShotRepository(store)
+            queue = SQLiteUploadQueueRepository(store)
+            profile = np.zeros((5, 100), dtype=np.float32)
+            shots.upsert(
+                ShotRecord(
+                    shot_id="flush_1",
+                    timestamp=1,
+                    install_id="install_1",
+                    machine_id="machine_1",
+                    machine_adapter="gaggimate",
+                    profile=profile,
+                    grinder_step_size_um=12.5,
+                    dose_in_g=18.0,
+                    target_yield_g=36.0,
+                    shot_type=ShotType.UTILITY_FLUSH,
+                    exclude_from_local_optimization=True,
+                    created_at=1,
+                    updated_at=1,
+                )
+            )
+            shots.upsert(
+                ShotRecord(
+                    shot_id="espresso_1",
+                    timestamp=2,
+                    install_id="install_1",
+                    machine_id="machine_1",
+                    machine_adapter="gaggimate",
+                    profile=profile,
+                    grinder_step_size_um=12.5,
+                    dose_in_g=18.0,
+                    target_yield_g=36.0,
+                    shot_type=ShotType.ESPRESSO,
+                    exclude_from_local_optimization=False,
+                    optimization_weight=1.0,
+                    created_at=2,
+                    updated_at=2,
+                )
+            )
+            queue.enqueue(queue_item("flush_upload", payload(), local_record_id="flush_1"))
+            queue.enqueue(queue_item("espresso_upload", payload(), local_record_id="espresso_1"))
+            service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
+
+            result = service.purge_rejected(limit=10)
+
+            self.assertEqual(result.inspected, 2)
+            self.assertEqual(result.purged_uploads, 2)
+            self.assertEqual(result.purged_shots, 1)
+            self.assertEqual(result.kept_linked_records, 1)
+            self.assertIsNone(shots.get("flush_1"))
+            self.assertIsNotNone(shots.get("espresso_1"))
+            self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM upload_queue").fetchone()["count"], 0)
 
 
 if __name__ == "__main__":

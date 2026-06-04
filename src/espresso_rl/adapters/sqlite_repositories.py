@@ -569,6 +569,79 @@ class SQLiteUploadQueueRepository:
         )
         self._store.conn.commit()
 
+    def purge_rejected_artifacts(self, now: int, limit: int = 100) -> dict[str, int]:
+        del now
+        conn = self._store.conn
+        rows = conn.execute(
+            """
+            SELECT upload_id, local_record_type, local_record_id
+            FROM upload_queue
+            WHERE status=?
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (UploadQueueStatus.REJECTED.value, limit),
+        ).fetchall()
+        inspected = len(rows)
+        purged_uploads = 0
+        purged_shots = 0
+        purged_recommendations = 0
+        kept_linked_records = 0
+
+        for row in rows:
+            record_type = row["local_record_type"]
+            record_id = row["local_record_id"]
+            deleted_linked = False
+            if record_type == "shot":
+                cursor = conn.execute(
+                    """
+                    DELETE FROM shots
+                    WHERE shot_id=?
+                      AND (
+                        shot_type != 'espresso'
+                        OR exclude_from_local_optimization = 1
+                        OR optimization_weight <= 0
+                      )
+                    """,
+                    (record_id,),
+                )
+                if cursor.rowcount:
+                    purged_shots += cursor.rowcount
+                    deleted_linked = True
+            elif record_type == "recommendation":
+                cursor = conn.execute(
+                    """
+                    DELETE FROM recommendations
+                    WHERE recommendation_id=?
+                      AND status IN ('ignored', 'expired', 'superseded')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM shots
+                        WHERE shots.recommendation_id = recommendations.recommendation_id
+                      )
+                    """,
+                    (record_id,),
+                )
+                if cursor.rowcount:
+                    purged_recommendations += cursor.rowcount
+                    deleted_linked = True
+            if record_type in {"shot", "recommendation"} and not deleted_linked:
+                kept_linked_records += 1
+
+            cursor = conn.execute(
+                "DELETE FROM upload_queue WHERE upload_id=? AND status=?",
+                (row["upload_id"], UploadQueueStatus.REJECTED.value),
+            )
+            purged_uploads += cursor.rowcount
+
+        conn.commit()
+        return {
+            "inspected": inspected,
+            "purged_uploads": purged_uploads,
+            "purged_shots": purged_shots,
+            "purged_recommendations": purged_recommendations,
+            "kept_linked_records": kept_linked_records,
+        }
+
 
 def _shot_to_row(shot: ShotRecord) -> dict:
     return {
