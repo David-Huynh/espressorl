@@ -215,11 +215,12 @@ def main() -> None:
 
     def on_upload_maintenance(event: UploadQueueMaintenanceEvent) -> None:
         if event.action == "purge_rejected":
-            result = upload_maintenance.purge_rejected(limit=event.limit)
+            result = upload_maintenance.purge_rejected(limit=event.limit, local_record_id=event.local_record_id)
             logger.info(
-                "Upload queue maintenance action=%s inspected=%d purged_uploads=%d purged_shots=%d "
+                "Upload queue maintenance action=%s local_record_id=%s inspected=%d purged_uploads=%d purged_shots=%d "
                 "purged_recommendations=%d kept_linked_records=%d",
                 event.action,
+                event.local_record_id,
                 result.inspected,
                 result.purged_uploads,
                 result.purged_shots,
@@ -488,7 +489,13 @@ def build_status_payload(
         upload_queue_status_counts = {
             status.value: count for status, count in upload_queue_repo.count_by_status().items()
         }
-    latest_rejected = upload_maintenance.latest_rejected() if upload_maintenance is not None else None
+    rejected_summaries = upload_maintenance.list_rejected(limit=20) if upload_maintenance is not None else []
+    latest_rejected = rejected_summaries[0] if rejected_summaries else None
+    rejected_record_ids = {
+        item.local_record_id
+        for item in rejected_summaries
+        if item.local_record_type == "shot" and item.local_record_id
+    }
 
     return {
         "addon_online": True,
@@ -501,6 +508,7 @@ def build_status_payload(
         "last_shot_beverage_out_g": last_shot_record.beverage_out_g if last_shot_record else None,
         "last_shot_target_yield_g": last_shot_record.target_yield_g if last_shot_record else None,
         "last_shot_human_rating": last_shot_record.human_rating if last_shot_record else None,
+        "recent_shots": recent_shot_summaries(recent, rejected_record_ids),
         "last_recommendation_id": last_recommendation_id,
         "last_recommendation_at": last_recommendation_at,
         "recommendation_apply_status": apply_status,
@@ -520,6 +528,35 @@ def build_status_payload(
         "upload_queue_last_rejected_at": latest_rejected.updated_at if latest_rejected else None,
         "community_upload_enabled": config.should_enqueue_community_uploads(),
     }
+
+
+def recent_shot_summaries(shots: list, rejected_record_ids: set[str], limit: int = 10) -> list[dict]:
+    recent = list(reversed(shots[-limit:]))
+    return [
+        {
+            "shot_id": shot.shot_id,
+            "timestamp": shot.timestamp,
+            "shot_type": shot.shot_type.value,
+            "shot_time_s": shot.shot_time_s,
+            "beverage_out_g": shot.beverage_out_g,
+            "target_yield_g": shot.target_yield_g,
+            "human_rating": shot.human_rating,
+            "exclude_from_local_optimization": shot.exclude_from_local_optimization,
+            "optimization_weight": shot.optimization_weight,
+            "profile_label": shot.profile_label,
+            "profile_type": shot.profile_type,
+            "final_phase_index": shot.final_phase_index,
+            "final_phase_name": shot.final_phase_name,
+            "final_phase_type": shot.final_phase_type,
+            "final_phase_elapsed_s": shot.final_phase_elapsed_s,
+            "final_pump_target": shot.final_pump_target,
+            "shot_end_state": shot.shot_end_state,
+            "profile_flow_valid": shot.profile_flow_valid,
+            "profile_flow_masked": shot.profile_flow_masked,
+            "rejected_upload": shot.shot_id in rejected_record_ids,
+        }
+        for shot in recent
+    ]
 
 
 def best_known_recipe_payload(shots: list) -> dict | None:

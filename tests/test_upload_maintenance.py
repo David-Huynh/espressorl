@@ -286,6 +286,46 @@ class UploadMaintenanceTests(unittest.TestCase):
             self.assertIsNotNone(shots.get("espresso_1"))
             self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM upload_queue").fetchone()["count"], 0)
 
+    def test_purge_rejected_can_target_one_selected_local_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            shots = SQLiteShotRepository(store)
+            queue = SQLiteUploadQueueRepository(store)
+            profile = np.zeros((5, 100), dtype=np.float32)
+            for shot_id in ("flush_1", "flush_2"):
+                shots.upsert(
+                    ShotRecord(
+                        shot_id=shot_id,
+                        timestamp=1,
+                        install_id="install_1",
+                        machine_id="machine_1",
+                        machine_adapter="gaggimate",
+                        profile=profile,
+                        grinder_step_size_um=12.5,
+                        dose_in_g=18.0,
+                        target_yield_g=36.0,
+                        shot_type=ShotType.UTILITY_FLUSH,
+                        exclude_from_local_optimization=True,
+                        created_at=1,
+                        updated_at=1,
+                    )
+                )
+            queue.enqueue(queue_item("flush_1_upload", payload(), local_record_id="flush_1"))
+            queue.enqueue(queue_item("flush_2_upload", payload(), local_record_id="flush_2"))
+            service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
+
+            result = service.purge_rejected(limit=10, local_record_id="flush_1")
+
+            self.assertEqual(result.inspected, 1)
+            self.assertEqual(result.purged_uploads, 1)
+            self.assertEqual(result.purged_shots, 1)
+            self.assertIsNone(shots.get("flush_1"))
+            self.assertIsNotNone(shots.get("flush_2"))
+            self.assertEqual(
+                store.conn.execute("SELECT local_record_id FROM upload_queue").fetchone()["local_record_id"],
+                "flush_2",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

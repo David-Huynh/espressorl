@@ -401,6 +401,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "timestamp": 12,
                 "action": "purge_rejected",
                 "limit": 50,
+                "local_record_id": "shot_1",
                 "source": "gaggimate_webui",
             },
             mac="AA_BB",
@@ -408,6 +409,7 @@ class GaggimateAdapterTests(unittest.TestCase):
 
         self.assertEqual(event.action, "purge_rejected")
         self.assertEqual(event.limit, 50)
+        self.assertEqual(event.local_record_id, "shot_1")
 
     def test_current_gaggimate_payload_drives_local_bo_data_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

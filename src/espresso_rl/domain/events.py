@@ -306,6 +306,7 @@ class UploadQueueMaintenanceEvent:
     action: str = "requeue_valid_rejected"
     limit: int = 25
     bean_context_id: str | None = None
+    local_record_id: str | None = None
     source: str = "unknown"
     schema_version: int = 1
 
@@ -319,6 +320,7 @@ class UploadQueueMaintenanceEvent:
         if not 1 <= int(self.limit) <= 500:
             raise ValueError("upload maintenance limit must be between 1 and 500")
         object.__setattr__(self, "limit", int(self.limit))
+        object.__setattr__(self, "local_record_id", _optional_string(self.local_record_id, "local_record_id", 160))
 
 
 @dataclass(frozen=True)

@@ -273,6 +273,7 @@ class GaggimateMQTTClient:
             action=payload.get("action", "requeue_valid_rejected"),
             limit=int(payload.get("limit", 25)),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
+            local_record_id=_optional_string(payload.get("local_record_id")),
             source=payload.get("source", "gaggimate_mqtt"),
         )
 

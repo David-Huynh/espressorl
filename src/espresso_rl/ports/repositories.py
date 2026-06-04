@@ -96,5 +96,10 @@ class UploadQueueRepository(Protocol):
     ) -> None:
         ...
 
-    def purge_rejected_artifacts(self, now: int, limit: int = 100) -> dict[str, int]:
+    def purge_rejected_artifacts(
+        self,
+        now: int,
+        limit: int = 100,
+        local_record_id: str | None = None,
+    ) -> dict[str, int]:
         ...

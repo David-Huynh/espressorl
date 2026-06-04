@@ -435,7 +435,12 @@ class PostgresUploadQueueRepository:
         )
         self._store.conn.commit()
 
-    def purge_rejected_artifacts(self, now: int, limit: int = 100) -> dict[str, int]:
+    def purge_rejected_artifacts(
+        self,
+        now: int,
+        limit: int = 100,
+        local_record_id: str | None = None,
+    ) -> dict[str, int]:
         del now  # The delete itself is intentionally timestamp-free; audit stays in logs/UI events.
         conn = self._store.conn
         inspected = 0
@@ -444,15 +449,22 @@ class PostgresUploadQueueRepository:
         purged_recommendations = 0
         kept_linked_records = 0
         try:
+            params: list[object] = [UploadQueueStatus.REJECTED.value]
+            record_filter = ""
+            if local_record_id:
+                record_filter = "AND local_record_id=%s"
+                params.append(local_record_id)
+            params.append(limit)
             rows = conn.execute(
-                """
+                f"""
                 SELECT upload_id, local_record_type, local_record_id
                 FROM upload_queue
                 WHERE status=%s
+                  {record_filter}
                 ORDER BY updated_at DESC, created_at DESC
                 LIMIT %s
                 """,
-                (UploadQueueStatus.REJECTED.value, limit),
+                tuple(params),
             ).fetchall()
             inspected = len(rows)
             for row in rows:

@@ -617,18 +617,30 @@ class SQLiteUploadQueueRepository:
         )
         self._store.conn.commit()
 
-    def purge_rejected_artifacts(self, now: int, limit: int = 100) -> dict[str, int]:
+    def purge_rejected_artifacts(
+        self,
+        now: int,
+        limit: int = 100,
+        local_record_id: str | None = None,
+    ) -> dict[str, int]:
         del now
         conn = self._store.conn
+        params: list[object] = [UploadQueueStatus.REJECTED.value]
+        record_filter = ""
+        if local_record_id:
+            record_filter = "AND local_record_id=?"
+            params.append(local_record_id)
+        params.append(limit)
         rows = conn.execute(
-            """
+            f"""
             SELECT upload_id, local_record_type, local_record_id
             FROM upload_queue
             WHERE status=?
+              {record_filter}
             ORDER BY updated_at DESC, created_at DESC
             LIMIT ?
             """,
-            (UploadQueueStatus.REJECTED.value, limit),
+            tuple(params),
         ).fetchall()
         inspected = len(rows)
         purged_uploads = 0

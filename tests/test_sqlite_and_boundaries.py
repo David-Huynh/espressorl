@@ -24,7 +24,7 @@ from espresso_rl.adapters.supabase_upload import (
     UploadQueueWorker,
     UploadRateLimited,
 )
-from espresso_rl.main import maybe_start_upload_worker, upload_queue_for_service
+from espresso_rl.main import build_status_payload, maybe_start_upload_worker, upload_queue_for_service
 
 
 def shot_event() -> ShotProfileEvent:
@@ -138,6 +138,33 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             row = _shot_to_row(result.shot)
 
             self.assertIs(row["raw_profile_available"], True)
+
+    def test_status_payload_includes_sanitized_recent_shot_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(mqtt_host="localhost", data_dir=Path(tmp), install_id="install_1")
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            shots = SQLiteShotRepository(store)
+            recs = SQLiteRecommendationRepository(store)
+            service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+            service.ingest_shot_profile(shot_event())
+            status = build_status_payload(
+                config=config,
+                service=service,
+                shot_repo=shots,
+                upload_maintenance=None,
+                upload_queue_repo=None,
+                machine_id="machine_1",
+                bean_context_id=None,
+            )
+
+            recent = status["recent_shots"]
+            self.assertEqual(len(recent), 1)
+            self.assertEqual(recent[0]["shot_id"], "shot_1")
+            self.assertEqual(recent[0]["profile_label"], "Cremina lever machine")
+            self.assertEqual(recent[0]["final_phase_name"], "ramp")
+            self.assertEqual(recent[0]["shot_end_state"], "manual_or_interrupted")
+            self.assertNotIn("profile_resampled", recent[0])
 
     def test_postgres_upsert_rolls_back_failed_transaction(self) -> None:
         class FailingConnection:

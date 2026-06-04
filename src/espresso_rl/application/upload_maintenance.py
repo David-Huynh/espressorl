@@ -89,8 +89,15 @@ class UploadQueueMaintenanceService:
             skipped_uploads=skipped_uploads[:5],
         )
 
-    def purge_rejected(self, limit: int = 100) -> PurgeRejectedResult:
-        counts = self._queue.purge_rejected_artifacts(now=self._clock(), limit=_safe_limit(limit))
+    def purge_rejected(self, limit: int = 100, local_record_id: str | None = None) -> PurgeRejectedResult:
+        scoped_record_id = None
+        if isinstance(local_record_id, str) and local_record_id.strip():
+            scoped_record_id = local_record_id.strip()
+        counts = self._queue.purge_rejected_artifacts(
+            now=self._clock(),
+            limit=_safe_limit(limit),
+            local_record_id=scoped_record_id,
+        )
         return PurgeRejectedResult(
             inspected=counts.get("inspected", 0),
             purged_uploads=counts.get("purged_uploads", 0),
