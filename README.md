@@ -224,6 +224,38 @@ supabase functions deploy espresso-rl-register --no-verify-jwt
 supabase functions deploy espresso-rl-ingest --no-verify-jwt
 ```
 
+## Local Data Dashboard
+
+Public machine-connected containers can expose a small local dashboard for
+testing and cleanup. This dashboard manages only the local public-container
+database; it does not mirror Supabase, generate community priors, or use the
+service-role key.
+
+```json
+{
+  "deployment_role": "public",
+  "local_dashboard_enabled": true,
+  "local_dashboard_port": 8081,
+  "local_dashboard_token": "AT_LEAST_32_RANDOM_CHARS"
+}
+```
+
+The local dashboard shows which shots are included in local BO, which shots are
+excluded/utility/rejected-upload records, and context-level BO/rated counts. It
+can:
+
+- dry-run or purge local shots that are already useless for BO
+- exclude a selected shot from BO without deleting history
+- delete a selected local shot
+- reset a bean context so old shots no longer train local BO
+- retry or clean local rejected upload queue rows
+
+The dashboard requires a bearer token and never renders upload secrets, Supabase
+keys, raw payload JSON, raw profiles, or raw request headers. Deleting a shot is
+scoped to the configured `install_id` and `machine_id`. A Supabase rejection does
+not automatically delete local optimizer evidence; mark the shot excluded or
+delete it explicitly when you know it is bad data.
+
 ## Admin Mirror And Validation
 
 Admin mode is a separate deployment for mirroring the Supabase raw queue into an

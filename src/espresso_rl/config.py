@@ -54,6 +54,10 @@ class Config:
     admin_dashboard_host: str = "0.0.0.0"
     admin_dashboard_port: int = 8080
     admin_dashboard_token: str = ""
+    local_dashboard_enabled: bool = False
+    local_dashboard_host: str = "0.0.0.0"
+    local_dashboard_port: int = 8081
+    local_dashboard_token: str = ""
     data_dir: Path = field(default_factory=lambda: _DATA_DIR)
 
     def now(self) -> int:
@@ -190,6 +194,25 @@ class Config:
                 opts,
                 "admin_dashboard_token",
                 "ESPRESSORL_ADMIN_DASHBOARD_TOKEN",
+            ),
+            local_dashboard_enabled=bool(
+                opts.get(
+                    "local_dashboard_enabled",
+                    os.getenv("ESPRESSORL_LOCAL_DASHBOARD_ENABLED", "").lower()
+                    in {"1", "true", "yes"},
+                )
+            ),
+            local_dashboard_host=opts.get(
+                "local_dashboard_host",
+                os.getenv("ESPRESSORL_LOCAL_DASHBOARD_HOST", "0.0.0.0"),
+            ),
+            local_dashboard_port=int(
+                opts.get("local_dashboard_port", os.getenv("ESPRESSORL_LOCAL_DASHBOARD_PORT", 8081))
+            ),
+            local_dashboard_token=_option_string_or_env(
+                opts,
+                "local_dashboard_token",
+                "ESPRESSORL_LOCAL_DASHBOARD_TOKEN",
             ),
             data_dir=data_dir,
         )

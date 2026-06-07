@@ -103,3 +103,56 @@ class UploadQueueRepository(Protocol):
         local_record_id: str | None = None,
     ) -> dict[str, int]:
         ...
+
+
+class LocalDataRepository(Protocol):
+    def list_machine_shots(
+        self,
+        install_id: str,
+        machine_id: str,
+        limit: int = 500,
+    ) -> list[ShotRecord]:
+        ...
+
+    def delete_shot(
+        self,
+        install_id: str,
+        machine_id: str,
+        shot_id: str,
+        *,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        ...
+
+    def exclude_shot_from_optimization(
+        self,
+        install_id: str,
+        machine_id: str,
+        shot_id: str,
+        *,
+        now: int,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        ...
+
+    def purge_useless_shots(
+        self,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str | None = None,
+        *,
+        limit: int = 100,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        ...
+
+    def reset_optimizer_context(
+        self,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str,
+        *,
+        now: int,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        ...

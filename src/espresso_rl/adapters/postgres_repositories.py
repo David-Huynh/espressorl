@@ -149,6 +149,229 @@ class PostgresShotRepository:
         return list(reversed([_row_to_shot(row) for row in rows]))
 
 
+class PostgresLocalDataRepository:
+    def __init__(self, store: PostgresStore) -> None:
+        self._store = store
+
+    def list_machine_shots(
+        self,
+        install_id: str,
+        machine_id: str,
+        limit: int = 500,
+    ) -> list[ShotRecord]:
+        rows = self._store.conn.execute(
+            """
+            SELECT * FROM shots
+            WHERE install_id=%s AND machine_id=%s
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """,
+            (install_id, machine_id, limit),
+        ).fetchall()
+        shots = list(reversed([_row_to_shot(row) for row in rows]))
+        _mark_rejected_uploads_postgres(self._store.conn, shots)
+        return shots
+
+    def delete_shot(
+        self,
+        install_id: str,
+        machine_id: str,
+        shot_id: str,
+        *,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        try:
+            shot_count = int(
+                self._store.conn.execute(
+                    """
+                    SELECT COUNT(*) AS count FROM shots
+                    WHERE install_id=%s AND machine_id=%s AND shot_id=%s
+                    """,
+                    (install_id, machine_id, shot_id),
+                ).fetchone()["count"]
+            )
+            upload_count = 0
+            if shot_count:
+                upload_count = int(
+                    self._store.conn.execute(
+                        """
+                        SELECT COUNT(*) AS count FROM upload_queue
+                        WHERE local_record_type='shot' AND local_record_id=%s
+                        """,
+                        (shot_id,),
+                    ).fetchone()["count"]
+                )
+            if dry_run:
+                return {"shots": shot_count, "upload_queue": upload_count}
+            if shot_count:
+                self._store.conn.execute(
+                    "DELETE FROM upload_queue WHERE local_record_type='shot' AND local_record_id=%s",
+                    (shot_id,),
+                )
+                self._store.conn.execute(
+                    "DELETE FROM shots WHERE install_id=%s AND machine_id=%s AND shot_id=%s",
+                    (install_id, machine_id, shot_id),
+                )
+            self._store.conn.commit()
+            return {"shots": shot_count, "upload_queue": upload_count}
+        except Exception:
+            self._store.conn.rollback()
+            raise
+
+    def exclude_shot_from_optimization(
+        self,
+        install_id: str,
+        machine_id: str,
+        shot_id: str,
+        *,
+        now: int,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        try:
+            shot_count = int(
+                self._store.conn.execute(
+                    """
+                    SELECT COUNT(*) AS count FROM shots
+                    WHERE install_id=%s AND machine_id=%s AND shot_id=%s
+                    """,
+                    (install_id, machine_id, shot_id),
+                ).fetchone()["count"]
+            )
+            if dry_run:
+                return {"shots": shot_count}
+            if shot_count:
+                self._store.conn.execute(
+                    """
+                    UPDATE shots
+                    SET exclude_from_local_optimization=TRUE,
+                        optimization_weight=0,
+                        recommendation_attribution_weight=0,
+                        updated_at=%s
+                    WHERE install_id=%s AND machine_id=%s AND shot_id=%s
+                    """,
+                    (now, install_id, machine_id, shot_id),
+                )
+            self._store.conn.commit()
+            return {"shots": shot_count}
+        except Exception:
+            self._store.conn.rollback()
+            raise
+
+    def purge_useless_shots(
+        self,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str | None = None,
+        *,
+        limit: int = 100,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        try:
+            bean_clause = ""
+            params: list[object] = [install_id, machine_id]
+            if bean_context_id is not None:
+                bean_clause = "AND bean_context_id=%s"
+                params.append(bean_context_id)
+            params.append(limit)
+            rows = self._store.conn.execute(
+                f"""
+                SELECT shot_id FROM shots
+                WHERE install_id=%s AND machine_id=%s
+                  {bean_clause}
+                  AND (
+                    shot_type != 'espresso'
+                    OR exclude_from_local_optimization = TRUE
+                    OR optimization_weight <= 0
+                  )
+                ORDER BY timestamp DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            ).fetchall()
+            shot_ids = [row["shot_id"] for row in rows]
+            upload_count = _count_upload_queue_for_shots_postgres(self._store.conn, shot_ids)
+            if dry_run:
+                return {"shots": len(shot_ids), "upload_queue": upload_count}
+            if shot_ids:
+                self._store.conn.execute(
+                    "DELETE FROM upload_queue WHERE local_record_type='shot' AND local_record_id = ANY(%s)",
+                    (shot_ids,),
+                )
+                self._store.conn.execute(
+                    "DELETE FROM shots WHERE shot_id = ANY(%s) AND install_id=%s AND machine_id=%s",
+                    (shot_ids, install_id, machine_id),
+                )
+            self._store.conn.commit()
+            return {"shots": len(shot_ids), "upload_queue": upload_count}
+        except Exception:
+            self._store.conn.rollback()
+            raise
+
+    def reset_optimizer_context(
+        self,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str,
+        *,
+        now: int,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        try:
+            shot_count = int(
+                self._store.conn.execute(
+                    """
+                    SELECT COUNT(*) AS count FROM shots
+                    WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
+                      AND (
+                        exclude_from_local_optimization = FALSE
+                        OR optimization_weight > 0
+                        OR recommendation_attribution_weight > 0
+                      )
+                    """,
+                    (install_id, machine_id, bean_context_id),
+                ).fetchone()["count"]
+            )
+            recommendation_count = int(
+                self._store.conn.execute(
+                    """
+                    SELECT COUNT(*) AS count FROM recommendations
+                    WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
+                      AND status IN ('pending', 'shown', 'accepted', 'edited')
+                    """,
+                    (install_id, machine_id, bean_context_id),
+                ).fetchone()["count"]
+            )
+            if dry_run:
+                return {"shots": shot_count, "recommendations": recommendation_count}
+            self._store.conn.execute(
+                """
+                UPDATE shots
+                SET exclude_from_local_optimization=TRUE,
+                    optimization_weight=0,
+                    recommendation_attribution_weight=0,
+                    updated_at=%s
+                WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
+                """,
+                (now, install_id, machine_id, bean_context_id),
+            )
+            self._store.conn.execute(
+                """
+                UPDATE recommendations
+                SET status='superseded',
+                    superseded_at=COALESCE(superseded_at, %s),
+                    updated_at=%s
+                WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
+                  AND status IN ('pending', 'shown', 'accepted', 'edited')
+                """,
+                (now, now, install_id, machine_id, bean_context_id),
+            )
+            self._store.conn.commit()
+            return {"shots": shot_count, "recommendations": recommendation_count}
+        except Exception:
+            self._store.conn.rollback()
+            raise
+
+
 class PostgresRecommendationRepository:
     def __init__(self, store: PostgresStore) -> None:
         self._store = store
@@ -943,6 +1166,41 @@ def _count_table(conn, table: str) -> int:
         raise ValueError("unsupported count table")
     row = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
     return int(row["count"])
+
+
+def _mark_rejected_uploads_postgres(conn, shots: list[ShotRecord]) -> None:
+    shot_ids = [shot.shot_id for shot in shots]
+    if not shot_ids:
+        return
+    rows = conn.execute(
+        """
+        SELECT DISTINCT local_record_id
+        FROM upload_queue
+        WHERE local_record_type='shot'
+          AND status='rejected'
+          AND local_record_id = ANY(%s)
+        """,
+        (shot_ids,),
+    ).fetchall()
+    rejected = {row["local_record_id"] for row in rows}
+    for shot in shots:
+        setattr(shot, "_rejected_upload", shot.shot_id in rejected)
+
+
+def _count_upload_queue_for_shots_postgres(conn, shot_ids: list[str]) -> int:
+    if not shot_ids:
+        return 0
+    return int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM upload_queue
+            WHERE local_record_type='shot'
+              AND local_record_id = ANY(%s)
+            """,
+            (shot_ids,),
+        ).fetchone()["count"]
+    )
 
 
 def _row_to_community_raw_upload(row: dict[str, Any]) -> CommunityRawUpload:

@@ -8,12 +8,14 @@ import threading
 from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
 from espresso_rl.adapters.postgres_repositories import (
     PostgresCommunityWarehouse,
+    PostgresLocalDataRepository,
     PostgresRecommendationRepository,
     PostgresShotRepository,
     PostgresStore,
     PostgresUploadQueueRepository,
 )
 from espresso_rl.adapters.sqlite_repositories import (
+    SQLiteLocalDataRepository,
     SQLiteRecommendationRepository,
     SQLiteShotRepository,
     SQLiteStore,
@@ -38,6 +40,7 @@ from espresso_rl.application.community_credentials import CommunityCredentialSer
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.community_priors import CommunityPriorGenerationService
 from espresso_rl.application.community_validation import CommunityValidationService
+from espresso_rl.application.local_data import LocalDataService
 from espresso_rl.application.prior_providers import (
     CommunityPriorProvider,
     CompositePriorProvider,
@@ -60,7 +63,7 @@ from espresso_rl.domain.events import (
 from espresso_rl.domain.models import Recipe, SafetyBounds, UploadQueueStatus
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
-from espresso_rl.ports.repositories import RecommendationRepository, ShotRepository, UploadQueueRepository
+from espresso_rl.ports.repositories import LocalDataRepository, RecommendationRepository, ShotRepository, UploadQueueRepository
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,7 +86,7 @@ def main() -> None:
             "DreamerV3 training is not wired into the active path yet; BO remains the safe recommendation path."
         )
 
-    shot_repo, recommendation_repo, upload_queue_repo = open_repositories(config)
+    shot_repo, recommendation_repo, upload_queue_repo, local_data_repo = open_repositories(config)
     service = EspressoRLService(
         shots=shot_repo,
         recommendations=recommendation_repo,
@@ -94,6 +97,12 @@ def main() -> None:
         clock=config.now,
     )
     upload_maintenance = UploadQueueMaintenanceService(upload_queue_repo, clock=config.now)
+    local_data_service = LocalDataService(
+        local_data_repo,
+        install_id=config.install_id,
+        machine_id=config.machine_id,
+        clock=config.now,
+    )
 
     stop_event = threading.Event()
     admin_pipeline = maybe_build_admin_pipeline_service(config)
@@ -107,6 +116,12 @@ def main() -> None:
         config,
         stop_event,
         admin_pipeline=admin_pipeline,
+    )
+    local_dashboard_thread = maybe_start_local_dashboard(
+        config,
+        stop_event,
+        local_data_service=local_data_service,
+        upload_maintenance=upload_maintenance,
     )
 
     mqtt_client: GaggimateMQTTClient
@@ -310,6 +325,8 @@ def main() -> None:
             collector_thread.join(timeout=5)
         if dashboard_thread is not None:
             dashboard_thread.join(timeout=5)
+        if local_dashboard_thread is not None:
+            local_dashboard_thread.join(timeout=5)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
@@ -809,6 +826,41 @@ def maybe_start_admin_dashboard(
     )
 
 
+def maybe_start_local_dashboard(
+    config: Config,
+    stop_event: threading.Event,
+    *,
+    local_data_service: LocalDataService,
+    upload_maintenance: UploadQueueMaintenanceService,
+) -> threading.Thread | None:
+    if config.deployment_role != "public":
+        return None
+    if not config.local_dashboard_enabled:
+        logger.info("Local dashboard disabled.")
+        return None
+    if len(config.local_dashboard_token) < 32:
+        logger.warning(
+            "Local dashboard enabled but ESPRESSORL_LOCAL_DASHBOARD_TOKEN/local_dashboard_token is missing or too short."
+        )
+        return None
+
+    from espresso_rl.adapters.local_dashboard import start_local_dashboard
+
+    logger.info(
+        "Starting local dashboard on %s:%d",
+        config.local_dashboard_host,
+        config.local_dashboard_port,
+    )
+    return start_local_dashboard(
+        local_data_service,
+        upload_maintenance,
+        local_token=config.local_dashboard_token,
+        host=config.local_dashboard_host,
+        port=config.local_dashboard_port,
+        stop_event=stop_event,
+    )
+
+
 def maybe_build_admin_pipeline_service(config: Config) -> AdminPipelineService | None:
     if config.deployment_role != "admin":
         return None
@@ -869,7 +921,7 @@ def open_prior_provider(config: Config) -> CompositePriorProvider:
 
 def open_repositories(
     config: Config,
-) -> tuple[ShotRepository, RecommendationRepository, UploadQueueRepository]:
+) -> tuple[ShotRepository, RecommendationRepository, UploadQueueRepository, LocalDataRepository]:
     if config.storage_backend == "postgres":
         logger.info("Using Postgres storage backend")
         store = PostgresStore(config.postgres_dsn)
@@ -877,6 +929,7 @@ def open_repositories(
             PostgresShotRepository(store),
             PostgresRecommendationRepository(store),
             PostgresUploadQueueRepository(store),
+            PostgresLocalDataRepository(store),
         )
 
     logger.warning("Using SQLite storage backend; Postgres is the intended container/admin runtime backend.")
@@ -885,6 +938,7 @@ def open_repositories(
         SQLiteShotRepository(store),
         SQLiteRecommendationRepository(store),
         SQLiteUploadQueueRepository(store),
+        SQLiteLocalDataRepository(store),
     )
 
 
