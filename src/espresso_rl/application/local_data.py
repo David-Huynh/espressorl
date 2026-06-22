@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Callable
 
-from espresso_rl.domain.models import ShotRecord, ShotType, now_ts
+from espresso_rl.domain.models import (
+    FollowThroughState,
+    RecommendationDecision,
+    ShotRecord,
+    ShotType,
+    now_ts,
+)
 from espresso_rl.ports.repositories import LocalDataRepository
 
 
@@ -172,6 +178,7 @@ def _shot_summary(shot: ShotRecord) -> dict:
         "beverage_out_g": shot.beverage_out_g,
         "target_yield_g": shot.target_yield_g,
         "human_rating": shot.human_rating,
+        "feedback_recorded": shot.feedback_recorded,
         "profile_label": shot.profile_label,
         "final_phase_name": shot.final_phase_name,
         "shot_end_state": shot.shot_end_state,
@@ -189,6 +196,11 @@ def _included_in_optimizer(shot: ShotRecord) -> bool:
         shot.shot_type == ShotType.ESPRESSO
         and not shot.exclude_from_local_optimization
         and shot.optimization_weight > 0.0
+        and shot.feedback_recorded
+        and shot.reward is not None
+        and shot.recommendation_decision
+        not in {RecommendationDecision.IGNORED, RecommendationDecision.DISMISSED}
+        and shot.recommendation_followed != FollowThroughState.NOT_FOLLOWED
     )
 
 

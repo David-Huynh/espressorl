@@ -163,7 +163,7 @@ def main() -> None:
             return
         if result.recommendation is None:
             logger.info(
-                "Shot %s stored type=%s local_optimization=%s; no BO recommendation generated",
+                "Shot %s stored type=%s local_optimization=%s; waiting for feedback before BO recommendation",
                 result.shot.shot_id,
                 result.shot.shot_type.value,
                 "included" if not result.shot.exclude_from_local_optimization else "excluded",
@@ -196,7 +196,8 @@ def main() -> None:
         )
 
     def on_feedback(event: ShotFeedbackEvent) -> None:
-        shot = service.record_feedback(event)
+        result = service.record_feedback(event)
+        shot = result.shot
         logger.info(
             "Feedback for shot %s stored rating=%s reward=%.3f confidence=%.3f",
             shot.shot_id,
@@ -204,11 +205,29 @@ def main() -> None:
             shot.reward or 0.0,
             shot.reward_confidence,
         )
+        if result.recommendation is not None:
+            logger.info(
+                "Feedback for shot %s produced next rec %s mode=%s grind=%+d dose=%.1f yield=%.1f",
+                shot.shot_id,
+                result.recommendation.recommendation_id,
+                result.recommendation.mode.value,
+                result.recommendation.grind_delta_steps,
+                result.recommendation.next_dose_g,
+                result.recommendation.target_yield_g,
+            )
+            mqtt_client.publish_recommendation(result.recommendation)
         publish_status(
             shot.machine_id,
             shot.bean_context_id,
             last_shot_id=shot.shot_id,
             last_shot_at=shot.timestamp,
+            last_recommendation_id=(
+                result.recommendation.recommendation_id if result.recommendation else None
+            ),
+            last_recommendation_at=(
+                result.recommendation.created_at if result.recommendation else None
+            ),
+            mode=result.recommendation.mode.value if result.recommendation else None,
         )
 
     def on_correction(event: ShotCorrectionEvent) -> None:

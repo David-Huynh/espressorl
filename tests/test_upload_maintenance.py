@@ -103,6 +103,32 @@ class UploadMaintenanceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.errors, [])
 
+    def test_preflight_accepts_small_negative_tare_noise_and_close_final_weight(self) -> None:
+        profile = valid_profile()
+        profile[4][0] = -0.1
+        profile[4][-1] = 37.5
+
+        result = validate_upload_payload_json(
+            payload(
+                target_yield_g=38.0,
+                target_ratio=38.0 / 18.0,
+                beverage_out_g=37.5,
+                profile_resampled=profile,
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, [])
+
+    def test_preflight_rejects_weight_below_tare_noise_floor(self) -> None:
+        profile = valid_profile()
+        profile[4][0] = -1.01
+
+        result = validate_upload_payload_json(payload(profile_resampled=profile))
+
+        self.assertFalse(result.ok)
+        self.assertIn("profile_resampled weight out of range", result.errors)
+
     def test_preflight_rejects_invalid_execution_metadata(self) -> None:
         result = validate_upload_payload_json(
             payload(

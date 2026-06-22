@@ -92,19 +92,7 @@ class ConservativeBOOptimizer:
         return 5, 8.0, 1.0, RecommendationMode.LOCAL_BO
 
     def _eligible_shots(self, shots: list[ShotRecord]) -> list[ShotRecord]:
-        eligible = []
-        for shot in shots:
-            if shot.reward is None:
-                continue
-            if shot.recommendation_decision in {
-                RecommendationDecision.IGNORED,
-                RecommendationDecision.DISMISSED,
-            }:
-                continue
-            if shot.recommendation_followed == FollowThroughState.NOT_FOLLOWED:
-                continue
-            eligible.append(shot)
-        return eligible or [shot for shot in shots if shot.reward is not None] or shots
+        return [shot for shot in shots if shot.reward is not None]
 
     def _center_recipe(self, shots: list[ShotRecord]) -> ShotRecord:
         eligible = self._eligible_shots(shots)
@@ -116,7 +104,7 @@ class ConservativeBOOptimizer:
                 return shot.reward * max(shot.reward_confidence, 0.05)
             return shot.profile_score or 0.0
 
-        return max(eligible, key=score)
+        return max(eligible, key=lambda shot: (score(shot), shot.timestamp))
 
     def _choose_candidate(
         self,
@@ -180,13 +168,20 @@ class ConservativeBOOptimizer:
             if shot.shot_type == ShotType.ESPRESSO
             and not shot.exclude_from_local_optimization
             and shot.optimization_weight > 0.0
+            and shot.feedback_recorded
+            and shot.reward is not None
+            and shot.recommendation_decision
+            not in {RecommendationDecision.IGNORED, RecommendationDecision.DISMISSED}
+            and shot.recommendation_followed != FollowThroughState.NOT_FOLLOWED
         ]
 
     def _single_point_probe(self, shot: ShotRecord) -> tuple[int, float]:
         tags = set(shot.taste_tags)
-        if {"sour", "weak", "too_fast"} & tags or (shot.shot_time_s is not None and shot.shot_time_s < 25):
+        if {"sour", "weak", "thin", "too_fast"} & tags or (shot.shot_time_s is not None and shot.shot_time_s < 25):
             return 1, 2.0
-        if {"bitter", "harsh", "too_slow"} & tags or (shot.shot_time_s is not None and shot.shot_time_s > 35):
+        if {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"} & tags or (
+            shot.shot_time_s is not None and shot.shot_time_s > 35
+        ):
             return -1, -2.0
         return 1, 0.0
 
@@ -218,7 +213,15 @@ class ConservativeBOOptimizer:
             distance = self._distance(candidate, shot, radius_steps, radius_yield_g, dose_radius_g)
             min_distance = min(min_distance, distance)
             weight = ((shot.reward_confidence or 0.1) * shot.optimization_weight) / (0.15 + distance)
-            weighted_reward += weight * (shot.reward if shot.reward is not None else (shot.profile_score or 0.0))
+            observation_reward = shot.reward if shot.reward is not None else (shot.profile_score or 0.0)
+            observation_reward += self._taste_candidate_adjustment(
+                candidate,
+                shot,
+                radius_steps,
+                radius_yield_g,
+                dose_radius_g,
+            )
+            weighted_reward += weight * observation_reward
             weight_sum += weight
         predicted_reward = weighted_reward / weight_sum if weight_sum else 0.0
         predicted_reward = self._blend_prior_reward(
@@ -237,10 +240,36 @@ class ConservativeBOOptimizer:
         distance_from_current += abs(candidate.target_yield_g - context.current_recipe.target_yield_g) / max(radius_yield_g, 1.0)
         distance_from_current += abs(candidate.dose_g - context.current_recipe.dose_g) / max(dose_radius_g, 0.5)
 
-        exploration_bonus = 0.02 * min(min_distance if math.isfinite(min_distance) else 0.0, 1.0)
-        distance_penalty = 0.04 * distance_from_current
+        exploration_bonus = 0.05 * min(min_distance if math.isfinite(min_distance) else 0.0, 1.0)
+        distance_penalty = 0.025 * distance_from_current
         oscillation_penalty = self._oscillation_penalty(candidate, context)
         return predicted_reward + exploration_bonus - distance_penalty - oscillation_penalty
+
+    def _taste_candidate_adjustment(
+        self,
+        candidate,
+        shot: ShotRecord,
+        radius_steps: int,
+        radius_yield_g: float,
+        dose_radius_g: float,
+    ) -> float:
+        tags = set(shot.taste_tags)
+        if not tags:
+            return 0.0
+
+        shot_grind = shot.grind_steps if shot.grind_steps is not None else candidate.grind_steps
+        grind_delta = (candidate.grind_steps - shot_grind) / max(radius_steps, 1)
+        yield_delta = (candidate.target_yield_g - shot.target_yield_g) / max(radius_yield_g, 1.0)
+        extraction_direction = max(-1.0, min(1.0, 0.65 * grind_delta + 0.35 * yield_delta))
+
+        if {"sour", "weak", "thin", "too_fast"} & tags:
+            return 0.12 * extraction_direction
+        if {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"} & tags:
+            return -0.12 * extraction_direction
+        if {"balanced", "sweet", "good_body"} & tags:
+            distance = self._distance(candidate, shot, radius_steps, radius_yield_g, dose_radius_g)
+            return -0.08 * min(distance, 1.0)
+        return 0.0
 
     def _blend_prior_reward(
         self,
@@ -351,9 +380,9 @@ class ConservativeBOOptimizer:
     def _reason(self, shots: list[ShotRecord], grind_delta_steps: float, yield_delta_g: float) -> str:
         last = shots[-1]
         tags = set(last.taste_tags)
-        if {"sour", "weak", "too_fast"} & tags:
+        if {"sour", "weak", "thin", "too_fast"} & tags:
             return "Last shot looked under-extracted; try a small finer/longer adjustment."
-        if {"bitter", "harsh", "too_slow"} & tags:
+        if {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"} & tags:
             return "Last shot looked over-extracted or slow; try a small coarser/shorter adjustment."
         if grind_delta_steps == 0 and abs(yield_delta_g) < 0.1:
             return "Hold near the best known recipe while more feedback is collected."

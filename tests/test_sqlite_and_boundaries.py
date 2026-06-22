@@ -16,7 +16,7 @@ from espresso_rl.adapters.sqlite_repositories import (
 )
 from espresso_rl.adapters.postgres_repositories import _upsert
 from espresso_rl.application.services import EspressoRLService
-from espresso_rl.domain.events import RecommendationApplyEvent, ShotProfileEvent
+from espresso_rl.domain.events import RecommendationApplyEvent, ShotFeedbackEvent, ShotProfileEvent
 from espresso_rl.domain.models import RecommendationApplyStatus, UploadQueueItem, UploadQueueStatus
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from espresso_rl.adapters.supabase_upload import (
@@ -101,16 +101,25 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
             result = service.ingest_shot_profile(shot_event())
+            feedback = service.record_feedback(
+                ShotFeedbackEvent(
+                    shot_id="shot_1",
+                    install_id="install_1",
+                    machine_id="machine_1",
+                    timestamp=2,
+                    rating=4,
+                )
+            )
             service.record_recommendation_apply(
                 RecommendationApplyEvent(
-                    recommendation_id=result.recommendation.recommendation_id,
+                    recommendation_id=feedback.recommendation.recommendation_id,
                     status=RecommendationApplyStatus.MANUAL_REQUIRED,
                     timestamp=2,
                     manual_fields=["next_grind_steps", "next_dose_g"],
                 )
             )
             stored_shot = shots.get("shot_1")
-            stored_rec = recs.get(result.recommendation.recommendation_id)
+            stored_rec = recs.get(feedback.recommendation.recommendation_id)
 
             self.assertIsNotNone(stored_shot)
             self.assertIsNotNone(stored_rec)
@@ -120,7 +129,8 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(stored_shot.final_phase_name, "ramp")  # type: ignore[union-attr]
             self.assertTrue(stored_shot.final_valve_open)  # type: ignore[union-attr]
             self.assertEqual(stored_shot.shot_end_state, "manual_or_interrupted")  # type: ignore[union-attr]
-            self.assertEqual(stored_rec.reason, result.recommendation.reason)  # type: ignore[union-attr]
+            self.assertTrue(stored_shot.feedback_recorded)  # type: ignore[union-attr]
+            self.assertEqual(stored_rec.reason, feedback.recommendation.reason)  # type: ignore[union-attr]
             self.assertEqual(stored_rec.apply_status, RecommendationApplyStatus.MANUAL_REQUIRED)  # type: ignore[union-attr]
             self.assertEqual(stored_rec.manual_fields, ["next_grind_steps", "next_dose_g"])  # type: ignore[union-attr]
 
@@ -441,6 +451,8 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("validation_errors JSONB", schema)
         self.assertIn("UNIQUE (source_validation_id)", schema)
         self.assertIn("idx_community_priors_context_key", schema)
+        self.assertIn("feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE", schema)
+        self.assertIn("ADD COLUMN IF NOT EXISTS feedback_recorded", schema)
 
     def test_core_layers_do_not_import_adapters_or_infrastructure(self) -> None:
         root = Path(__file__).resolve().parents[1] / "src" / "espresso_rl"

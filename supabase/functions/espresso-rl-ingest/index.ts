@@ -191,6 +191,7 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   requireNumberRange(payload, 'target_yield_g', 5, 100, errors);
   optionalNumberRange(payload, 'shot_time_s', 5, 90, errors);
   optionalNumberRange(payload, 'human_rating', 1, 5, errors);
+  optionalBoolean(payload, 'feedback_recorded', errors);
   optionalEnum(payload, 'shot_type', ['espresso', 'utility_flush', 'cleaning', 'calibration', 'unknown'], errors);
   optionalBoolean(payload, 'exclude_from_local_optimization', errors);
   optionalBoolean(payload, 'rating_prompt_allowed', errors);
@@ -281,7 +282,7 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
     [0, 15, 'target_pressure'],
     [0, 20, 'flow'],
     [0, 20, 'target_flow'],
-    [0, 100, 'weight'],
+    [-1, 100, 'weight'],
   ];
   const targetFlowActive = channelActive(profile[3]);
   for (let channelIndex = 0; channelIndex < 5; channelIndex += 1) {

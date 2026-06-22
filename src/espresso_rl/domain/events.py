@@ -264,6 +264,10 @@ class ShotFeedbackEvent:
             raise ValueError("unsupported feedback schema_version")
         if self.rating is not None and not 1 <= self.rating <= 5:
             raise ValueError("rating must be 1..5 or null")
+        if self.skipped and (self.rating is not None or self.taste_tags):
+            raise ValueError("skipped feedback cannot include a rating or taste tags")
+        if not self.skipped and self.rating is None:
+            raise ValueError("rating is required unless feedback is skipped")
         invalid_tags = set(self.taste_tags) - VALID_TASTE_TAGS
         if invalid_tags:
             raise ValueError(f"invalid taste tags: {sorted(invalid_tags)}")

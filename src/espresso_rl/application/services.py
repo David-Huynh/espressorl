@@ -54,6 +54,12 @@ class IngestResult:
         return self.shot is not None
 
 
+@dataclass(frozen=True)
+class FeedbackResult:
+    shot: ShotRecord
+    recommendation: Recommendation | None
+
+
 def _recommendation_signature(recommendation: Recommendation) -> tuple:
     """The *meaningful* state of a recommendation for upload deduplication.
 
@@ -143,6 +149,7 @@ class EspressoRLService:
             exclude_from_local_optimization=classification.exclude_from_local_optimization,
             optimization_weight=classification.optimization_weight,
             rating_prompt_allowed=classification.rating_prompt_allowed,
+            feedback_recorded=not classification.rating_prompt_allowed,
             weight_source=event.weight_source,
             flow_source=event.flow_source,
             flow_units=event.flow_units,
@@ -195,28 +202,44 @@ class EspressoRLService:
         shot.reward_confidence = reward.confidence
         self._store_shot(shot, now)
 
-        if not classification.locally_optimizable:
+        if not shot.feedback_recorded:
             return IngestResult(shot=shot, recommendation=None)
-
-        next_rec = self.generate_recommendation(
-            install_id=event.install_id,
-            machine_id=event.machine_id,
-            bean_context_id=event.bean_context_id,
+        recommendation = self.generate_recommendation(
+            install_id=shot.install_id,
+            machine_id=shot.machine_id,
+            bean_context_id=shot.bean_context_id,
             current_recipe=shot.to_recipe(),
             now=now,
         )
-        return IngestResult(shot=shot, recommendation=next_rec)
+        return IngestResult(shot=shot, recommendation=recommendation)
 
-    def record_feedback(self, event: ShotFeedbackEvent) -> ShotRecord:
+    def record_feedback(self, event: ShotFeedbackEvent) -> FeedbackResult:
         now = self._clock()
         shot = self._shots.get(event.shot_id)
         if shot is None:
             raise ValueError(f"unknown shot_id {event.shot_id}")
-        if event.recommendation_id and shot.recommendation_id is None:
+        if shot.install_id != event.install_id or shot.machine_id != event.machine_id:
+            raise ValueError("shot feedback does not match the stored shot owner")
+        if event.recommendation_id:
+            if shot.recommendation_id and shot.recommendation_id != event.recommendation_id:
+                raise ValueError("shot feedback recommendation_id does not match the stored shot")
+            recommendation = self._recommendations.get(event.recommendation_id)
+            if recommendation is None:
+                raise ValueError(f"unknown recommendation_id {event.recommendation_id}")
+            if recommendation.install_id != shot.install_id or recommendation.machine_id != shot.machine_id:
+                raise ValueError("shot feedback recommendation does not match the stored shot owner")
             shot.recommendation_id = event.recommendation_id
 
-        shot.human_rating = None if event.skipped else event.rating
-        shot.taste_tags = list(event.taste_tags)
+        human_rating = None if event.skipped else event.rating
+        taste_tags = list(event.taste_tags)
+        feedback_changed = (
+            not shot.feedback_recorded
+            or shot.human_rating != human_rating
+            or shot.taste_tags != taste_tags
+        )
+        shot.human_rating = human_rating
+        shot.taste_tags = taste_tags
+        shot.feedback_recorded = True
         reward = compute_reward(
             human_rating=shot.human_rating,
             profile_score=shot.profile_score or 0.0,
@@ -228,7 +251,33 @@ class EspressoRLService:
         shot.reward_confidence = reward.confidence
         shot.updated_at = now
         self._store_shot(shot, now)
-        return shot
+
+        recent = self._shots.list_recent(
+            install_id=shot.install_id,
+            machine_id=shot.machine_id,
+            bean_context_id=shot.bean_context_id,
+            limit=1,
+        )
+        if not recent or recent[-1].shot_id != shot.shot_id:
+            return FeedbackResult(shot=shot, recommendation=None)
+
+        current = self._recommendations.get_current(
+            install_id=shot.install_id,
+            machine_id=shot.machine_id,
+            bean_context_id=shot.bean_context_id,
+            now=now,
+        )
+        if not feedback_changed and current is not None and current.source_shot_id == shot.shot_id:
+            return FeedbackResult(shot=shot, recommendation=current)
+
+        recommendation = self.generate_recommendation(
+            install_id=shot.install_id,
+            machine_id=shot.machine_id,
+            bean_context_id=shot.bean_context_id,
+            current_recipe=shot.to_recipe(),
+            now=now,
+        )
+        return FeedbackResult(shot=shot, recommendation=recommendation)
 
     def record_shot_correction(self, event: ShotCorrectionEvent) -> ShotRecord:
         now = self._clock()
@@ -381,6 +430,14 @@ class EspressoRLService:
 
         now = self._clock()
         current_recipe = event.current_recipe()
+        recent = self._shots.list_recent(
+            install_id=event.install_id,
+            machine_id=event.machine_id,
+            bean_context_id=event.bean_context_id,
+            limit=1,
+        )
+        if recent and recent[-1].rating_prompt_allowed and not recent[-1].feedback_recorded:
+            return None
         current = self._recommendations.get_current(
             install_id=event.install_id,
             machine_id=event.machine_id,

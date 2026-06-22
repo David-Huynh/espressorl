@@ -109,6 +109,9 @@ def _shot(
         shot_type=shot_type,
         exclude_from_local_optimization=exclude,
         optimization_weight=optimization_weight,
+        feedback_recorded=True,
+        reward=0.5,
+        reward_confidence=0.5,
         created_at=10,
         updated_at=10,
     )

@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from espresso_rl.domain.events import ShotProfileEvent
+from espresso_rl.domain.events import ShotFeedbackEvent, ShotProfileEvent
 from espresso_rl.domain.follow_through import infer_follow_through
 from espresso_rl.domain.models import (
     FollowThroughState,
@@ -49,6 +49,18 @@ def event(**overrides) -> ShotProfileEvent:
 
 
 class DomainCoreTests(unittest.TestCase):
+    def test_feedback_requires_rating_or_explicit_skip(self) -> None:
+        base = {
+            "shot_id": "shot_1",
+            "install_id": "install_1",
+            "machine_id": "machine_1",
+            "timestamp": 1,
+        }
+        with self.assertRaisesRegex(ValueError, "rating is required"):
+            ShotFeedbackEvent(**base)
+        with self.assertRaisesRegex(ValueError, "skipped feedback cannot include"):
+            ShotFeedbackEvent(**base, skipped=True, rating=4)
+
     def test_canonical_profile_requires_aligned_arrays(self) -> None:
         with self.assertRaises(ValueError):
             event(flow=[0.0, 1.0])

@@ -59,6 +59,7 @@ def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
         "recommendation_attribution_weight": shot.recommendation_attribution_weight,
         "human_rating": shot.human_rating,
         "taste_tags": list(shot.taste_tags),
+        "feedback_recorded": shot.feedback_recorded,
         "profile_score": shot.profile_score,
         "profile_mse": shot.profile_mse,
         "reward": shot.reward,

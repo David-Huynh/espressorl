@@ -10,6 +10,7 @@ from espresso_rl.domain.community import CommunityPrior
 from espresso_rl.domain.models import (
     FollowThroughState,
     Recipe,
+    RecommendationDecision,
     RecommendationMode,
     SafetyBounds,
     ShotRecord,
@@ -19,6 +20,7 @@ from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from tests.test_application_service import (
     MemoryRecommendationRepository,
     MemoryShotRepository,
+    ingest_and_feedback,
     shot_event,
 )
 
@@ -48,11 +50,11 @@ class WarmStartPriorTests(unittest.TestCase):
             clock=lambda: 10,
         )
 
-        result = service.ingest_shot_profile(shot_event("shot_1", 1))
+        recommendation = ingest_and_feedback(service, shot_event("shot_1", 1))
 
-        self.assertEqual(result.recommendation.mode, RecommendationMode.WARM_STARTED_BO)
-        self.assertLessEqual(abs(result.recommendation.target_yield_g - 36.0), 4.0)
-        self.assertLessEqual(abs(result.recommendation.grind_delta_steps), 2)
+        self.assertEqual(recommendation.mode, RecommendationMode.WARM_STARTED_BO)
+        self.assertLessEqual(abs(recommendation.target_yield_g - 36.0), 4.0)
+        self.assertLessEqual(abs(recommendation.grind_delta_steps), 2)
 
     def test_bad_prior_outside_safety_bounds_is_not_used_for_warm_start(self) -> None:
         shots = MemoryShotRepository()
@@ -78,11 +80,11 @@ class WarmStartPriorTests(unittest.TestCase):
             clock=lambda: 10,
         )
 
-        result = service.ingest_shot_profile(shot_event("shot_1", 1))
+        recommendation = ingest_and_feedback(service, shot_event("shot_1", 1))
 
-        self.assertEqual(result.recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
-        self.assertLessEqual(abs(result.recommendation.grind_delta_steps), 2)
-        self.assertLessEqual(abs(result.recommendation.target_yield_g - 36.0), 4.0)
+        self.assertEqual(recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
+        self.assertLessEqual(abs(recommendation.grind_delta_steps), 2)
+        self.assertLessEqual(abs(recommendation.target_yield_g - 36.0), 4.0)
 
     def test_local_data_disables_external_priors_after_sparse_startup(self) -> None:
         current = Recipe(
@@ -121,6 +123,78 @@ class WarmStartPriorTests(unittest.TestCase):
 
         self.assertEqual(recommendation.mode, RecommendationMode.LOCAL_BO)
         self.assertNotEqual(recommendation.target_yield_g, 44.0)
+
+    def test_taste_tags_move_multi_observation_bo_in_the_expected_direction(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[
+                shot_record("shot_1", timestamp=1, reward=0.5, rating=3, taste_tags=["sour"]),
+                shot_record("shot_2", timestamp=2, reward=0.5, rating=3, taste_tags=["thin"]),
+            ],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertEqual(recommendation.source_shot_id, "shot_2")
+        self.assertTrue(
+            recommendation.next_grind_steps > current.grind_steps
+            or recommendation.target_yield_g > current.target_yield_g
+        )
+
+    def test_flat_local_evidence_still_probes_a_new_bounded_candidate(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[
+                shot_record("shot_1", timestamp=1, reward=0.5, rating=3),
+                shot_record("shot_2", timestamp=2, reward=0.5, rating=3),
+            ],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertTrue(
+            recommendation.next_grind_steps != current.grind_steps
+            or recommendation.target_yield_g != current.target_yield_g
+        )
+        self.assertLessEqual(abs(recommendation.grind_delta_steps), 2)
+        self.assertLessEqual(abs(recommendation.target_yield_g - current.target_yield_g), 4.0)
+
+    def test_ignored_and_not_followed_shots_are_not_optimizer_observations(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        ignored = shot_record("ignored", timestamp=1, reward=1.0, rating=5)
+        ignored.recommendation_decision = RecommendationDecision.IGNORED
+        not_followed = shot_record("not_followed", timestamp=2, reward=1.0, rating=5)
+        not_followed.recommendation_followed = FollowThroughState.NOT_FOLLOWED
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[ignored, not_followed],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertEqual(recommendation.mode, RecommendationMode.ZERO_OBSERVE)
+        self.assertIsNone(recommendation.source_shot_id)
+        self.assertEqual(recommendation.next_grind_steps, current.grind_steps)
 
     def test_community_provider_revalidates_and_caps_released_prior_json(self) -> None:
         repo = FakeCommunityPriorRepo(
@@ -226,6 +300,7 @@ def shot_record(
     timestamp: int,
     reward: float = 0.6,
     rating: int | None = None,
+    taste_tags: list[str] | None = None,
 ) -> ShotRecord:
     return ShotRecord(
         shot_id=shot_id,
@@ -243,6 +318,8 @@ def shot_record(
         reward=reward,
         reward_confidence=1.0,
         human_rating=rating,
+        taste_tags=taste_tags or [],
+        feedback_recorded=True,
         recommendation_followed=FollowThroughState.FOLLOWED,
     )
 

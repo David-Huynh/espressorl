@@ -63,6 +63,7 @@ class SQLiteStore:
                 recommendation_attribution_weight REAL NOT NULL,
                 human_rating INTEGER,
                 taste_tags_json TEXT NOT NULL,
+                feedback_recorded INTEGER NOT NULL DEFAULT 0,
                 profile_score REAL,
                 profile_mse REAL,
                 reward REAL,
@@ -169,6 +170,10 @@ class SQLiteStore:
         self._ensure_column("shots", "exclude_from_local_optimization", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("shots", "optimization_weight", "REAL NOT NULL DEFAULT 1.0")
         self._ensure_column("shots", "rating_prompt_allowed", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("shots", "feedback_recorded", "INTEGER NOT NULL DEFAULT 0")
+        self.conn.execute(
+            "UPDATE shots SET feedback_recorded=1 WHERE feedback_recorded=0 AND human_rating IS NOT NULL"
+        )
         self._ensure_column("shots", "grind_followed", "INTEGER")
         self._ensure_column("shots", "dose_followed", "INTEGER")
         self._ensure_column("shots", "yield_followed", "INTEGER")
@@ -231,6 +236,7 @@ class SQLiteShotRepository:
                 recommended_target_yield_g, recommended_target_ratio,
                 recommendation_decision, recommendation_followed,
                 recommendation_attribution_weight, human_rating, taste_tags_json,
+                feedback_recorded,
                 profile_score, profile_mse, reward, reward_confidence,
                 shot_type, exclude_from_local_optimization, optimization_weight,
                 rating_prompt_allowed, grind_followed, dose_followed,
@@ -257,6 +263,7 @@ class SQLiteShotRepository:
                 :recommended_target_yield_g, :recommended_target_ratio,
                 :recommendation_decision, :recommendation_followed,
                 :recommendation_attribution_weight, :human_rating, :taste_tags_json,
+                :feedback_recorded,
                 :profile_score, :profile_mse, :reward, :reward_confidence,
                 :shot_type, :exclude_from_local_optimization, :optimization_weight,
                 :rating_prompt_allowed, :grind_followed, :dose_followed,
@@ -942,6 +949,7 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "recommendation_attribution_weight": shot.recommendation_attribution_weight,
         "human_rating": shot.human_rating,
         "taste_tags_json": json.dumps(shot.taste_tags),
+        "feedback_recorded": bool(shot.feedback_recorded),
         "profile_score": shot.profile_score,
         "profile_mse": shot.profile_mse,
         "reward": shot.reward,
@@ -1017,6 +1025,7 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         recommendation_attribution_weight=row["recommendation_attribution_weight"],
         human_rating=row["human_rating"],
         taste_tags=json.loads(row["taste_tags_json"]),
+        feedback_recorded=bool(row["feedback_recorded"]),
         profile_score=row["profile_score"],
         profile_mse=row["profile_mse"],
         reward=row["reward"],

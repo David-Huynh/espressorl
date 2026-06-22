@@ -142,10 +142,12 @@ Recommendation flow:
 
 ```text
 Gaggimate publishes shot/profile
-  -> EspressoRL stores shot and generates bounded BO recommendation
+  -> EspressoRL stores shot and waits for rating or explicit Skip
+  -> Gaggimate publishes shot feedback with optional taste tags
+  -> EspressoRL updates reward and generates a bounded BO recommendation
   -> EspressoRL publishes gaggimate/{topic_id}/rl/recommendation
   -> Gaggimate stores the pending recommendation
-  -> Gaggimate UI shows recommendation/rating prompts
+  -> Gaggimate UI shows the recommendation after feedback
   -> Gaggimate publishes decision and apply acknowledgement after Use
   -> next shot data determines actual follow-through
 ```
@@ -156,6 +158,12 @@ Gaggimate cannot automate a grinder setting. When the user chooses Use, firmware
 saves the selected-profile target yield when possible. It saves the recommended
 grind-by-weight dose target only when Gaggimate grind-by-weight targeting is
 enabled; otherwise it prompts the user to grind that dose manually.
+
+Human rating is the primary reward signal. Optional taste tags also guide the
+bounded BO step: under-extraction tags bias toward a slightly finer/longer
+recipe, over-extraction tags bias coarser/shorter, and positive tags favor
+holding near the observed recipe. Explicit Skip completes feedback with lower
+confidence so the shot can still contribute profile evidence.
 
 Use publishes both an accepted recommendation decision and
 `gaggimate/{topic_id}/rl/recommendation/apply`. The apply acknowledgement records

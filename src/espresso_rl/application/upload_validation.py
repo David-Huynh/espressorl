@@ -74,6 +74,7 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_number_range(payload, "target_ratio", 1.2, 3.5, errors)
     _optional_number_range(payload, "shot_time_s", 5, 90, errors)
     _optional_number_range(payload, "human_rating", 1, 5, errors)
+    _optional_bool(payload, "feedback_recorded", errors)
     _optional_number_range(payload, "optimization_weight", 0, 1, errors)
     _optional_number_range(payload, "recommendation_attribution_weight", 0, 1, errors)
     _optional_number_range(payload, "grind_recommendation_trust", 0, 1, errors)
@@ -135,7 +136,7 @@ def _validate_profile_resampled(profile: Any, beverage_out_g: Any, errors: list[
         (0, 15, "target_pressure"),
         (0, 20, "flow"),
         (0, 20, "target_flow"),
-        (0, 100, "weight"),
+        (-1, 100, "weight"),
     ]
     if not isinstance(profile, list) or len(profile) != 5:
         errors.append("profile_resampled must have 5 channels")

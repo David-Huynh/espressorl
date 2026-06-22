@@ -264,19 +264,142 @@ def shot_event(shot_id: str, timestamp: int, **overrides) -> ShotProfileEvent:
     return ShotProfileEvent(**base)
 
 
+def feedback_event(shot_id: str, timestamp: int, **overrides) -> ShotFeedbackEvent:
+    base = {
+        "shot_id": shot_id,
+        "install_id": "install_1",
+        "machine_id": "machine_1",
+        "timestamp": timestamp,
+        "rating": 3,
+    }
+    base.update(overrides)
+    return ShotFeedbackEvent(**base)
+
+
+def ingest_and_feedback(
+    service: EspressoRLService,
+    event: ShotProfileEvent,
+    *,
+    rating: int = 3,
+    taste_tags: list[str] | None = None,
+) -> Recommendation:
+    result = service.ingest_shot_profile(event)
+    if result.shot is None:
+        raise AssertionError("expected shot to be stored")
+    feedback = service.record_feedback(
+        feedback_event(
+            event.shot_id,
+            event.timestamp + 1,
+            recommendation_id=event.recommendation_id,
+            rating=rating,
+            taste_tags=taste_tags or [],
+        )
+    )
+    if feedback.recommendation is None:
+        raise AssertionError("expected latest-shot feedback to generate a recommendation")
+    return feedback.recommendation
+
+
 class ApplicationServiceTests(unittest.TestCase):
-    def test_zero_start_generates_bounded_second_shot_recommendation(self) -> None:
+    def test_feedback_generates_bounded_second_shot_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
         result = service.ingest_shot_profile(shot_event("shot_1", 1))
 
-        self.assertEqual(result.recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
-        self.assertEqual(result.recommendation.next_dose_g, 18.0)
-        self.assertLessEqual(abs(result.recommendation.grind_delta_steps), 2)
-        self.assertLessEqual(abs(result.recommendation.target_yield_g - 36.0), 4.0)
+        self.assertIsNone(result.recommendation)
+        self.assertIsNone(service.handle_machine_state(idle_event(2)))
+        feedback = service.record_feedback(feedback_event("shot_1", 3, rating=4))
+        self.assertEqual(feedback.recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
+        self.assertEqual(feedback.recommendation.next_dose_g, 18.0)
+        self.assertLessEqual(abs(feedback.recommendation.grind_delta_steps), 2)
+        self.assertLessEqual(abs(feedback.recommendation.target_yield_g - 36.0), 4.0)
+        self.assertTrue(feedback.shot.feedback_recorded)
         self.assertLess(shots.get("shot_1").reward_confidence, 1.0)  # type: ignore[union-attr]
+
+    def test_skipped_feedback_is_complete_and_generates_from_the_latest_shot(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service.ingest_shot_profile(shot_event("shot_1", 1))
+
+        result = service.record_feedback(
+            feedback_event("shot_1", 2, rating=None, skipped=True)
+        )
+
+        self.assertTrue(result.shot.feedback_recorded)
+        self.assertIsNone(result.shot.human_rating)
+        self.assertEqual(result.recommendation.source_shot_id, "shot_1")
+
+    def test_rating_opt_out_uses_profile_evidence_without_waiting_for_feedback(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        result = service.ingest_shot_profile(
+            shot_event("shot_1", 1, rating_prompt_allowed=False)
+        )
+
+        self.assertTrue(result.shot.feedback_recorded)
+        self.assertIsNotNone(result.recommendation)
+        self.assertEqual(result.recommendation.source_shot_id, "shot_1")
+
+    def test_feedback_owner_mismatch_is_rejected_without_training(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service.ingest_shot_profile(shot_event("shot_1", 1))
+
+        with self.assertRaisesRegex(ValueError, "does not match the stored shot owner"):
+            service.record_feedback(
+                feedback_event("shot_1", 2, machine_id="other_machine", rating=5)
+            )
+
+        self.assertFalse(shots.get("shot_1").feedback_recorded)  # type: ignore[union-attr]
+        self.assertEqual(recs.rows, {})
+
+    def test_late_feedback_updates_history_without_replacing_latest_shot_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service.ingest_shot_profile(shot_event("shot_1", 1))
+        service.ingest_shot_profile(shot_event("shot_2", 3))
+
+        result = service.record_feedback(feedback_event("shot_1", 4, rating=5))
+
+        self.assertTrue(result.shot.feedback_recorded)
+        self.assertIsNone(result.recommendation)
+        self.assertEqual(recs.rows, {})
+
+    def test_duplicate_unchanged_feedback_reuses_the_same_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service.ingest_shot_profile(shot_event("shot_1", 1))
+
+        first = service.record_feedback(feedback_event("shot_1", 2, rating=4))
+        duplicate = service.record_feedback(feedback_event("shot_1", 2, rating=4))
+
+        self.assertEqual(
+            duplicate.recommendation.recommendation_id,
+            first.recommendation.recommendation_id,
+        )
+        self.assertEqual(len(recs.rows), 1)
+
+    def test_feedback_rejects_a_recommendation_id_mismatch(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        recommendation = ingest_and_feedback(service, shot_event("shot_1", 1))
+        service.ingest_shot_profile(
+            shot_event("shot_2", 3, recommendation_id=recommendation.recommendation_id)
+        )
+
+        with self.assertRaisesRegex(ValueError, "recommendation_id does not match"):
+            service.record_feedback(
+                feedback_event("shot_2", 4, recommendation_id="rec_wrong", rating=4)
+            )
 
     def test_ingest_masks_invalid_flow_without_dropping_espresso_shot(self) -> None:
         shots = MemoryShotRepository()
@@ -305,7 +428,7 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        active = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        active = ingest_and_feedback(service, shot_event("shot_1", 1))
         result = service.ingest_shot_profile(
             shot_event(
                 "flush_1",
@@ -395,7 +518,7 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         service.record_recommendation_decision(
             RecommendationDecisionEvent(
                 recommendation_id=rec.recommendation_id,
@@ -462,7 +585,7 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        first = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        first = ingest_and_feedback(service, shot_event("shot_1", 1))
         service.record_recommendation_decision(
             RecommendationDecisionEvent(
                 recommendation_id=first.recommendation_id,
@@ -498,15 +621,50 @@ class ApplicationServiceTests(unittest.TestCase):
                 taste_tags=["balanced"],
             )
         )
-        self.assertGreater(updated.reward or 0.0, 0.8)
-        self.assertEqual(updated.reward_confidence, 1.0)
+        self.assertGreater(updated.shot.reward or 0.0, 0.8)
+        self.assertEqual(updated.shot.reward_confidence, 1.0)
+
+    def test_close_yield_and_small_negative_tare_remain_valid_training_data(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        first = ingest_and_feedback(
+            service,
+            shot_event("shot_1", 1, target_yield_g=38.0, beverage_out_g=38.0),
+        )
+        service.record_recommendation_decision(
+            RecommendationDecisionEvent(
+                recommendation_id=first.recommendation_id,
+                decision=RecommendationDecision.ACCEPTED,
+                timestamp=2,
+            )
+        )
+
+        service.ingest_shot_profile(
+            shot_event(
+                "shot_2",
+                3,
+                recommendation_id=first.recommendation_id,
+                grind_steps=first.next_grind_steps,
+                dose_in_g=first.next_dose_g,
+                target_yield_g=38.0,
+                beverage_out_g=37.5,
+                weight=[-0.1, 10.0, 37.5],
+            )
+        )
+        stored = shots.get("shot_2")
+
+        self.assertEqual(stored.recommendation_followed, FollowThroughState.FOLLOWED)
+        feedback = service.record_feedback(feedback_event("shot_2", 4, rating=5))
+        self.assertTrue(feedback.shot.feedback_recorded)
+        self.assertEqual(feedback.recommendation.source_shot_id, "shot_2")
 
     def test_machine_idle_shows_current_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         shown = service.handle_machine_state(
             MachineStateEvent(
                 install_id="install_1",
@@ -532,7 +690,7 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        old = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        old = ingest_and_feedback(service, shot_event("shot_1", 1))
         new = service.handle_machine_state(
             MachineStateEvent(
                 install_id="install_1",
@@ -557,7 +715,7 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         accepted = service.record_recommendation_decision(
             RecommendationDecisionEvent(
                 recommendation_id=rec.recommendation_id,
@@ -589,7 +747,7 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         service.record_recommendation_decision(
             RecommendationDecisionEvent(
                 recommendation_id=rec.recommendation_id,
@@ -620,7 +778,7 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         latest = rec
         for shown_count in range(1, 8):
             latest = service.handle_machine_state(
@@ -656,7 +814,7 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         stored = recs.get(rec.recommendation_id)
         stored.status = RecommendationStatus.EXPIRED  # type: ignore[union-attr]
         recs.upsert(stored)  # type: ignore[arg-type]
@@ -691,11 +849,13 @@ class ApplicationServiceTests(unittest.TestCase):
         result = service.ingest_shot_profile(shot_event("shot_1", 1))
 
         self.assertTrue(any(item.local_record_type == "shot" for item in uploads.rows.values()))
+        self.assertFalse(any(item.local_record_type == "recommendation" for item in uploads.rows.values()))
+        feedback = service.record_feedback(feedback_event("shot_1", 2, rating=4))
         self.assertTrue(any(item.local_record_type == "recommendation" for item in uploads.rows.values()))
         payloads = [item.payload_json for item in uploads.rows.values()]
         self.assertTrue(any('"shot_id":"shot_1"' in payload for payload in payloads))
         self.assertTrue(
-            any(result.recommendation.recommendation_id in payload for payload in payloads)
+            any(feedback.recommendation.recommendation_id in payload for payload in payloads)
         )
 
     def test_idle_reshows_do_not_reenqueue_recommendation(self) -> None:
@@ -706,15 +866,15 @@ class ApplicationServiceTests(unittest.TestCase):
             shots, recs, ConservativeBOOptimizer(), upload_queue=queue, clock=lambda: 10
         )
 
-        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         for ts in range(2, 9):
             service.handle_machine_state(idle_event(ts))
 
         # Only the create and the first show are meaningful; the six later idle
         # re-marks (shown_count 2..7) are incidental churn and must not upload.
         self.assertEqual(len(queue.for_record("recommendation", rec.recommendation_id)), 2)
-        # The shot uploads exactly once (at ingest); idle pings never touch it.
-        self.assertEqual(len(queue.for_record("shot")), 1)
+        # The shot uploads at ingest and after feedback; idle pings never touch it.
+        self.assertEqual(len(queue.for_record("shot")), 2)
 
     def test_recommendation_lifecycle_transitions_each_enqueue_once(self) -> None:
         shots = MemoryShotRepository()
@@ -724,7 +884,7 @@ class ApplicationServiceTests(unittest.TestCase):
             shots, recs, ConservativeBOOptimizer(), upload_queue=queue, clock=lambda: 10
         )
 
-        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation  # created
+        rec = ingest_and_feedback(service, shot_event("shot_1", 1))  # created after feedback
         service.handle_machine_state(idle_event(2))  # first shown
         service.record_recommendation_decision(
             RecommendationDecisionEvent(
@@ -753,7 +913,7 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-        rec = service.ingest_shot_profile(shot_event("shot_1", 1)).recommendation
+        rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         base = recs.get(rec.recommendation_id)
         self.assertEqual(base.shown_count, 0)
 

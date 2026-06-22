@@ -279,6 +279,7 @@ class ShotRecord:
     recommendation_attribution_weight: float = 0.0
     human_rating: int | None = None
     taste_tags: list[str] = field(default_factory=list)
+    feedback_recorded: bool = False
     profile_score: float | None = None
     profile_mse: float | None = None
     reward: float | None = None

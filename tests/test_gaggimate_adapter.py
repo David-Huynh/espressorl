@@ -466,7 +466,19 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "bean_context_id": "profile_1",
             }
 
-            first = service.ingest_shot_profile(client.translate_shot_payload(first_payload, mac="AA_BB"))
+            ingested = service.ingest_shot_profile(client.translate_shot_payload(first_payload, mac="AA_BB"))
+            self.assertIsNone(ingested.recommendation)
+            first = service.record_feedback(
+                client.translate_feedback_payload(
+                    {
+                        "shot_id": "shot_1",
+                        "rating": 3,
+                        "timestamp": 2,
+                        "source": "gaggimate_webui",
+                    },
+                    mac="AA_BB",
+                )
+            )
             client.publish_recommendation(first.recommendation)
 
             topic, payload, qos, retain = fake.published[-1]
@@ -522,8 +534,9 @@ class GaggimateAdapterTests(unittest.TestCase):
                     mac="AA_BB",
                 )
             )
-            self.assertEqual(updated.human_rating, 4)
-            self.assertGreater(updated.reward_confidence, 0.5)
+            self.assertEqual(updated.shot.human_rating, 4)
+            self.assertGreater(updated.shot.reward_confidence, 0.5)
+            self.assertEqual(updated.recommendation.source_shot_id, "shot_2")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS shots (
     recommendation_attribution_weight DOUBLE PRECISION NOT NULL,
     human_rating INTEGER,
     taste_tags_json TEXT NOT NULL,
+    feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE,
     profile_score DOUBLE PRECISION,
     profile_mse DOUBLE PRECISION,
     reward DOUBLE PRECISION,
@@ -72,6 +73,13 @@ CREATE TABLE IF NOT EXISTS shots (
 
 CREATE INDEX IF NOT EXISTS idx_shots_context_time
     ON shots (install_id, machine_id, bean_context_id, timestamp DESC);
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE;
+
+UPDATE shots
+SET feedback_recorded = TRUE
+WHERE feedback_recorded = FALSE AND human_rating IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS recommendations (
     recommendation_id TEXT PRIMARY KEY,
