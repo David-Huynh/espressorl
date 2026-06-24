@@ -48,6 +48,7 @@ class PostgresStore:
             if statement.strip():
                 self.conn.execute(statement)
         for column, definition in {
+            "grinder_context_id": "TEXT",
             "shot_type": "TEXT NOT NULL DEFAULT 'espresso'",
             "exclude_from_local_optimization": "BOOLEAN NOT NULL DEFAULT FALSE",
             "optimization_weight": "DOUBLE PRECISION NOT NULL DEFAULT 1.0",
@@ -83,6 +84,7 @@ class PostgresStore:
             "shot_end_state": "TEXT",
         }.items():
             self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
+        self.conn.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS grinder_context_id TEXT")
         for column, definition in {
             "validated_at": "TIMESTAMPTZ",
             "rejected_at": "TIMESTAMPTZ",
@@ -107,6 +109,18 @@ class PostgresStore:
         self.conn.commit()
 
 
+def _nullable_clause(
+    column: str,
+    value: str | None,
+    params: list[object],
+    placeholder: str = "%s",
+) -> str:
+    if value is None:
+        return f"{column} IS NULL"
+    params.append(value)
+    return f"{column}={placeholder}"
+
+
 class PostgresShotRepository:
     def __init__(self, store: PostgresStore) -> None:
         self._store = store
@@ -125,27 +139,21 @@ class PostgresShotRepository:
         machine_id: str,
         bean_context_id: str | None = None,
         limit: int = 200,
+        grinder_context_id: str | None = None,
     ) -> list[ShotRecord]:
-        if bean_context_id is None:
-            rows = self._store.conn.execute(
-                """
-                SELECT * FROM shots
-                WHERE install_id=%s AND machine_id=%s AND bean_context_id IS NULL
-                ORDER BY timestamp DESC
-                LIMIT %s
-                """,
-                (install_id, machine_id, limit),
-            ).fetchall()
-        else:
-            rows = self._store.conn.execute(
-                """
-                SELECT * FROM shots
-                WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
-                ORDER BY timestamp DESC
-                LIMIT %s
-                """,
-                (install_id, machine_id, bean_context_id, limit),
-            ).fetchall()
+        params: list[object] = [install_id, machine_id]
+        bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
+        grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params)
+        params.append(limit)
+        rows = self._store.conn.execute(
+            f"""
+            SELECT * FROM shots
+            WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """,
+            tuple(params),
+        ).fetchall()
         return list(reversed([_row_to_shot(row) for row in rows]))
 
 
@@ -265,19 +273,23 @@ class PostgresLocalDataRepository:
         *,
         limit: int = 100,
         dry_run: bool = False,
+        grinder_context_id: str | None = None,
     ) -> dict[str, int]:
         try:
-            bean_clause = ""
+            context_clause = ""
             params: list[object] = [install_id, machine_id]
-            if bean_context_id is not None:
-                bean_clause = "AND bean_context_id=%s"
-                params.append(bean_context_id)
+            if bean_context_id is not None or grinder_context_id is not None:
+                clauses = [
+                    _nullable_clause("bean_context_id", bean_context_id, params),
+                    _nullable_clause("grinder_context_id", grinder_context_id, params),
+                ]
+                context_clause = "AND " + " AND ".join(clauses)
             params.append(limit)
             rows = self._store.conn.execute(
                 f"""
                 SELECT shot_id FROM shots
                 WHERE install_id=%s AND machine_id=%s
-                  {bean_clause}
+                  {context_clause}
                   AND (
                     shot_type != 'espresso'
                     OR exclude_from_local_optimization = TRUE
@@ -315,55 +327,60 @@ class PostgresLocalDataRepository:
         *,
         now: int,
         dry_run: bool = False,
+        grinder_context_id: str | None = None,
     ) -> dict[str, int]:
         try:
+            context_params: list[object] = [install_id, machine_id, bean_context_id]
+            grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, context_params)
             shot_count = int(
                 self._store.conn.execute(
-                    """
+                    f"""
                     SELECT COUNT(*) AS count FROM shots
-                    WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
+                    WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND {grinder_clause}
                       AND (
                         exclude_from_local_optimization = FALSE
                         OR optimization_weight > 0
                         OR recommendation_attribution_weight > 0
                       )
                     """,
-                    (install_id, machine_id, bean_context_id),
+                    tuple(context_params),
                 ).fetchone()["count"]
             )
+            rec_context_params: list[object] = [install_id, machine_id, bean_context_id]
+            rec_grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, rec_context_params)
             recommendation_count = int(
                 self._store.conn.execute(
-                    """
+                    f"""
                     SELECT COUNT(*) AS count FROM recommendations
-                    WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
+                    WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND {rec_grinder_clause}
                       AND status IN ('pending', 'shown', 'accepted', 'edited')
                     """,
-                    (install_id, machine_id, bean_context_id),
+                    tuple(rec_context_params),
                 ).fetchone()["count"]
             )
             if dry_run:
                 return {"shots": shot_count, "recommendations": recommendation_count}
             self._store.conn.execute(
-                """
+                f"""
                 UPDATE shots
                 SET exclude_from_local_optimization=TRUE,
                     optimization_weight=0,
                     recommendation_attribution_weight=0,
                     updated_at=%s
-                WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
+                WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND {grinder_clause}
                 """,
-                (now, install_id, machine_id, bean_context_id),
+                (now, *context_params),
             )
             self._store.conn.execute(
-                """
+                f"""
                 UPDATE recommendations
                 SET status='superseded',
                     superseded_at=COALESCE(superseded_at, %s),
                     updated_at=%s
-                WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
+                WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND {rec_grinder_clause}
                   AND status IN ('pending', 'shown', 'accepted', 'edited')
                 """,
-                (now, now, install_id, machine_id, bean_context_id),
+                (now, now, *rec_context_params),
             )
             self._store.conn.commit()
             return {"shots": shot_count, "recommendations": recommendation_count}
@@ -392,21 +409,19 @@ class PostgresRecommendationRepository:
         install_id: str,
         machine_id: str,
         bean_context_id: str | None,
+        grinder_context_id: str | None = None,
     ) -> Recommendation | None:
-        if bean_context_id is None:
-            bean_clause = "bean_context_id IS NULL"
-            params = (install_id, machine_id)
-        else:
-            bean_clause = "bean_context_id=%s"
-            params = (install_id, machine_id, bean_context_id)
+        params: list[object] = [install_id, machine_id]
+        bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
+        grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params)
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
-            WHERE install_id=%s AND machine_id=%s AND {bean_clause}
+            WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            params,
+            tuple(params),
         ).fetchone()
         return _row_to_recommendation(row) if row else None
 
@@ -416,23 +431,22 @@ class PostgresRecommendationRepository:
         machine_id: str,
         bean_context_id: str | None,
         now: int,
+        grinder_context_id: str | None = None,
     ) -> Recommendation | None:
-        if bean_context_id is None:
-            bean_clause = "bean_context_id IS NULL"
-            params = (install_id, machine_id, now)
-        else:
-            bean_clause = "bean_context_id=%s"
-            params = (install_id, machine_id, bean_context_id, now)
+        params: list[object] = [install_id, machine_id]
+        bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
+        grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params)
+        params.append(now)
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
-            WHERE install_id=%s AND machine_id=%s AND {bean_clause}
+            WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
               AND status IN ('pending', 'shown', 'accepted', 'edited')
               AND (expires_at IS NULL OR expires_at > %s)
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            params,
+            tuple(params),
         ).fetchone()
         return _row_to_recommendation(row) if row else None
 
@@ -443,11 +457,11 @@ class PostgresRecommendationRepository:
         bean_context_id: str | None,
         now: int,
         except_recommendation_id: str | None = None,
+        grinder_context_id: str | None = None,
     ) -> None:
         params: list[Any] = [now, now, install_id, machine_id]
-        bean_clause = "bean_context_id IS NULL" if bean_context_id is None else "bean_context_id=%s"
-        if bean_context_id is not None:
-            params.append(bean_context_id)
+        bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
+        grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params)
         except_clause = ""
         if except_recommendation_id is not None:
             except_clause = "AND recommendation_id != %s"
@@ -456,7 +470,7 @@ class PostgresRecommendationRepository:
             f"""
             UPDATE recommendations
             SET status='superseded', superseded_at=%s, updated_at=%s
-            WHERE install_id=%s AND machine_id=%s AND {bean_clause}
+            WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
               AND status IN ('pending', 'shown')
               {except_clause}
             """,

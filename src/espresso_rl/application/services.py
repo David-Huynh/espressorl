@@ -84,6 +84,7 @@ def _recommendation_signature(recommendation: Recommendation) -> tuple:
         round(recommendation.target_yield_g, 4),
         round(recommendation.target_ratio, 4),
         recommendation.mode.value,
+        recommendation.grinder_context_id,
         round(recommendation.confidence, 4),
         recommendation.reason,
     )
@@ -140,6 +141,7 @@ class EspressoRLService:
             beverage_out_g=event.beverage_out_g,
             shot_time_s=event.shot_time_s,
             bean_context_id=event.bean_context_id,
+            grinder_context_id=event.grinder_context_id,
             recommendation_id=recommendation.recommendation_id if recommendation else event.recommendation_id,
             raw_profile_available=len(event.time_ms) >= 2,
             raw_profile_hash=profile_hash(profile),
@@ -208,6 +210,7 @@ class EspressoRLService:
             install_id=shot.install_id,
             machine_id=shot.machine_id,
             bean_context_id=shot.bean_context_id,
+            grinder_context_id=shot.grinder_context_id,
             current_recipe=shot.to_recipe(),
             now=now,
         )
@@ -256,6 +259,7 @@ class EspressoRLService:
             install_id=shot.install_id,
             machine_id=shot.machine_id,
             bean_context_id=shot.bean_context_id,
+            grinder_context_id=shot.grinder_context_id,
             limit=1,
         )
         if not recent or recent[-1].shot_id != shot.shot_id:
@@ -266,6 +270,7 @@ class EspressoRLService:
             machine_id=shot.machine_id,
             bean_context_id=shot.bean_context_id,
             now=now,
+            grinder_context_id=shot.grinder_context_id,
         )
         if not feedback_changed and current is not None and current.source_shot_id == shot.shot_id:
             return FeedbackResult(shot=shot, recommendation=current)
@@ -274,6 +279,7 @@ class EspressoRLService:
             install_id=shot.install_id,
             machine_id=shot.machine_id,
             bean_context_id=shot.bean_context_id,
+            grinder_context_id=shot.grinder_context_id,
             current_recipe=shot.to_recipe(),
             now=now,
         )
@@ -414,12 +420,14 @@ class EspressoRLService:
         install_id: str,
         machine_id: str,
         bean_context_id: str | None,
+        grinder_context_id: str | None = None,
     ) -> Recommendation | None:
         return self._recommendations.get_current(
             install_id=install_id,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             now=self._clock(),
+            grinder_context_id=grinder_context_id,
         )
 
     def handle_machine_state(self, event: MachineStateEvent) -> Recommendation | None:
@@ -434,6 +442,7 @@ class EspressoRLService:
             install_id=event.install_id,
             machine_id=event.machine_id,
             bean_context_id=event.bean_context_id,
+            grinder_context_id=event.grinder_context_id,
             limit=1,
         )
         if recent and recent[-1].rating_prompt_allowed and not recent[-1].feedback_recorded:
@@ -443,12 +452,14 @@ class EspressoRLService:
             machine_id=event.machine_id,
             bean_context_id=event.bean_context_id,
             now=now,
+            grinder_context_id=event.grinder_context_id,
         )
         if current is not None:
             stale = check_recommendation_staleness(
                 current,
                 now=now,
                 bean_context_id=event.bean_context_id,
+                grinder_context_id=event.grinder_context_id,
                 current_recipe=current_recipe,
             )
             if stale.stale:
@@ -465,6 +476,7 @@ class EspressoRLService:
             install_id=event.install_id,
             machine_id=event.machine_id,
             bean_context_id=event.bean_context_id,
+            grinder_context_id=event.grinder_context_id,
             current_recipe=current_recipe,
             now=now,
         )
@@ -476,6 +488,7 @@ class EspressoRLService:
         machine_id: str,
         bean_context_id: str | None,
         current_recipe: Recipe,
+        grinder_context_id: str | None = None,
         now: int | None = None,
     ) -> Recommendation:
         timestamp = self._clock() if now is None else now
@@ -483,6 +496,7 @@ class EspressoRLService:
             install_id=install_id,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
+            grinder_context_id=grinder_context_id,
             limit=200,
         )
         machine_adapter = recent[-1].machine_adapter if recent else None
@@ -491,10 +505,12 @@ class EspressoRLService:
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             now=timestamp,
+            grinder_context_id=grinder_context_id,
         ) or self._recommendations.get_latest(
             install_id=install_id,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
+            grinder_context_id=grinder_context_id,
         )
         context = OptimizationContext(
             install_id=install_id,
@@ -506,6 +522,7 @@ class EspressoRLService:
             safety_bounds=self._safety_bounds,
             now=timestamp,
             last_recommendation=last_recommendation,
+            grinder_context_id=grinder_context_id,
         )
         if self._prior_provider is not None:
             prior_points = self._prior_provider.get_prior_points(context)
@@ -519,6 +536,7 @@ class EspressoRLService:
                 safety_bounds=context.safety_bounds,
                 now=context.now,
                 last_recommendation=context.last_recommendation,
+                grinder_context_id=context.grinder_context_id,
                 prior_points=tuple(prior_points),
             )
         recommendation = self._optimizer.recommend(context)
@@ -528,6 +546,7 @@ class EspressoRLService:
             bean_context_id=bean_context_id,
             now=timestamp,
             except_recommendation_id=recommendation.recommendation_id,
+            grinder_context_id=grinder_context_id,
         )
         self._store_recommendation(recommendation, timestamp)
         return recommendation
@@ -551,6 +570,7 @@ class EspressoRLService:
                 recommendation,
                 now=now,
                 bean_context_id=event.bean_context_id,
+                grinder_context_id=event.grinder_context_id,
                 current_recipe=current_recipe,
             ).stale:
                 return recommendation
@@ -559,6 +579,7 @@ class EspressoRLService:
             machine_id=event.machine_id,
             bean_context_id=event.bean_context_id,
             now=now,
+            grinder_context_id=event.grinder_context_id,
         )
         if recommendation is None:
             return None
@@ -566,6 +587,7 @@ class EspressoRLService:
             recommendation,
             now=now,
             bean_context_id=event.bean_context_id,
+            grinder_context_id=event.grinder_context_id,
             current_recipe=current_recipe,
         ).stale:
             return None

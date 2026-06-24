@@ -6,6 +6,7 @@
   "install_id": "local_install",
   "machine_id": "gaggimate:YOUR_GAGGIMATE_TOPIC_ID",
   "bean_context_id": "",
+  "grinder_context_id": "",
   "grinder_step_size_um": 12.5,
   "grinder_model": "",
   "machine_pressure_bar": 9.0,

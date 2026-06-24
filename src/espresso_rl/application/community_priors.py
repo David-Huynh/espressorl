@@ -194,6 +194,7 @@ def community_prior_context_key(payload: dict[str, Any]) -> str:
 
 def community_prior_contribution_bucket(payload: dict[str, Any]) -> str:
     bean_context = str(payload.get("bean_context_id") or "none")
+    grinder_context = str(payload.get("grinder_context_id") or "none")
     dose = _bucket(_number(payload.get("dose_in_g")) or 0.0, 0.5)
     target_yield = _bucket(_number(payload.get("target_yield_g")) or 0.0, 2.0)
     target_ratio = _number(payload.get("target_ratio"))
@@ -220,6 +221,7 @@ def community_prior_contribution_bucket(payload: dict[str, Any]) -> str:
         [
             community_prior_context_key(payload),
             f"bean:{_fingerprint(bean_context)}",
+            f"grinder:{_fingerprint(grinder_context)}",
             f"recipe:d{dose:.1f}:y{target_yield:.0f}:r{ratio:.1f}",
             f"action:g{_bucket(grind_delta_um, 25.0):.0f}:d{_bucket(dose_delta, 0.5):.1f}:y{_bucket(yield_delta, 2.0):.0f}",
             f"profile:{_profile_shape_bucket(payload)}",

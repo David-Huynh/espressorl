@@ -16,6 +16,7 @@ from espresso_rl.ports.repositories import LocalDataRepository
 @dataclass(frozen=True)
 class LocalContextSummary:
     bean_context_id: str | None
+    grinder_context_id: str | None
     shot_count: int
     optimizer_shot_count: int
     rated_shot_count: int
@@ -107,6 +108,7 @@ class LocalDataService:
         self,
         *,
         bean_context_id: str | None = None,
+        grinder_context_id: str | None = None,
         limit: int = 100,
         dry_run: bool = False,
     ) -> LocalDataActionResult:
@@ -116,6 +118,7 @@ class LocalDataService:
             _optional_safe_id(bean_context_id),
             limit=_safe_limit(limit, default=100, maximum=1000),
             dry_run=dry_run,
+            grinder_context_id=_optional_safe_id(grinder_context_id),
         )
         return LocalDataActionResult(
             action="purge_useless_shots",
@@ -130,6 +133,7 @@ class LocalDataService:
         self,
         bean_context_id: str,
         *,
+        grinder_context_id: str | None = None,
         dry_run: bool = False,
     ) -> LocalDataActionResult:
         counts = self._repository.reset_optimizer_context(
@@ -138,6 +142,7 @@ class LocalDataService:
             _safe_id(bean_context_id),
             now=self._clock(),
             dry_run=dry_run,
+            grinder_context_id=_optional_safe_id(grinder_context_id),
         )
         return LocalDataActionResult(
             action="reset_optimizer_context",
@@ -150,14 +155,15 @@ class LocalDataService:
 
 
 def _context_summaries(shots: list[ShotRecord]) -> list[LocalContextSummary]:
-    grouped: dict[str | None, list[ShotRecord]] = {}
+    grouped: dict[tuple[str | None, str | None], list[ShotRecord]] = {}
     for shot in shots:
-        grouped.setdefault(shot.bean_context_id, []).append(shot)
+        grouped.setdefault((shot.bean_context_id, shot.grinder_context_id), []).append(shot)
     contexts = []
-    for bean_context_id, context_shots in grouped.items():
+    for (bean_context_id, grinder_context_id), context_shots in grouped.items():
         contexts.append(
             LocalContextSummary(
                 bean_context_id=bean_context_id,
+                grinder_context_id=grinder_context_id,
                 shot_count=len(context_shots),
                 optimizer_shot_count=sum(1 for shot in context_shots if _included_in_optimizer(shot)),
                 rated_shot_count=sum(1 for shot in context_shots if _included_in_optimizer(shot) and shot.human_rating is not None),
@@ -173,6 +179,7 @@ def _shot_summary(shot: ShotRecord) -> dict:
         "shot_id": shot.shot_id,
         "timestamp": shot.timestamp,
         "bean_context_id": shot.bean_context_id,
+        "grinder_context_id": shot.grinder_context_id,
         "shot_type": shot.shot_type.value,
         "shot_time_s": shot.shot_time_s,
         "beverage_out_g": shot.beverage_out_g,

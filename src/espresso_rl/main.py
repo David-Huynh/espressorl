@@ -129,6 +129,7 @@ def main() -> None:
     def publish_status(
         machine_id: str,
         bean_context_id: str | None,
+        grinder_context_id: str | None = None,
         *,
         last_shot_id: str | None = None,
         last_shot_at: int | None = None,
@@ -144,6 +145,7 @@ def main() -> None:
             upload_queue_repo=upload_queue_repo,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
+            grinder_context_id=grinder_context_id,
             last_shot_id=last_shot_id,
             last_shot_at=last_shot_at,
             last_recommendation_id=last_recommendation_id,
@@ -171,6 +173,7 @@ def main() -> None:
             publish_status(
                 event.machine_id,
                 event.bean_context_id,
+                event.grinder_context_id,
                 last_shot_id=result.shot.shot_id,
                 last_shot_at=result.shot.timestamp,
             )
@@ -188,6 +191,7 @@ def main() -> None:
         publish_status(
             event.machine_id,
             event.bean_context_id,
+            event.grinder_context_id,
             last_shot_id=result.shot.shot_id,
             last_shot_at=result.shot.timestamp,
             last_recommendation_id=result.recommendation.recommendation_id,
@@ -219,6 +223,7 @@ def main() -> None:
         publish_status(
             shot.machine_id,
             shot.bean_context_id,
+            shot.grinder_context_id,
             last_shot_id=shot.shot_id,
             last_shot_at=shot.timestamp,
             last_recommendation_id=(
@@ -243,6 +248,7 @@ def main() -> None:
         publish_status(
             shot.machine_id,
             shot.bean_context_id,
+            shot.grinder_context_id,
             last_shot_id=shot.shot_id,
             last_shot_at=shot.timestamp,
         )
@@ -270,7 +276,7 @@ def main() -> None:
                 result.requeued,
                 result.skipped,
             )
-        publish_status(event.machine_id, event.bean_context_id)
+        publish_status(event.machine_id, event.bean_context_id, event.grinder_context_id)
 
     def on_decision(event: RecommendationDecisionEvent) -> None:
         recommendation = service.record_recommendation_decision(event)
@@ -282,6 +288,7 @@ def main() -> None:
         publish_status(
             recommendation.machine_id,
             recommendation.bean_context_id,
+            recommendation.grinder_context_id,
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.updated_at,
             mode=recommendation.mode.value,
@@ -298,6 +305,7 @@ def main() -> None:
         publish_status(
             recommendation.machine_id,
             recommendation.bean_context_id,
+            recommendation.grinder_context_id,
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.updated_at,
             mode=recommendation.mode.value,
@@ -306,7 +314,7 @@ def main() -> None:
     def on_machine_state(event: MachineStateEvent) -> None:
         recommendation = service.handle_machine_state(event)
         if recommendation is None:
-            publish_status(event.machine_id, event.bean_context_id)
+            publish_status(event.machine_id, event.bean_context_id, event.grinder_context_id)
             return
         logger.info(
             "Machine %s state=%s showing recommendation %s",
@@ -318,6 +326,7 @@ def main() -> None:
         publish_status(
             event.machine_id,
             event.bean_context_id,
+            event.grinder_context_id,
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.updated_at,
             mode=recommendation.mode.value,
@@ -412,6 +421,7 @@ def maybe_publish_startup_recommendation(
         install_id=config.install_id,
         machine_id=config.machine_id,
         bean_context_id=config.bean_context_id,
+        grinder_context_id=config.grinder_context_id,
     )
     if current is not None:
         mqtt_client.publish_recommendation(current)
@@ -425,6 +435,7 @@ def maybe_publish_startup_recommendation(
                 upload_queue_repo=upload_queue_repo,
                 machine_id=config.machine_id,
                 bean_context_id=config.bean_context_id,
+                grinder_context_id=config.grinder_context_id,
                 last_recommendation_id=current.recommendation_id,
                 last_recommendation_at=current.updated_at,
                 mode=current.mode.value,
@@ -441,6 +452,7 @@ def maybe_publish_startup_recommendation(
         install_id=config.install_id,
         machine_id=config.machine_id,
         bean_context_id=config.bean_context_id,
+        grinder_context_id=config.grinder_context_id,
         current_recipe=recipe,
     )
     mqtt_client.publish_recommendation(recommendation)
@@ -454,6 +466,7 @@ def maybe_publish_startup_recommendation(
             upload_queue_repo=upload_queue_repo,
             machine_id=config.machine_id,
             bean_context_id=config.bean_context_id,
+            grinder_context_id=config.grinder_context_id,
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.created_at,
             mode=recommendation.mode.value,
@@ -469,6 +482,7 @@ def build_status_payload(
     upload_queue_repo: UploadQueueRepository | None,
     machine_id: str,
     bean_context_id: str | None,
+    grinder_context_id: str | None = None,
     *,
     last_shot_id: str | None = None,
     last_shot_at: int | None = None,
@@ -482,6 +496,7 @@ def build_status_payload(
             install_id=config.install_id,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
+            grinder_context_id=grinder_context_id,
             limit=1_000_000,
         )
         if shot_repo is not None
@@ -509,6 +524,7 @@ def build_status_payload(
         install_id=config.install_id,
         machine_id=machine_id,
         bean_context_id=bean_context_id,
+        grinder_context_id=grinder_context_id,
     )
     if current is not None:
         last_recommendation_id = last_recommendation_id or current.recommendation_id
@@ -536,6 +552,8 @@ def build_status_payload(
     return {
         "addon_online": True,
         "install_id": config.install_id,
+        "bean_context_id": bean_context_id,
+        "grinder_context_id": grinder_context_id,
         "timestamp": now,
         "last_shot_id": last_shot_id,
         "last_shot_at": last_shot_at,
@@ -572,6 +590,8 @@ def recent_shot_summaries(shots: list, rejected_record_ids: set[str], limit: int
         {
             "shot_id": shot.shot_id,
             "timestamp": shot.timestamp,
+            "bean_context_id": shot.bean_context_id,
+            "grinder_context_id": shot.grinder_context_id,
             "shot_type": shot.shot_type.value,
             "shot_time_s": shot.shot_time_s,
             "beverage_out_g": shot.beverage_out_g,

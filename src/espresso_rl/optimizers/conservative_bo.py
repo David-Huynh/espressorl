@@ -67,6 +67,7 @@ class ConservativeBOOptimizer:
             install_id=context.install_id,
             machine_id=context.machine_id,
             bean_context_id=context.bean_context_id,
+            grinder_context_id=context.grinder_context_id,
             grind_delta_steps=round(recipe.grind_steps - current.grind_steps),
             grind_delta_um=(recipe.grind_steps - current.grind_steps) * current.grinder_step_size_um,
             next_grind_steps=recipe.grind_steps,

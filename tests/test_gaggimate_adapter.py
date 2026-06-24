@@ -61,6 +61,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "beverage_out_g": 39.8,
                 "shot_time_s": 31.2,
                 "bean_context_id": "profile_1",
+                "grinder_context_id": "grinder_1",
                 "shot_type": "espresso",
                 "utility": False,
                 "local_optimization_enabled": False,
@@ -98,6 +99,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.dose_in_g, 18.5)
         self.assertEqual(event.target_yield_g, 40.0)
         self.assertEqual(event.beverage_out_g, 39.8)
+        self.assertEqual(event.grinder_context_id, "grinder_1")
         self.assertEqual(event.recommendation_id, "rec_1")
         self.assertEqual(event.shot_type.value, "espresso")
         self.assertFalse(event.utility)
@@ -212,6 +214,7 @@ class GaggimateAdapterTests(unittest.TestCase):
             install_id="install_1",
             machine_id="gaggimate:AA_BB",
             bean_context_id=None,
+            grinder_context_id="grinder_1",
             grind_delta_steps=1,
             grind_delta_um=12.5,
             next_grind_steps=43,
@@ -234,6 +237,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         decoded = json.loads(payload)
         self.assertEqual(decoded["shot_id"], "shot_1")
         self.assertEqual(decoded["recommendation_id"], "rec_1")
+        self.assertEqual(decoded["grinder_context_id"], "grinder_1")
 
     def test_status_payload_is_retained_for_gaggimate_settings(self) -> None:
         client = GaggimateMQTTClient(
@@ -367,6 +371,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "schema_version": 1,
                 "machine_id": "gaggimate:AA_BB",
                 "bean_context_id": "bean_1",
+                "grinder_context_id": "grinder_1",
                 "timestamp": 12,
                 "action": "requeue_valid_rejected",
                 "limit": 50,
@@ -378,6 +383,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.install_id, "install_1")
         self.assertEqual(event.machine_id, "gaggimate:AA_BB")
         self.assertEqual(event.bean_context_id, "bean_1")
+        self.assertEqual(event.grinder_context_id, "grinder_1")
         self.assertEqual(event.action, "requeue_valid_rejected")
         self.assertEqual(event.limit, 50)
 

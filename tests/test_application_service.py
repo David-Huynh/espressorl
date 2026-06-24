@@ -44,6 +44,7 @@ class MemoryShotRepository:
         machine_id: str,
         bean_context_id: str | None = None,
         limit: int = 200,
+        grinder_context_id: str | None = None,
     ) -> list[ShotRecord]:
         rows = [
             row
@@ -51,6 +52,7 @@ class MemoryShotRepository:
             if row.install_id == install_id
             and row.machine_id == machine_id
             and row.bean_context_id == bean_context_id
+            and row.grinder_context_id == grinder_context_id
         ]
         return sorted(rows, key=lambda row: row.timestamp)[-limit:]
 
@@ -71,6 +73,7 @@ class MemoryRecommendationRepository:
         machine_id: str,
         bean_context_id: str | None,
         now: int,
+        grinder_context_id: str | None = None,
     ) -> Recommendation | None:
         rows = [
             row
@@ -78,6 +81,7 @@ class MemoryRecommendationRepository:
             if row.install_id == install_id
             and row.machine_id == machine_id
             and row.bean_context_id == bean_context_id
+            and row.grinder_context_id == grinder_context_id
             and row.active_at(now)
         ]
         return max(rows, key=lambda row: row.created_at) if rows else None
@@ -87,6 +91,7 @@ class MemoryRecommendationRepository:
         install_id: str,
         machine_id: str,
         bean_context_id: str | None,
+        grinder_context_id: str | None = None,
     ) -> Recommendation | None:
         rows = [
             row
@@ -94,6 +99,7 @@ class MemoryRecommendationRepository:
             if row.install_id == install_id
             and row.machine_id == machine_id
             and row.bean_context_id == bean_context_id
+            and row.grinder_context_id == grinder_context_id
         ]
         return max(rows, key=lambda row: row.created_at) if rows else None
 
@@ -104,11 +110,17 @@ class MemoryRecommendationRepository:
         bean_context_id: str | None,
         now: int,
         except_recommendation_id: str | None = None,
+        grinder_context_id: str | None = None,
     ) -> None:
         for row in self.rows.values():
             if row.recommendation_id == except_recommendation_id:
                 continue
-            if row.install_id == install_id and row.machine_id == machine_id and row.bean_context_id == bean_context_id:
+            if (
+                row.install_id == install_id
+                and row.machine_id == machine_id
+                and row.bean_context_id == bean_context_id
+                and row.grinder_context_id == grinder_context_id
+            ):
                 if row.status in {RecommendationStatus.PENDING, RecommendationStatus.SHOWN}:
                     row.status = RecommendationStatus.SUPERSEDED
                     row.superseded_at = now
@@ -386,6 +398,38 @@ class ApplicationServiceTests(unittest.TestCase):
             first.recommendation.recommendation_id,
         )
         self.assertEqual(len(recs.rows), 1)
+
+    def test_same_bean_different_grinders_have_isolated_bo_contexts(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        service.ingest_shot_profile(shot_event("shot_a", 1, grinder_context_id="grinder_a"))
+        rec_a = service.record_feedback(feedback_event("shot_a", 2, rating=4)).recommendation
+        service.ingest_shot_profile(
+            shot_event("shot_b", 3, grinder_context_id="grinder_b", grind_steps=52)
+        )
+        rec_b = service.record_feedback(feedback_event("shot_b", 4, rating=2)).recommendation
+
+        self.assertIsNotNone(rec_a)
+        self.assertIsNotNone(rec_b)
+        self.assertEqual(rec_a.grinder_context_id, "grinder_a")  # type: ignore[union-attr]
+        self.assertEqual(rec_b.grinder_context_id, "grinder_b")  # type: ignore[union-attr]
+        self.assertEqual(rec_a.source_shot_id, "shot_a")  # type: ignore[union-attr]
+        self.assertEqual(rec_b.source_shot_id, "shot_b")  # type: ignore[union-attr]
+        self.assertEqual(
+            [shot.shot_id for shot in shots.list_recent("install_1", "machine_1", "bean_1", grinder_context_id="grinder_a")],
+            ["shot_a"],
+        )
+        self.assertEqual(
+            [shot.shot_id for shot in shots.list_recent("install_1", "machine_1", "bean_1", grinder_context_id="grinder_b")],
+            ["shot_b"],
+        )
+        current_a = recs.get_current("install_1", "machine_1", "bean_1", 20, grinder_context_id="grinder_a")
+        current_b = recs.get_current("install_1", "machine_1", "bean_1", 20, grinder_context_id="grinder_b")
+        self.assertEqual(current_a.recommendation_id, rec_a.recommendation_id)  # type: ignore[union-attr]
+        self.assertEqual(current_b.recommendation_id, rec_b.recommendation_id)  # type: ignore[union-attr]
+        self.assertNotEqual(current_a.recommendation_id, current_b.recommendation_id)  # type: ignore[union-attr]
 
     def test_feedback_rejects_a_recommendation_id_mismatch(self) -> None:
         shots = MemoryShotRepository()

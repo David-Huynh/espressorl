@@ -35,6 +35,7 @@ def create_local_dashboard_app(
     def purge_useless(payload: dict[str, Any] | None = None) -> dict:
         return service.purge_useless_shots(
             bean_context_id=_optional_string(payload, "bean_context_id"),
+            grinder_context_id=_optional_string(payload, "grinder_context_id"),
             limit=_limit(payload, default=100, maximum=1000),
             dry_run=_dry_run(payload),
         ).to_dict()
@@ -43,6 +44,7 @@ def create_local_dashboard_app(
     def reset_context(bean_context_id: str, payload: dict[str, Any] | None = None) -> dict:
         return service.reset_optimizer_context(
             bean_context_id,
+            grinder_context_id=_optional_string(payload, "grinder_context_id"),
             dry_run=_dry_run(payload),
         ).to_dict()
 
@@ -50,6 +52,7 @@ def create_local_dashboard_app(
     def purge_context(bean_context_id: str, payload: dict[str, Any] | None = None) -> dict:
         return service.purge_useless_shots(
             bean_context_id=bean_context_id,
+            grinder_context_id=_optional_string(payload, "grinder_context_id"),
             limit=_limit(payload, default=100, maximum=1000),
             dry_run=_dry_run(payload),
         ).to_dict()
@@ -269,9 +272,13 @@ _DASHBOARD_HTML = """
       await refreshStatus();
     }
     function contextAction(action, dryRun) {
-      const id = document.getElementById('contextSelect').value;
-      if (!id) return;
-      postJson(`/api/contexts/${encodeURIComponent(id)}/${action}`, {dry_run: dryRun});
+      const raw = document.getElementById('contextSelect').value;
+      if (!raw) return;
+      const context = JSON.parse(raw);
+      postJson(`/api/contexts/${encodeURIComponent(context.bean_context_id)}/${action}`, {
+        dry_run: dryRun,
+        grinder_context_id: context.grinder_context_id || null
+      });
     }
     function purgeAll(dryRun) {
       postJson('/api/purge-useless', {dry_run: dryRun, limit: 1000});
@@ -283,11 +290,16 @@ _DASHBOARD_HTML = """
       const contexts = data.contexts || [];
       document.getElementById('contextSelect').innerHTML = contexts
         .filter(c => c.bean_context_id)
-        .map(c => `<option value="${escapeAttr(c.bean_context_id)}">${escapeHtml(c.bean_context_id)} (${c.optimizer_shot_count}/${c.shot_count} BO)</option>`)
+        .map(c => {
+          const value = JSON.stringify({bean_context_id: c.bean_context_id, grinder_context_id: c.grinder_context_id || null});
+          const label = `${c.bean_context_id} / ${c.grinder_context_id || 'No grinder'}`;
+          return `<option value="${escapeAttr(value)}">${escapeHtml(label)} (${c.optimizer_shot_count}/${c.shot_count} BO)</option>`;
+        })
         .join('');
       document.getElementById('contexts').innerHTML = contexts.map(c => `
         <div class="card">
-          <strong>${escapeHtml(c.bean_context_id || 'No context')}</strong>
+          <strong>${escapeHtml(c.bean_context_id || 'No bean')}</strong>
+          <div class="muted">${escapeHtml(c.grinder_context_id || 'No grinder')}</div>
           <div class="muted">latest ${formatTime(c.latest_shot_at)}</div>
           <span class="pill">shots ${c.shot_count}</span>
           <span class="pill ${c.optimizer_shot_count ? 'good' : 'warn'}">BO ${c.optimizer_shot_count}</span>
@@ -297,7 +309,7 @@ _DASHBOARD_HTML = """
       const rows = (data.recent_shots || []).map(s => `
         <tr>
           <td>${formatTime(s.timestamp)}<br><span class="muted">${escapeHtml(s.shot_id)}</span></td>
-          <td>${escapeHtml(s.bean_context_id || '')}</td>
+          <td>${escapeHtml(s.bean_context_id || '')}<br><span class="muted">${escapeHtml(s.grinder_context_id || '')}</span></td>
           <td>${escapeHtml(s.shot_type || '')}<br>${num(s.shot_time_s)}s ${num(s.beverage_out_g)}g</td>
           <td><span class="pill ${s.included_in_optimizer ? 'good' : 'warn'}">${s.included_in_optimizer ? 'BO included' : 'not BO'}</span>
               ${s.rejected_upload ? '<span class="pill bad">rejected upload</span>' : ''}

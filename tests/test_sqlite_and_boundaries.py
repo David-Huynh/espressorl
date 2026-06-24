@@ -27,47 +27,49 @@ from espresso_rl.adapters.supabase_upload import (
 from espresso_rl.main import build_status_payload, maybe_start_upload_worker, upload_queue_for_service
 
 
-def shot_event() -> ShotProfileEvent:
-    return ShotProfileEvent(
-        shot_id="shot_1",
-        install_id="install_1",
-        machine_id="machine_1",
-        machine_adapter="gaggimate",
-        timestamp=1,
-        time_ms=[0, 500, 1000],
-        pressure=[0.0, 8.0, 9.0],
-        target_pressure=[0.0, 8.0, 9.0],
-        flow=[0.0, 2.0, 2.0],
-        target_flow=[0.0, 2.0, 2.0],
-        weight=[0.0, 10.0, 36.0],
-        grinder_step_size_um=12.5,
-        grind_steps=42,
-        dose_in_g=18.0,
-        target_yield_g=36.0,
-        beverage_out_g=36.0,
-        shot_time_s=30.0,
-        weight_source="hardware_scale",
-        flow_source="beverage_weight_derivative",
-        flow_units="g_per_s",
-        pump_flow_source="gaggimate_pump_model",
-        pump_flow_units="ml_per_s",
-        pump_flow_calibration_required=False,
-        profile_id="profile_1",
-        profile_label="Cremina lever machine",
-        profile_type="pro",
-        profile_phase_count=5,
-        final_phase_index=3,
-        final_phase_name="ramp",
-        final_phase_type="brew",
-        final_phase_elapsed_s=8.5,
-        final_pump_target="pressure",
-        final_target_pressure=9.0,
-        final_target_flow=0.0,
-        final_valve_open=True,
-        profile_temperature_c=86.5,
-        final_phase_temperature_c=86.5,
-        shot_end_state="manual_or_interrupted",
-    )
+def shot_event(**overrides) -> ShotProfileEvent:
+    base = {
+        "shot_id": "shot_1",
+        "install_id": "install_1",
+        "machine_id": "machine_1",
+        "machine_adapter": "gaggimate",
+        "timestamp": 1,
+        "time_ms": [0, 500, 1000],
+        "pressure": [0.0, 8.0, 9.0],
+        "target_pressure": [0.0, 8.0, 9.0],
+        "flow": [0.0, 2.0, 2.0],
+        "target_flow": [0.0, 2.0, 2.0],
+        "weight": [0.0, 10.0, 36.0],
+        "grinder_step_size_um": 12.5,
+        "grind_steps": 42,
+        "dose_in_g": 18.0,
+        "target_yield_g": 36.0,
+        "beverage_out_g": 36.0,
+        "shot_time_s": 30.0,
+        "weight_source": "hardware_scale",
+        "flow_source": "beverage_weight_derivative",
+        "flow_units": "g_per_s",
+        "pump_flow_source": "gaggimate_pump_model",
+        "pump_flow_units": "ml_per_s",
+        "pump_flow_calibration_required": False,
+        "profile_id": "profile_1",
+        "profile_label": "Cremina lever machine",
+        "profile_type": "pro",
+        "profile_phase_count": 5,
+        "final_phase_index": 3,
+        "final_phase_name": "ramp",
+        "final_phase_type": "brew",
+        "final_phase_elapsed_s": 8.5,
+        "final_pump_target": "pressure",
+        "final_target_pressure": 9.0,
+        "final_target_flow": 0.0,
+        "final_valve_open": True,
+        "profile_temperature_c": 86.5,
+        "final_phase_temperature_c": 86.5,
+        "shot_end_state": "manual_or_interrupted",
+    }
+    base.update(overrides)
+    return ShotProfileEvent(**base)
 
 
 def queue_item(
@@ -133,6 +135,61 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(stored_rec.reason, feedback.recommendation.reason)  # type: ignore[union-attr]
             self.assertEqual(stored_rec.apply_status, RecommendationApplyStatus.MANUAL_REQUIRED)  # type: ignore[union-attr]
             self.assertEqual(stored_rec.manual_fields, ["next_grind_steps", "next_dose_g"])  # type: ignore[union-attr]
+
+    def test_sqlite_scopes_recent_shots_and_current_recommendations_by_grinder_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "espresso.db")
+            shots = SQLiteShotRepository(store)
+            recs = SQLiteRecommendationRepository(store)
+            service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+            service.ingest_shot_profile(
+                shot_event(shot_id="shot_a", bean_context_id="bean_1", grinder_context_id="grinder_a")
+            )
+            rec_a = service.record_feedback(
+                ShotFeedbackEvent(
+                    shot_id="shot_a",
+                    install_id="install_1",
+                    machine_id="machine_1",
+                    timestamp=2,
+                    rating=4,
+                )
+            ).recommendation
+            service.ingest_shot_profile(
+                shot_event(
+                    shot_id="shot_b",
+                    timestamp=3,
+                    bean_context_id="bean_1",
+                    grinder_context_id="grinder_b",
+                    grind_steps=52,
+                )
+            )
+            rec_b = service.record_feedback(
+                ShotFeedbackEvent(
+                    shot_id="shot_b",
+                    install_id="install_1",
+                    machine_id="machine_1",
+                    timestamp=4,
+                    rating=2,
+                )
+            ).recommendation
+
+            self.assertEqual(
+                [shot.shot_id for shot in shots.list_recent("install_1", "machine_1", "bean_1", grinder_context_id="grinder_a")],
+                ["shot_a"],
+            )
+            self.assertEqual(
+                [shot.shot_id for shot in shots.list_recent("install_1", "machine_1", "bean_1", grinder_context_id="grinder_b")],
+                ["shot_b"],
+            )
+            self.assertEqual(
+                recs.get_current("install_1", "machine_1", "bean_1", 20, grinder_context_id="grinder_a").recommendation_id,
+                rec_a.recommendation_id,
+            )
+            self.assertEqual(
+                recs.get_current("install_1", "machine_1", "bean_1", 20, grinder_context_id="grinder_b").recommendation_id,
+                rec_b.recommendation_id,
+            )
 
     def test_shared_shot_row_uses_boolean_for_postgres_compatibility(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

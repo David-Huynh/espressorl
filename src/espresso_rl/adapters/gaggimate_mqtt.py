@@ -78,6 +78,7 @@ class GaggimateMQTTClient:
             "install_id": recommendation.install_id,
             "machine_id": recommendation.machine_id,
             "bean_context_id": recommendation.bean_context_id,
+            "grinder_context_id": recommendation.grinder_context_id,
             "grind_delta_steps": recommendation.grind_delta_steps,
             "grind_delta_um": recommendation.grind_delta_um,
             "next_grind_steps": recommendation.next_grind_steps,
@@ -200,6 +201,7 @@ class GaggimateMQTTClient:
             beverage_out_g=beverage_out_g,
             shot_time_s=_optional_float(shot_time_s),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
+            grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
             recommendation_id=payload.get("recommendation_id"),
             shot_type=payload.get("shot_type", "espresso"),
             utility=bool(payload.get("utility", False)),
@@ -273,6 +275,7 @@ class GaggimateMQTTClient:
             action=payload.get("action", "requeue_valid_rejected"),
             limit=int(payload.get("limit", 25)),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
+            grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
             local_record_id=_optional_string(payload.get("local_record_id")),
             source=payload.get("source", "gaggimate_mqtt"),
         )
@@ -310,6 +313,7 @@ class GaggimateMQTTClient:
             timestamp=int(payload.get("timestamp", self._config.now())),
             state=payload.get("state", "unknown"),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
+            grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
             grind_steps=_optional_float(payload.get("grind_steps", self._config.initial_grind_steps)),
             grinder_step_size_um=_optional_float(
                 payload.get("grinder_step_size_um", self._config.grinder_step_size_um)

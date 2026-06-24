@@ -55,6 +55,8 @@ Important fields in `data/options.json`:
   "mqtt_password": "replace-me",
 
   "machine_id": "gaggimate:YOUR_GAGGIMATE_TOPIC_ID",
+  "bean_context_id": "current_bean",
+  "grinder_context_id": "primary_grinder",
   "grinder_step_size_um": 12.5,
   "initial_grind_steps": null,
   "initial_grind_um": 525.0,
@@ -74,10 +76,16 @@ If you know grinder steps, set `initial_grind_steps` and leave
 `initial_grind_steps` to `null` and provide `initial_grind_um`; EspressoRL will
 derive internal steps from `grinder_step_size_um`.
 
+Local optimizer state is scoped by `install_id`, `machine_id`,
+`bean_context_id`, and `grinder_context_id`. Use a different
+`grinder_context_id` when the same bean is dialed on a different grinder; local
+shots and active recommendations will not be mixed across those grinder
+contexts.
+
 Start the local service and Postgres:
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build --remove-orphans
 ```
 
 Follow logs:
@@ -97,9 +105,10 @@ Subscribed to gaggimate/+/shot/profile...
 
 EspressoRL and Gaggimate must point to the same MQTT broker.
 
-If the broker is outside Docker, set `mqtt_host` to the broker IP address.
-If the broker runs in the same Compose project, set `mqtt_host` to that service
-name.
+The default Compose stack does not start an MQTT broker. Set `mqtt_host` to
+your existing broker's LAN IP address or DNS name. If you deliberately run a
+broker in another Compose project, use that broker's reachable host name from
+the EspressoRL container.
 
 Gaggimate should publish and subscribe on these topics:
 
@@ -135,7 +144,7 @@ You can start accumulating local BO data when:
 - Gaggimate publishes `gaggimate/{topic_id}/shot/profile` at brew end.
 - Gaggimate subscribes to `gaggimate/{topic_id}/rl/recommendation`.
 - `data/options.json` has the current grinder step size, initial grind, dose,
-  and target yield.
+  target yield, bean context, and grinder context.
 - `storage_backend=postgres` points at a reachable Postgres DSN.
 
 Recommendation flow:

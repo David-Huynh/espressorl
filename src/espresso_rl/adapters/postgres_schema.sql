@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS shots (
     machine_id TEXT NOT NULL,
     machine_adapter TEXT NOT NULL,
     bean_context_id TEXT,
+    grinder_context_id TEXT,
     profile_resampled_blob BYTEA NOT NULL,
     raw_profile_available BOOLEAN NOT NULL,
     raw_profile_hash TEXT,
@@ -75,6 +76,12 @@ CREATE INDEX IF NOT EXISTS idx_shots_context_time
     ON shots (install_id, machine_id, bean_context_id, timestamp DESC);
 
 ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS grinder_context_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_shots_context_grinder_time
+    ON shots (install_id, machine_id, bean_context_id, grinder_context_id, timestamp DESC);
+
+ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE;
 
 UPDATE shots
@@ -89,6 +96,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     install_id TEXT NOT NULL,
     machine_id TEXT NOT NULL,
     bean_context_id TEXT,
+    grinder_context_id TEXT,
     grind_delta_steps INTEGER NOT NULL,
     grind_delta_um DOUBLE PRECISION NOT NULL,
     next_grind_steps DOUBLE PRECISION NOT NULL,
@@ -116,6 +124,12 @@ CREATE TABLE IF NOT EXISTS recommendations (
 
 CREATE INDEX IF NOT EXISTS idx_recommendations_current
     ON recommendations (install_id, machine_id, bean_context_id, created_at DESC);
+
+ALTER TABLE recommendations
+    ADD COLUMN IF NOT EXISTS grinder_context_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_recommendations_context_grinder_time
+    ON recommendations (install_id, machine_id, bean_context_id, grinder_context_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS upload_queue (
     upload_id TEXT PRIMARY KEY,

@@ -16,6 +16,7 @@ def check_recommendation_staleness(
     recommendation: Recommendation,
     now: int,
     bean_context_id: str | None,
+    grinder_context_id: str | None = None,
     current_recipe: Recipe | None = None,
     policy: StaleRecommendationPolicy = StaleRecommendationPolicy(),
 ) -> StaleCheck:
@@ -30,6 +31,8 @@ def check_recommendation_staleness(
         return StaleCheck(True, "expired")
     if recommendation.bean_context_id != bean_context_id:
         return StaleCheck(True, "bean_context_changed")
+    if recommendation.grinder_context_id != grinder_context_id:
+        return StaleCheck(True, "grinder_context_changed")
     if current_recipe is not None and _large_manual_change(recommendation, current_recipe, policy):
         return StaleCheck(True, "manual_recipe_changed")
     return StaleCheck(False)

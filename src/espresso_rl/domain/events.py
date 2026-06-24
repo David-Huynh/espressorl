@@ -109,6 +109,7 @@ class ShotProfileEvent:
     beverage_out_g: float | None = None
     shot_time_s: float | None = None
     bean_context_id: str | None = None
+    grinder_context_id: str | None = None
     recommendation_id: str | None = None
     shot_type: ShotType = ShotType.ESPRESSO
     utility: bool = False
@@ -156,6 +157,7 @@ class ShotProfileEvent:
             object.__setattr__(self, "beverage_out_g", _number(self.beverage_out_g, "beverage_out_g"))
         if self.shot_time_s is not None:
             object.__setattr__(self, "shot_time_s", _number(self.shot_time_s, "shot_time_s"))
+        object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
         if self.optimization_weight is not None:
             object.__setattr__(self, "optimization_weight", _number(self.optimization_weight, "optimization_weight"))
         object.__setattr__(self, "weight_source", _optional_string(self.weight_source, "weight_source", 80))
@@ -310,6 +312,7 @@ class UploadQueueMaintenanceEvent:
     action: str = "requeue_valid_rejected"
     limit: int = 25
     bean_context_id: str | None = None
+    grinder_context_id: str | None = None
     local_record_id: str | None = None
     source: str = "unknown"
     schema_version: int = 1
@@ -324,6 +327,7 @@ class UploadQueueMaintenanceEvent:
         if not 1 <= int(self.limit) <= 500:
             raise ValueError("upload maintenance limit must be between 1 and 500")
         object.__setattr__(self, "limit", int(self.limit))
+        object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
         object.__setattr__(self, "local_record_id", _optional_string(self.local_record_id, "local_record_id", 160))
 
 
@@ -402,6 +406,7 @@ class MachineStateEvent:
     state: MachineState
     schema_version: int = 1
     bean_context_id: str | None = None
+    grinder_context_id: str | None = None
     grind_steps: float | None = None
     grinder_step_size_um: float | None = None
     dose_in_g: float | None = None
@@ -414,6 +419,7 @@ class MachineStateEvent:
         if self.schema_version != 1:
             raise ValueError("unsupported machine state schema_version")
         object.__setattr__(self, "state", MachineState(self.state))
+        object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
         if self.grinder_step_size_um is not None and self.grinder_step_size_um <= 0:
             raise ValueError("grinder_step_size_um must be positive when present")
         if self.dose_in_g is not None and self.dose_in_g <= 0:

@@ -46,4 +46,5 @@ class OptimizationContext:
     safety_bounds: SafetyBounds
     now: int
     last_recommendation: Recommendation | None = None
+    grinder_context_id: str | None = None
     prior_points: Sequence[PriorPoint] = ()

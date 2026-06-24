@@ -20,6 +20,7 @@ class Config:
     install_id: str = "local_install"
     machine_id: str = "gaggimate:local"
     bean_context_id: str | None = None
+    grinder_context_id: str | None = None
     # Machine geometry
     machine_pressure_bar: float = 9.0
     basket_size_ml: float = 18.0
@@ -111,6 +112,9 @@ class Config:
             install_id=opts.get("install_id", os.getenv("ESPRESSORL_INSTALL_ID", "local_install")),
             machine_id=opts.get("machine_id", "gaggimate:local"),
             bean_context_id=_optional_string(opts.get("bean_context_id")),
+            grinder_context_id=_optional_string(
+                opts.get("grinder_context_id", os.getenv("ESPRESSORL_GRINDER_CONTEXT_ID"))
+            ),
             machine_pressure_bar=float(opts.get("machine_pressure_bar", 9.0)),
             basket_size_ml=float(opts.get("basket_size_ml", 18.0)),
             initial_grind_steps=initial_grind_steps,

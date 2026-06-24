@@ -18,6 +18,7 @@ class ShotRepository(Protocol):
         machine_id: str,
         bean_context_id: str | None = None,
         limit: int = 200,
+        grinder_context_id: str | None = None,
     ) -> list[ShotRecord]:
         ...
 
@@ -35,6 +36,7 @@ class RecommendationRepository(Protocol):
         machine_id: str,
         bean_context_id: str | None,
         now: int,
+        grinder_context_id: str | None = None,
     ) -> Recommendation | None:
         ...
 
@@ -43,6 +45,7 @@ class RecommendationRepository(Protocol):
         install_id: str,
         machine_id: str,
         bean_context_id: str | None,
+        grinder_context_id: str | None = None,
     ) -> Recommendation | None:
         ...
 
@@ -53,6 +56,7 @@ class RecommendationRepository(Protocol):
         bean_context_id: str | None,
         now: int,
         except_recommendation_id: str | None = None,
+        grinder_context_id: str | None = None,
     ) -> None:
         ...
 
@@ -143,6 +147,7 @@ class LocalDataRepository(Protocol):
         *,
         limit: int = 100,
         dry_run: bool = False,
+        grinder_context_id: str | None = None,
     ) -> dict[str, int]:
         ...
 
@@ -154,5 +159,6 @@ class LocalDataRepository(Protocol):
         *,
         now: int,
         dry_run: bool = False,
+        grinder_context_id: str | None = None,
     ) -> dict[str, int]:
         ...

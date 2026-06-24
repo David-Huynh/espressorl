@@ -39,6 +39,7 @@ class SQLiteStore:
                 machine_id TEXT NOT NULL,
                 machine_adapter TEXT NOT NULL,
                 bean_context_id TEXT,
+                grinder_context_id TEXT,
                 profile_resampled_blob BLOB NOT NULL,
                 raw_profile_available INTEGER NOT NULL,
                 raw_profile_hash TEXT,
@@ -116,6 +117,7 @@ class SQLiteStore:
                 install_id TEXT NOT NULL,
                 machine_id TEXT NOT NULL,
                 bean_context_id TEXT,
+                grinder_context_id TEXT,
                 grind_delta_steps INTEGER NOT NULL,
                 grind_delta_um REAL NOT NULL,
                 next_grind_steps REAL NOT NULL,
@@ -166,6 +168,8 @@ class SQLiteStore:
         self._ensure_column("recommendations", "applied_fields_json", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column("recommendations", "manual_fields_json", "TEXT NOT NULL DEFAULT '[]'")
         self._ensure_column("recommendations", "apply_error", "TEXT")
+        self._ensure_column("recommendations", "grinder_context_id", "TEXT")
+        self._ensure_column("shots", "grinder_context_id", "TEXT")
         self._ensure_column("shots", "shot_type", "TEXT NOT NULL DEFAULT 'espresso'")
         self._ensure_column("shots", "exclude_from_local_optimization", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("shots", "optimization_weight", "REAL NOT NULL DEFAULT 1.0")
@@ -205,6 +209,18 @@ class SQLiteStore:
         self._ensure_column("shots", "shot_end_state", "TEXT")
         self.conn.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_shots_context_grinder_time
+            ON shots (install_id, machine_id, bean_context_id, grinder_context_id, timestamp DESC)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recommendations_context_grinder_time
+            ON recommendations (install_id, machine_id, bean_context_id, grinder_context_id, created_at DESC)
+            """
+        )
+        self.conn.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_upload_queue_record
             ON upload_queue (local_record_type, local_record_id)
             """
@@ -218,6 +234,18 @@ class SQLiteStore:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _nullable_clause(
+    column: str,
+    value: str | None,
+    params: list[object],
+    placeholder: str,
+) -> str:
+    if value is None:
+        return f"{column} IS NULL"
+    params.append(value)
+    return f"{column}={placeholder}"
+
+
 class SQLiteShotRepository:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
@@ -227,7 +255,7 @@ class SQLiteShotRepository:
             """
             INSERT OR REPLACE INTO shots (
                 shot_id, timestamp, install_id, machine_id, machine_adapter,
-                bean_context_id, profile_resampled_blob, raw_profile_available,
+                bean_context_id, grinder_context_id, profile_resampled_blob, raw_profile_available,
                 raw_profile_hash, grind_steps, grind_um, grinder_step_size_um,
                 dose_in_g, beverage_out_g, brew_ratio, target_yield_g,
                 target_ratio, shot_time_s, recommendation_id,
@@ -254,7 +282,7 @@ class SQLiteShotRepository:
                 created_at, updated_at
             ) VALUES (
                 :shot_id, :timestamp, :install_id, :machine_id, :machine_adapter,
-                :bean_context_id, :profile_resampled_blob, :raw_profile_available,
+                :bean_context_id, :grinder_context_id, :profile_resampled_blob, :raw_profile_available,
                 :raw_profile_hash, :grind_steps, :grind_um, :grinder_step_size_um,
                 :dose_in_g, :beverage_out_g, :brew_ratio, :target_yield_g,
                 :target_ratio, :shot_time_s, :recommendation_id,
@@ -295,27 +323,21 @@ class SQLiteShotRepository:
         machine_id: str,
         bean_context_id: str | None = None,
         limit: int = 200,
+        grinder_context_id: str | None = None,
     ) -> list[ShotRecord]:
-        if bean_context_id is None:
-            rows = self._store.conn.execute(
-                """
-                SELECT * FROM shots
-                WHERE install_id=? AND machine_id=? AND bean_context_id IS NULL
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (install_id, machine_id, limit),
-            ).fetchall()
-        else:
-            rows = self._store.conn.execute(
-                """
-                SELECT * FROM shots
-                WHERE install_id=? AND machine_id=? AND bean_context_id=?
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (install_id, machine_id, bean_context_id, limit),
-            ).fetchall()
+        params: list[object] = [install_id, machine_id]
+        bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
+        grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params, "?")
+        params.append(limit)
+        rows = self._store.conn.execute(
+            f"""
+            SELECT * FROM shots
+            WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
         return list(reversed([_row_to_shot(row) for row in rows]))
 
 
@@ -427,18 +449,22 @@ class SQLiteLocalDataRepository:
         *,
         limit: int = 100,
         dry_run: bool = False,
+        grinder_context_id: str | None = None,
     ) -> dict[str, int]:
-        bean_clause = ""
+        context_clause = ""
         params: list[object] = [install_id, machine_id]
-        if bean_context_id is not None:
-            bean_clause = "AND bean_context_id=?"
-            params.append(bean_context_id)
+        if bean_context_id is not None or grinder_context_id is not None:
+            clauses = [
+                _nullable_clause("bean_context_id", bean_context_id, params, "?"),
+                _nullable_clause("grinder_context_id", grinder_context_id, params, "?"),
+            ]
+            context_clause = "AND " + " AND ".join(clauses)
         params.append(limit)
         rows = self._store.conn.execute(
             f"""
             SELECT shot_id FROM shots
             WHERE install_id=? AND machine_id=?
-              {bean_clause}
+              {context_clause}
               AND (
                 shot_type != 'espresso'
                 OR exclude_from_local_optimization = 1
@@ -473,54 +499,59 @@ class SQLiteLocalDataRepository:
         *,
         now: int,
         dry_run: bool = False,
+        grinder_context_id: str | None = None,
     ) -> dict[str, int]:
+        context_params: list[object] = [install_id, machine_id, bean_context_id]
+        grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, context_params, "?")
         shot_count = int(
             self._store.conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS count FROM shots
-                WHERE install_id=? AND machine_id=? AND bean_context_id=?
+                WHERE install_id=? AND machine_id=? AND bean_context_id=? AND {grinder_clause}
                   AND (
                     exclude_from_local_optimization = 0
                     OR optimization_weight > 0
                     OR recommendation_attribution_weight > 0
                   )
                 """,
-                (install_id, machine_id, bean_context_id),
+                tuple(context_params),
             ).fetchone()["count"]
         )
+        rec_context_params: list[object] = [install_id, machine_id, bean_context_id]
+        rec_grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, rec_context_params, "?")
         recommendation_count = int(
             self._store.conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS count FROM recommendations
-                WHERE install_id=? AND machine_id=? AND bean_context_id=?
+                WHERE install_id=? AND machine_id=? AND bean_context_id=? AND {rec_grinder_clause}
                   AND status IN ('pending', 'shown', 'accepted', 'edited')
                 """,
-                (install_id, machine_id, bean_context_id),
+                tuple(rec_context_params),
             ).fetchone()["count"]
         )
         if dry_run:
             return {"shots": shot_count, "recommendations": recommendation_count}
         self._store.conn.execute(
-            """
+            f"""
             UPDATE shots
             SET exclude_from_local_optimization=1,
                 optimization_weight=0,
                 recommendation_attribution_weight=0,
                 updated_at=?
-            WHERE install_id=? AND machine_id=? AND bean_context_id=?
+            WHERE install_id=? AND machine_id=? AND bean_context_id=? AND {grinder_clause}
             """,
-            (now, install_id, machine_id, bean_context_id),
+            (now, *context_params),
         )
         self._store.conn.execute(
-            """
+            f"""
             UPDATE recommendations
             SET status='superseded',
                 superseded_at=COALESCE(superseded_at, ?),
                 updated_at=?
-            WHERE install_id=? AND machine_id=? AND bean_context_id=?
+            WHERE install_id=? AND machine_id=? AND bean_context_id=? AND {rec_grinder_clause}
               AND status IN ('pending', 'shown', 'accepted', 'edited')
             """,
-            (now, now, install_id, machine_id, bean_context_id),
+            (now, now, *rec_context_params),
         )
         self._store.conn.commit()
         return {"shots": shot_count, "recommendations": recommendation_count}
@@ -535,8 +566,8 @@ class SQLiteRecommendationRepository:
             """
             INSERT OR REPLACE INTO recommendations (
                 recommendation_id, created_at, updated_at, expires_at,
-                install_id, machine_id, bean_context_id, grind_delta_steps,
-                grind_delta_um, next_grind_steps, next_grind_um, next_dose_g,
+                install_id, machine_id, bean_context_id, grinder_context_id,
+                grind_delta_steps, grind_delta_um, next_grind_steps, next_grind_um, next_dose_g,
                 target_yield_g, target_ratio, mode, confidence, reason, status,
                 shown_count, accepted_at, ignored_at, edited_at, used_at,
                 superseded_at, source_shot_id, apply_status,
@@ -544,8 +575,8 @@ class SQLiteRecommendationRepository:
                 apply_error
             ) VALUES (
                 :recommendation_id, :created_at, :updated_at, :expires_at,
-                :install_id, :machine_id, :bean_context_id, :grind_delta_steps,
-                :grind_delta_um, :next_grind_steps, :next_grind_um, :next_dose_g,
+                :install_id, :machine_id, :bean_context_id, :grinder_context_id,
+                :grind_delta_steps, :grind_delta_um, :next_grind_steps, :next_grind_um, :next_dose_g,
                 :target_yield_g, :target_ratio, :mode, :confidence, :reason, :status,
                 :shown_count, :accepted_at, :ignored_at, :edited_at, :used_at,
                 :superseded_at, :source_shot_id, :apply_status,
@@ -569,22 +600,19 @@ class SQLiteRecommendationRepository:
         install_id: str,
         machine_id: str,
         bean_context_id: str | None,
+        grinder_context_id: str | None = None,
     ) -> Recommendation | None:
-        params: tuple
-        if bean_context_id is None:
-            bean_clause = "bean_context_id IS NULL"
-            params = (install_id, machine_id)
-        else:
-            bean_clause = "bean_context_id=?"
-            params = (install_id, machine_id, bean_context_id)
+        params: list[object] = [install_id, machine_id]
+        bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
+        grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params, "?")
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
-            WHERE install_id=? AND machine_id=? AND {bean_clause}
+            WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            params,
+            tuple(params),
         ).fetchone()
         return _row_to_recommendation(row) if row else None
 
@@ -594,24 +622,22 @@ class SQLiteRecommendationRepository:
         machine_id: str,
         bean_context_id: str | None,
         now: int,
+        grinder_context_id: str | None = None,
     ) -> Recommendation | None:
-        params: tuple
-        if bean_context_id is None:
-            bean_clause = "bean_context_id IS NULL"
-            params = (install_id, machine_id, now)
-        else:
-            bean_clause = "bean_context_id=?"
-            params = (install_id, machine_id, bean_context_id, now)
+        params: list[object] = [install_id, machine_id]
+        bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
+        grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params, "?")
+        params.append(now)
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
-            WHERE install_id=? AND machine_id=? AND {bean_clause}
+            WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
               AND status IN ('pending', 'shown', 'accepted', 'edited')
               AND (expires_at IS NULL OR expires_at > ?)
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            params,
+            tuple(params),
         ).fetchone()
         return _row_to_recommendation(row) if row else None
 
@@ -622,11 +648,11 @@ class SQLiteRecommendationRepository:
         bean_context_id: str | None,
         now: int,
         except_recommendation_id: str | None = None,
+        grinder_context_id: str | None = None,
     ) -> None:
         params: list = [now, now, install_id, machine_id]
-        bean_clause = "bean_context_id IS NULL" if bean_context_id is None else "bean_context_id=?"
-        if bean_context_id is not None:
-            params.append(bean_context_id)
+        bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
+        grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params, "?")
         except_clause = ""
         if except_recommendation_id is not None:
             except_clause = "AND recommendation_id != ?"
@@ -635,7 +661,7 @@ class SQLiteRecommendationRepository:
             f"""
             UPDATE recommendations
             SET status='superseded', superseded_at=?, updated_at=?
-            WHERE install_id=? AND machine_id=? AND {bean_clause}
+            WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
               AND status IN ('pending', 'shown')
               {except_clause}
             """,
@@ -925,6 +951,7 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "machine_id": shot.machine_id,
         "machine_adapter": shot.machine_adapter,
         "bean_context_id": shot.bean_context_id,
+        "grinder_context_id": shot.grinder_context_id,
         "profile_resampled_blob": shot.profile.astype(PROFILE_DTYPE).tobytes(),
         "raw_profile_available": bool(shot.raw_profile_available),
         "raw_profile_hash": shot.raw_profile_hash,
@@ -1001,6 +1028,7 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         machine_id=row["machine_id"],
         machine_adapter=row["machine_adapter"],
         bean_context_id=row["bean_context_id"],
+        grinder_context_id=row["grinder_context_id"],
         profile=profile.copy(),
         raw_profile_available=bool(row["raw_profile_available"]),
         raw_profile_hash=row["raw_profile_hash"],
@@ -1089,6 +1117,7 @@ def _recommendation_to_row(recommendation: Recommendation) -> dict:
         "install_id": recommendation.install_id,
         "machine_id": recommendation.machine_id,
         "bean_context_id": recommendation.bean_context_id,
+        "grinder_context_id": recommendation.grinder_context_id,
         "grind_delta_steps": recommendation.grind_delta_steps,
         "grind_delta_um": recommendation.grind_delta_um,
         "next_grind_steps": recommendation.next_grind_steps,
@@ -1124,6 +1153,7 @@ def _row_to_recommendation(row: sqlite3.Row) -> Recommendation:
         install_id=row["install_id"],
         machine_id=row["machine_id"],
         bean_context_id=row["bean_context_id"],
+        grinder_context_id=row["grinder_context_id"],
         grind_delta_steps=row["grind_delta_steps"],
         grind_delta_um=row["grind_delta_um"],
         next_grind_steps=row["next_grind_steps"],

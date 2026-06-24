@@ -256,6 +256,15 @@ class DomainCoreTests(unittest.TestCase):
                 ),
             ).stale
         )
+        rec.grinder_context_id = "grinder_a"
+        grinder_stale = check_recommendation_staleness(
+            rec,
+            now=5,
+            bean_context_id="bean_a",
+            grinder_context_id="grinder_b",
+        )
+        self.assertTrue(grinder_stale.stale)
+        self.assertEqual(grinder_stale.reason, "grinder_context_changed")
 
 
 if __name__ == "__main__":
