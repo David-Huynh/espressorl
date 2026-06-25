@@ -248,10 +248,73 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 recent = status["recent_shots"]
                 self.assertEqual(len(recent), 1)
                 self.assertEqual(recent[0]["shot_id"], "shot_1")
+                self.assertEqual(status["grinder_catalog_search_url"], "")
                 self.assertEqual(recent[0]["profile_label"], "Cremina lever machine")
                 self.assertEqual(recent[0]["final_phase_name"], "ramp")
                 self.assertEqual(recent[0]["shot_end_state"], "manual_or_interrupted")
                 self.assertNotIn("profile_resampled", recent[0])
+
+    def test_status_payload_derives_grinder_catalog_search_url_from_supabase_function_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(
+                mqtt_host="localhost",
+                data_dir=Path(tmp),
+                install_id="install_1",
+                supabase_ingest_url="https://project.supabase.co/functions/v1/espresso-rl-ingest",
+            )
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                    clock=lambda: 10,
+                )
+
+                status = build_status_payload(
+                    config=config,
+                    service=service,
+                    shot_repo=None,
+                    upload_maintenance=None,
+                    upload_queue_repo=None,
+                    machine_id="machine_1",
+                    bean_context_id=None,
+                )
+
+            self.assertEqual(
+                status["grinder_catalog_search_url"],
+                "https://project.supabase.co/functions/v1/espresso-rl-grinder-search",
+            )
+
+    def test_status_payload_derives_grinder_catalog_search_url_from_registration_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(
+                mqtt_host="localhost",
+                data_dir=Path(tmp),
+                install_id="install_1",
+                supabase_registration_url="https://project.supabase.co/functions/v1/espresso-rl-register",
+            )
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                    clock=lambda: 10,
+                )
+
+                status = build_status_payload(
+                    config=config,
+                    service=service,
+                    shot_repo=None,
+                    upload_maintenance=None,
+                    upload_queue_repo=None,
+                    machine_id="machine_1",
+                    bean_context_id=None,
+                )
+
+            self.assertEqual(
+                status["grinder_catalog_search_url"],
+                "https://project.supabase.co/functions/v1/espresso-rl-grinder-search",
+            )
 
     def test_postgres_upsert_rolls_back_failed_transaction(self) -> None:
         class FailingConnection:
@@ -544,6 +607,8 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             "abuse_events",
             "training_dataset",
             "community_priors",
+            "community_grinder_catalog",
+            "community_grinder_aliases",
         ):
             self.assertIn(f"CREATE TABLE IF NOT EXISTS {table_name}", schema)
 
@@ -553,6 +618,9 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("validation_errors JSONB", schema)
         self.assertIn("UNIQUE (source_validation_id)", schema)
         self.assertIn("idx_community_priors_context_key", schema)
+        self.assertIn("microns_per_step DOUBLE PRECISION", schema)
+        self.assertIn("max_steps INTEGER", schema)
+        self.assertIn("normalized_alias TEXT NOT NULL", schema)
         self.assertIn("feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE", schema)
         self.assertIn("ADD COLUMN IF NOT EXISTS feedback_recorded", schema)
 

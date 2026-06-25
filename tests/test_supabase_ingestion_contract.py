@@ -7,9 +7,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "supabase" / "migrations" / "202605290001_espresso_rl_raw_queue.sql"
 FUNCTION = ROOT / "supabase" / "functions" / "espresso-rl-ingest" / "index.ts"
+GRINDER_SEARCH_FUNCTION = (
+    ROOT / "supabase" / "functions" / "espresso-rl-grinder-search" / "index.ts"
+)
 CONFIG = ROOT / "supabase" / "config.toml"
 RATE_LIMIT_MIGRATION = (
     ROOT / "supabase" / "migrations" / "202605310001_espressorl_rate_limit_no_overcount.sql"
+)
+GRINDER_CATALOG_MIGRATION = (
+    ROOT / "supabase" / "migrations" / "202606250001_espressorl_grinder_catalog.sql"
 )
 
 
@@ -19,6 +25,20 @@ class SupabaseIngestionContractTests(unittest.TestCase):
 
         self.assertIn("[functions.espresso-rl-ingest]", config)
         self.assertIn("verify_jwt = false", config)
+
+    def test_grinder_search_function_disables_jwt_and_exposes_only_bounded_search(self) -> None:
+        config = CONFIG.read_text()
+        source = GRINDER_SEARCH_FUNCTION.read_text()
+
+        self.assertIn("[functions.espresso-rl-grinder-search]", config)
+        self.assertIn("verify_jwt = false", config)
+        self.assertIn("request.method !== 'GET'", source)
+        self.assertIn("MAX_QUERY_LENGTH = 80", source)
+        self.assertIn("MAX_LIMIT = 10", source)
+        self.assertIn("espressorl_grinder_aliases", source)
+        self.assertIn("espressorl_grinder_catalog", source)
+        self.assertIn("espressorl_consume_rate_limit", source)
+        self.assertIn("'Access-Control-Allow-Origin': '*'", source)
 
     def test_raw_queue_migration_blocks_public_table_access(self) -> None:
         sql = MIGRATION.read_text()
@@ -111,6 +131,19 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("WHERE public.espressorl_ingest_rate_counters.count < p_limit", sql)
         self.assertIn("IF NOT FOUND THEN", sql)
         self.assertIn("RETURN FALSE", sql)
+
+    def test_grinder_catalog_migration_defines_locked_down_metadata_tables(self) -> None:
+        sql = GRINDER_CATALOG_MIGRATION.read_text()
+
+        self.assertIn("CREATE TABLE IF NOT EXISTS public.espressorl_grinder_catalog", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS public.espressorl_grinder_aliases", sql)
+        self.assertIn("microns_per_step DOUBLE PRECISION", sql)
+        self.assertIn("max_steps INTEGER", sql)
+        self.assertIn("normalized_alias TEXT NOT NULL", sql)
+        self.assertIn("ALTER TABLE public.espressorl_grinder_catalog ENABLE ROW LEVEL SECURITY", sql)
+        self.assertIn("ALTER TABLE public.espressorl_grinder_aliases ENABLE ROW LEVEL SECURITY", sql)
+        self.assertIn("REVOKE ALL ON public.espressorl_grinder_catalog FROM anon, authenticated", sql)
+        self.assertIn("REVOKE ALL ON public.espressorl_grinder_aliases FROM anon, authenticated", sql)
 
 
 if __name__ == "__main__":

@@ -313,6 +313,14 @@ def ingest_and_feedback(
 
 
 class ApplicationServiceTests(unittest.TestCase):
+    def test_idle_without_rated_shot_does_not_create_baseline_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        self.assertIsNone(service.handle_machine_state(idle_event(1)))
+        self.assertEqual(recs.rows, {})
+
     def test_feedback_generates_bounded_second_shot_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()

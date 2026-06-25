@@ -92,6 +92,20 @@ def _recommendation_signature(recommendation: Recommendation) -> tuple:
     )
 
 
+def _has_optimizer_observation(shots: list[ShotRecord]) -> bool:
+    return any(
+        shot.shot_type == ShotType.ESPRESSO
+        and not shot.exclude_from_local_optimization
+        and shot.optimization_weight > 0.0
+        and shot.feedback_recorded
+        and shot.reward is not None
+        and shot.recommendation_decision
+        not in {RecommendationDecision.IGNORED, RecommendationDecision.DISMISSED}
+        and shot.recommendation_followed != FollowThroughState.NOT_FOLLOWED
+        for shot in shots
+    )
+
+
 class EspressoRLService:
     """Application service over canonical EspressoRL events."""
 
@@ -460,7 +474,7 @@ class EspressoRLService:
             machine_id=event.machine_id,
             bean_context_id=event.bean_context_id,
             grinder_context_id=event.grinder_context_id,
-            limit=1,
+            limit=200,
         )
         if recent and recent[-1].rating_prompt_allowed and not recent[-1].feedback_recorded:
             return None
@@ -488,6 +502,8 @@ class EspressoRLService:
                 return self._mark_recommendation_shown(current, now)
 
         if current_recipe is None:
+            return None
+        if not _has_optimizer_observation(recent):
             return None
         recommendation = self.generate_recommendation(
             install_id=event.install_id,

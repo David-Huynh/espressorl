@@ -243,6 +243,40 @@ CREATE TABLE IF NOT EXISTS community_priors (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_community_priors_context_key
     ON community_priors (context_key);
 
+CREATE TABLE IF NOT EXISTS community_grinder_catalog (
+    grinder_id TEXT PRIMARY KEY,
+    canonical_name TEXT NOT NULL,
+    manufacturer TEXT,
+    model TEXT,
+    microns_per_step DOUBLE PRECISION,
+    max_steps INTEGER,
+    step_direction TEXT,
+    source TEXT NOT NULL DEFAULT 'community',
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (microns_per_step IS NULL OR microns_per_step > 0),
+    CHECK (max_steps IS NULL OR max_steps > 0),
+    CHECK (step_direction IS NULL OR step_direction IN ('higher_is_finer', 'higher_is_coarser')),
+    CHECK (confidence >= 0.0 AND confidence <= 1.0)
+);
+
+CREATE TABLE IF NOT EXISTS community_grinder_aliases (
+    alias_id BIGSERIAL PRIMARY KEY,
+    grinder_id TEXT NOT NULL REFERENCES community_grinder_catalog(grinder_id) ON DELETE CASCADE,
+    alias_name TEXT NOT NULL,
+    normalized_alias TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'community',
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (normalized_alias),
+    CHECK (confidence >= 0.0 AND confidence <= 1.0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_community_grinder_aliases_grinder_id
+    ON community_grinder_aliases (grinder_id);
+
 CREATE TABLE IF NOT EXISTS admin_action_log (
     action_id BIGSERIAL PRIMARY KEY,
     action_type TEXT NOT NULL,

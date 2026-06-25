@@ -4,6 +4,7 @@ import logging
 import signal
 import sys
 import threading
+from urllib.parse import urlsplit, urlunsplit
 
 from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
 from espresso_rl.adapters.postgres_repositories import (
@@ -581,7 +582,33 @@ def build_status_payload(
         "upload_queue_last_rejected_error": latest_rejected.error_message if latest_rejected else None,
         "upload_queue_last_rejected_at": latest_rejected.updated_at if latest_rejected else None,
         "community_upload_enabled": config.should_enqueue_community_uploads(),
+        "grinder_catalog_search_url": grinder_catalog_search_url(config),
     }
+
+
+def grinder_catalog_search_url(config: Config) -> str:
+    for source_url in (config.supabase_ingest_url, config.supabase_registration_url):
+        derived = _derive_supabase_function_url(source_url, "espresso-rl-grinder-search")
+        if derived:
+            return derived
+    return ""
+
+
+def _derive_supabase_function_url(source_url: str, function_name: str) -> str:
+    text = str(source_url or "").strip().rstrip("/")
+    if not text:
+        return ""
+    parts = urlsplit(text)
+    if not parts.scheme or not parts.netloc:
+        return ""
+
+    path_parts = [part for part in parts.path.split("/") if part]
+    if len(path_parts) >= 3 and path_parts[-3] == "functions" and path_parts[-2] == "v1":
+        path_parts[-1] = function_name
+    else:
+        path_parts.extend(["functions", "v1", function_name])
+
+    return urlunsplit((parts.scheme, parts.netloc, "/" + "/".join(path_parts), "", ""))
 
 
 def recent_shot_summaries(shots: list, rejected_record_ids: set[str], limit: int = 10) -> list[dict]:
