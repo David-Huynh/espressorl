@@ -56,45 +56,6 @@ class LocalHistoryPriorProvider:
         return points
 
 
-class RuleBasedPriorProvider:
-    def get_prior_points(self, context: OptimizationContext) -> list[PriorPoint]:
-        shots = [shot for shot in context.shots if shot.shot_type == ShotType.ESPRESSO]
-        if not shots:
-            return []
-
-        last = shots[-1]
-        tags = set(last.taste_tags)
-        if {"sour", "weak", "too_fast"} & tags or (last.shot_time_s is not None and last.shot_time_s < 25):
-            return [
-                _point_near_current(
-                    context,
-                    grind_delta_um_from_current=context.current_recipe.microns_per_step,
-                    yield_delta_g=2.0,
-                    predicted_reward=0.58,
-                    reason="Weak rule prior: sour/fast/weak shots often improve with finer or slightly longer extraction.",
-                )
-            ]
-        if {"bitter", "harsh", "too_slow"} & tags or (last.shot_time_s is not None and last.shot_time_s > 35):
-            return [
-                _point_near_current(
-                    context,
-                    grind_delta_um_from_current=-context.current_recipe.microns_per_step,
-                    yield_delta_g=-2.0,
-                    predicted_reward=0.58,
-                    reason="Weak rule prior: bitter/slow/harsh shots often improve with coarser or slightly shorter extraction.",
-                )
-            ]
-        return [
-            _point_near_current(
-                context,
-                grind_delta_um_from_current=0.0,
-                yield_delta_g=0.0,
-                predicted_reward=0.52,
-                reason="Weak rule prior: hold close to current recipe while collecting feedback.",
-            )
-        ]
-
-
 class CommunityPriorProvider:
     def __init__(
         self,
@@ -189,28 +150,6 @@ def _community_point_from_json(point: dict[str, Any], prior_confidence: float) -
         observation_noise=capped_noise,
         source="community",
         reason="Weak zero-trust community prior.",
-    )
-
-
-def _point_near_current(
-    context: OptimizationContext,
-    *,
-    grind_delta_um_from_current: float,
-    yield_delta_g: float,
-    predicted_reward: float,
-    reason: str,
-) -> PriorPoint:
-    target_yield_g = max(5.0, context.current_recipe.target_yield_g + yield_delta_g)
-    return PriorPoint(
-        grind_delta_um_from_current=grind_delta_um_from_current,
-        dose_g=context.current_recipe.dose_g,
-        target_yield_g=target_yield_g,
-        target_ratio=target_yield_g / context.current_recipe.dose_g,
-        predicted_reward=predicted_reward,
-        confidence=0.10,
-        observation_noise=0.65,
-        source="rule_based",
-        reason=reason,
     )
 
 

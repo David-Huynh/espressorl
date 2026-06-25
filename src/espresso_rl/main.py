@@ -46,7 +46,6 @@ from espresso_rl.application.prior_providers import (
     CommunityPriorProvider,
     CompositePriorProvider,
     LocalHistoryPriorProvider,
-    RuleBasedPriorProvider,
 )
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
@@ -986,7 +985,7 @@ def upload_queue_for_service(
 
 
 def open_prior_provider(config: Config) -> CompositePriorProvider:
-    providers = [LocalHistoryPriorProvider(), RuleBasedPriorProvider()]
+    providers = [LocalHistoryPriorProvider()]
     if config.storage_backend == "postgres":
         providers.append(
             CommunityPriorProvider(

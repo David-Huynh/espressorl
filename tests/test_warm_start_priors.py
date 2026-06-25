@@ -6,6 +6,7 @@ import numpy as np
 
 from espresso_rl.application.prior_providers import CommunityPriorProvider
 from espresso_rl.application.services import EspressoRLService
+from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityPrior
 from espresso_rl.domain.models import (
     FollowThroughState,
@@ -17,6 +18,7 @@ from espresso_rl.domain.models import (
 )
 from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
+from espresso_rl.main import open_prior_provider
 from tests.test_application_service import (
     MemoryRecommendationRepository,
     MemoryShotRepository,
@@ -85,6 +87,121 @@ class WarmStartPriorTests(unittest.TestCase):
         self.assertEqual(recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
         self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
         self.assertLessEqual(abs(recommendation.target_yield_g - 36.0), 4.0)
+
+    def test_first_clearly_fast_sour_shot_uses_coarse_finer_probe(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[
+                shot_record(
+                    "shot_1",
+                    timestamp=1,
+                    reward=0.25,
+                    rating=2,
+                    taste_tags=["sour", "too_fast"],
+                    shot_time_s=18.0,
+                )
+            ],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertEqual(recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
+        self.assertGreaterEqual(recommendation.grind_delta_steps_from_current, 4)
+        self.assertGreaterEqual(recommendation.target_yield_g - current.target_yield_g, 5.0)
+        self.assertLessEqual(recommendation.grind_delta_steps_from_current, 5)
+
+    def test_first_short_shot_without_directional_feedback_stays_small(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[
+                shot_record(
+                    "shot_1",
+                    timestamp=1,
+                    reward=0.25,
+                    rating=2,
+                    taste_tags=[],
+                    shot_time_s=18.0,
+                )
+            ],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertEqual(recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
+        self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
+        self.assertLessEqual(abs(recommendation.target_yield_g - current.target_yield_g), 4.0)
+
+    def test_first_near_good_shot_stays_in_small_refinement_region(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[
+                shot_record(
+                    "shot_1",
+                    timestamp=1,
+                    reward=0.8,
+                    rating=4,
+                    taste_tags=["balanced"],
+                    shot_time_s=30.0,
+                )
+            ],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
+        self.assertLessEqual(abs(recommendation.target_yield_g - current.target_yield_g), 4.0)
+
+    def test_strong_same_bean_prior_can_use_full_safe_early_envelope(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_lavazza_2",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[shot_record("shot_1", timestamp=1, reward=0.55, rating=3)],
+            safety_bounds=SafetyBounds(),
+            now=100,
+            prior_points=[
+                PriorPoint(
+                    grind_delta_um_from_current=-62.5,
+                    dose_g=18.0,
+                    target_yield_g=36.0,
+                    target_ratio=2.0,
+                    predicted_reward=1.0,
+                    confidence=0.85,
+                    observation_noise=0.25,
+                    source="local_bean_history",
+                )
+            ],
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertEqual(recommendation.mode, RecommendationMode.WARM_STARTED_BO)
+        self.assertLessEqual(recommendation.grind_delta_steps_from_current, -3)
+        self.assertGreaterEqual(recommendation.grind_delta_steps_from_current, -5)
 
     def test_same_bean_history_prior_uses_generic_warm_started_mode(self) -> None:
         current = Recipe(
@@ -282,6 +399,32 @@ class WarmStartPriorTests(unittest.TestCase):
         self.assertEqual(points[0].confidence, 0.18)
         self.assertEqual(points[0].observation_noise, 0.5)
 
+    def test_default_prior_provider_does_not_emit_handwritten_rule_priors(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[
+                shot_record(
+                    "shot_1",
+                    timestamp=1,
+                    reward=None,
+                    rating=None,
+                    taste_tags=["too_fast"],
+                    shot_time_s=18.0,
+                )
+            ],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        points = open_prior_provider(Config(mqtt_host="unused")).get_prior_points(context)
+
+        self.assertEqual(points, [])
+
 
 class StaticPriorProvider:
     def __init__(self, points: list[PriorPoint]) -> None:
@@ -336,6 +479,7 @@ def shot_record(
     reward: float = 0.6,
     rating: int | None = None,
     taste_tags: list[str] | None = None,
+    shot_time_s: float = 30.0,
 ) -> ShotRecord:
     return ShotRecord(
         shot_id=shot_id,
@@ -349,6 +493,7 @@ def shot_record(
         target_yield_g=36.0,
         relative_grind_steps_from_reference=42,
         beverage_out_g=36.0,
+        shot_time_s=shot_time_s,
         bean_context_id="bean_1",
         reward=reward,
         reward_confidence=1.0,

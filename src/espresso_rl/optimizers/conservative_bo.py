@@ -38,7 +38,11 @@ class ConservativeBOOptimizer:
             confidence = 0.25
             source_shot_id = None
         else:
-            radius_steps, radius_yield_g, dose_radius_g, mode = self._trust_region(shots)
+            radius_steps, radius_yield_g, dose_radius_g, mode = self._trust_region(
+                shots,
+                prior_points,
+                context,
+            )
             if prior_points and len(shots) <= 4:
                 mode = RecommendationMode.WARM_STARTED_BO
             center = self._center_recipe(shots)
@@ -84,13 +88,40 @@ class ConservativeBOOptimizer:
         validate_recommendation(current, recommendation, context.safety_bounds)
         return recommendation
 
-    def _trust_region(self, shots: list[ShotRecord]) -> tuple[int, float, float, RecommendationMode]:
+    def _trust_region(
+        self,
+        shots: list[ShotRecord],
+        prior_points: list[PriorPoint],
+        context: OptimizationContext,
+    ) -> tuple[int, float, float, RecommendationMode]:
         n = len(shots)
         if n <= 4:
-            return 2, 4.0, 0.0, RecommendationMode.ZERO_IMMEDIATE_BO
-        if n <= 14:
-            return 3, 6.0, 0.5, RecommendationMode.LOCAL_BO
-        return 5, 8.0, 1.0, RecommendationMode.LOCAL_BO
+            radius_steps, radius_yield_g, dose_radius_g, mode = 2, 4.0, 0.0, RecommendationMode.ZERO_IMMEDIATE_BO
+        elif n <= 14:
+            radius_steps, radius_yield_g, dose_radius_g, mode = 3, 6.0, 0.5, RecommendationMode.LOCAL_BO
+        else:
+            radius_steps, radius_yield_g, dose_radius_g, mode = 5, 8.0, 1.0, RecommendationMode.LOCAL_BO
+
+        diagnostic = self._diagnostic_signal(shots[-1] if shots else None)[1]
+        prior_strength = self._prior_strength(prior_points)
+        near_good = self._near_good_signal(shots[-1] if shots else None)
+        evidence_strength = max(diagnostic, prior_strength)
+
+        if n <= 4 and evidence_strength > 0:
+            radius_steps = max(radius_steps, int(round(2 + 3 * evidence_strength)))
+            radius_yield_g = max(radius_yield_g, 4.0 + 4.0 * evidence_strength)
+        elif evidence_strength > 0:
+            radius_steps = max(radius_steps, int(round(3 + 2 * evidence_strength)))
+            radius_yield_g = max(radius_yield_g, 6.0 + 2.0 * evidence_strength)
+
+        if near_good and prior_strength < 0.5:
+            radius_steps = min(radius_steps, 2)
+            radius_yield_g = min(radius_yield_g, 4.0)
+
+        radius_steps = max(1, min(context.safety_bounds.max_grind_delta_steps_from_current, radius_steps))
+        radius_yield_g = max(2.0, min(context.safety_bounds.max_yield_delta_g, radius_yield_g))
+        dose_radius_g = min(context.safety_bounds.max_dose_delta_g, dose_radius_g)
+        return radius_steps, radius_yield_g, dose_radius_g, mode
 
     def _eligible_shots(self, shots: list[ShotRecord]) -> list[ShotRecord]:
         return [shot for shot in shots if shot.reward is not None]
@@ -119,7 +150,11 @@ class ConservativeBOOptimizer:
     ):
         current = context.current_recipe
         if len(shots) == 1 and not prior_points:
-            grind_delta, yield_delta = self._single_point_probe(shots[0])
+            grind_delta, yield_delta = self._single_point_probe(
+                shots[0],
+                max_grind_delta_steps=radius_steps,
+                max_yield_delta_g=radius_yield_g,
+            )
             return clamp_candidate_recipe(
                 current=current,
                 candidate_relative_grind_steps_from_reference=current.relative_grind_steps_from_reference + grind_delta,
@@ -176,15 +211,70 @@ class ConservativeBOOptimizer:
             and shot.recommendation_followed != FollowThroughState.NOT_FOLLOWED
         ]
 
-    def _single_point_probe(self, shot: ShotRecord) -> tuple[int, float]:
+    def _single_point_probe(
+        self,
+        shot: ShotRecord,
+        *,
+        max_grind_delta_steps: int,
+        max_yield_delta_g: float,
+    ) -> tuple[int, float]:
+        direction, strength = self._diagnostic_signal(shot)
+        if direction:
+            grind_steps = max(1, min(max_grind_delta_steps, int(round(1 + 4 * strength))))
+            yield_delta = min(max_yield_delta_g, 2.0 + 4.0 * strength)
+            return direction * grind_steps, direction * yield_delta
         tags = set(shot.taste_tags)
-        if {"sour", "weak", "thin", "too_fast"} & tags or (shot.shot_time_s is not None and shot.shot_time_s < 25):
+        if {"sour", "weak", "thin", "too_fast"} & tags:
             return 1, 2.0
-        if {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"} & tags or (
-            shot.shot_time_s is not None and shot.shot_time_s > 35
-        ):
+        if {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"} & tags:
             return -1, -2.0
         return 1, 0.0
+
+    def _diagnostic_signal(self, shot: ShotRecord | None) -> tuple[int, float]:
+        if shot is None:
+            return 0, 0.0
+        tags = set(shot.taste_tags)
+        finer_tags = {"sour", "weak", "thin", "too_fast"}
+        coarser_tags = {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"}
+
+        finer_strength = 0.0
+        coarser_strength = 0.0
+        if tags & finer_tags:
+            finer_strength = 0.75
+        if tags & coarser_tags:
+            coarser_strength = 0.75
+        if "too_fast" in tags:
+            finer_strength = max(finer_strength, 1.0)
+        if "too_slow" in tags:
+            coarser_strength = max(coarser_strength, 1.0)
+
+        if finer_strength > coarser_strength:
+            return 1, finer_strength
+        if coarser_strength > finer_strength:
+            return -1, coarser_strength
+        return 0, 0.0
+
+    def _near_good_signal(self, shot: ShotRecord | None) -> bool:
+        if shot is None:
+            return False
+        if self._diagnostic_signal(shot)[1] >= 0.35:
+            return False
+        tags = set(shot.taste_tags)
+        if tags & {"balanced", "sweet", "good_body"}:
+            return True
+        if shot.human_rating is not None and shot.human_rating >= 4:
+            return True
+        return bool(shot.reward is not None and shot.reward >= 0.72)
+
+    def _prior_strength(self, prior_points: list[PriorPoint]) -> float:
+        strength = 0.0
+        for point in prior_points:
+            if point.confidence <= 0 or point.observation_noise <= 0:
+                continue
+            source_scale = self._prior_source_scale(point.source)
+            point_strength = min(1.0, point.confidence * source_scale / point.observation_noise)
+            strength = max(strength, point_strength)
+        return strength
 
     def _yield_offsets(self, radius_yield_g: float) -> list[float]:
         values: list[float] = []
@@ -242,7 +332,12 @@ class ConservativeBOOptimizer:
         distance_from_current += abs(candidate.dose_g - context.current_recipe.dose_g) / max(dose_radius_g, 0.5)
 
         exploration_bonus = 0.05 * min(min_distance if math.isfinite(min_distance) else 0.0, 1.0)
-        distance_penalty = 0.025 * distance_from_current
+        evidence_strength = max(
+            self._diagnostic_signal(shots[-1] if shots else None)[1],
+            self._prior_strength(prior_points),
+        )
+        distance_penalty_rate = 0.03 - 0.015 * evidence_strength
+        distance_penalty = distance_penalty_rate * distance_from_current
         oscillation_penalty = self._oscillation_penalty(candidate, context)
         return predicted_reward + exploration_bonus - distance_penalty - oscillation_penalty
 
