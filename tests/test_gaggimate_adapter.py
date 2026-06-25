@@ -61,6 +61,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "beverage_out_g": 39.8,
                 "shot_time_s": 31.2,
                 "bean_context_id": "profile_1",
+                "bean_context_name": "Lavazza Super Crema",
                 "grinder_context_id": "grinder_1",
                 "grinder_calibration_mode": "absolute_display_calibrated",
                 "microns_per_step": 12.5,
@@ -106,6 +107,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.dose_in_g, 18.5)
         self.assertEqual(event.target_yield_g, 40.0)
         self.assertEqual(event.beverage_out_g, 39.8)
+        self.assertEqual(event.bean_context_name, "Lavazza Super Crema")
         self.assertEqual(event.grinder_context_id, "grinder_1")
         self.assertEqual(event.grinder_calibration_mode.value, "absolute_display_calibrated")
         self.assertEqual(event.grinder_step_direction.value, "higher_is_coarser")

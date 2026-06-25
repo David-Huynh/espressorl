@@ -25,6 +25,7 @@ from espresso_rl.domain.models import (
     UploadQueueItem,
     UploadQueueStatus,
 )
+from espresso_rl.domain.optimization import OptimizationContext
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 
 
@@ -53,6 +54,19 @@ class MemoryShotRepository:
             and row.machine_id == machine_id
             and row.bean_context_id == bean_context_id
             and row.grinder_context_id == grinder_context_id
+        ]
+        return sorted(rows, key=lambda row: row.timestamp)[-limit:]
+
+    def list_machine_shots(
+        self,
+        install_id: str,
+        machine_id: str,
+        limit: int = 500,
+    ) -> list[ShotRecord]:
+        rows = [
+            row
+            for row in self.rows.values()
+            if row.install_id == install_id and row.machine_id == machine_id
         ]
         return sorted(rows, key=lambda row: row.timestamp)[-limit:]
 
@@ -234,6 +248,38 @@ class RecordingUploadQueue:
         ]
 
 
+class CapturingOptimizer:
+    def __init__(self) -> None:
+        self.contexts: list[OptimizationContext] = []
+
+    def recommend(self, context: OptimizationContext) -> Recommendation:
+        self.contexts.append(context)
+        current = context.current_recipe
+        index = len(self.contexts)
+        return Recommendation(
+            recommendation_id=f"rec_capture_{index}",
+            created_at=context.now,
+            updated_at=context.now,
+            expires_at=context.now + 3600,
+            install_id=context.install_id,
+            machine_id=context.machine_id,
+            bean_context_id=context.bean_context_id,
+            grinder_context_id=context.grinder_context_id,
+            grind_delta_steps_from_current=0,
+            grind_delta_um_from_current=0.0,
+            projected_relative_step_from_reference=current.relative_grind_steps_from_reference,
+            projected_relative_grind_um_from_reference=current.relative_grind_um_from_reference,
+            next_dose_g=current.dose_g,
+            target_yield_g=current.target_yield_g,
+            target_ratio=current.target_ratio or current.target_yield_g / current.dose_g,
+            mode=RecommendationMode.ZERO_IMMEDIATE_BO,
+            confidence=0.5,
+            reason="captured",
+            status=RecommendationStatus.PENDING,
+            source_shot_id=context.shots[-1].shot_id if context.shots else None,
+        )
+
+
 def idle_event(timestamp: int, **overrides) -> MachineStateEvent:
     base = {
         "install_id": "install_1",
@@ -337,6 +383,88 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertLessEqual(abs(feedback.recommendation.target_yield_g - 36.0), 4.0)
         self.assertTrue(feedback.shot.feedback_recorded)
         self.assertLess(shots.get("shot_1").reward_confidence, 1.0)  # type: ignore[union-attr]
+
+    def test_previous_bag_same_bean_history_becomes_optimizer_prior_points(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(shots, recs, optimizer, clock=lambda: 10)
+
+        ingest_and_feedback(
+            service,
+            shot_event(
+                "old_bag_good",
+                1,
+                bean_context_id="bean_lavazza_super_crema_100_001",
+                grinder_context_id="grinder_jx_pro",
+                relative_grind_steps_from_reference=40,
+                target_yield_g=38.0,
+            ),
+            rating=5,
+        )
+        ingest_and_feedback(
+            service,
+            shot_event(
+                "current_bag_first",
+                10,
+                bean_context_id="bean_lavazza_super_crema_200_001",
+                bean_context_name="Lavazza Super Crema",
+                grinder_context_id="grinder_jx_pro",
+                relative_grind_steps_from_reference=42,
+                target_yield_g=36.0,
+            ),
+            rating=3,
+        )
+
+        context = optimizer.contexts[-1]
+        self.assertEqual([shot.shot_id for shot in context.shots], ["current_bag_first"])
+        self.assertEqual(len(context.prior_points), 1)
+        point = context.prior_points[0]
+        self.assertEqual(point.source, "local_bean_history")
+        self.assertEqual(point.grind_delta_um_from_current, -25.0)
+        self.assertEqual(point.target_yield_g, 38.0)
+
+    def test_previous_bag_priors_are_bean_and_grinder_isolated(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(shots, recs, optimizer, clock=lambda: 10)
+
+        ingest_and_feedback(
+            service,
+            shot_event(
+                "same_bean_other_grinder",
+                1,
+                bean_context_id="bean_lavazza_100_001",
+                bean_context_name="Lavazza",
+                grinder_context_id="grinder_other",
+            ),
+            rating=5,
+        )
+        ingest_and_feedback(
+            service,
+            shot_event(
+                "other_bean_same_grinder",
+                3,
+                bean_context_id="bean_onyx_100_001",
+                bean_context_name="Onyx",
+                grinder_context_id="grinder_jx_pro",
+            ),
+            rating=5,
+        )
+        ingest_and_feedback(
+            service,
+            shot_event(
+                "current_bag_first",
+                10,
+                bean_context_id="bean_lavazza_200_001",
+                bean_context_name="Lavazza",
+                grinder_context_id="grinder_jx_pro",
+            ),
+            rating=3,
+        )
+
+        self.assertEqual(list(optimizer.contexts[-1].prior_points), [])
 
     def test_skipped_feedback_is_complete_and_generates_from_the_latest_shot(self) -> None:
         shots = MemoryShotRepository()

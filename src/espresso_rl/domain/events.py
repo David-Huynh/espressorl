@@ -111,6 +111,7 @@ class ShotProfileEvent:
     beverage_out_g: float | None = None
     shot_time_s: float | None = None
     bean_context_id: str | None = None
+    bean_context_name: str | None = None
     grinder_context_id: str | None = None
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
@@ -191,6 +192,8 @@ class ShotProfileEvent:
             object.__setattr__(self, "beverage_out_g", _number(self.beverage_out_g, "beverage_out_g"))
         if self.shot_time_s is not None:
             object.__setattr__(self, "shot_time_s", _number(self.shot_time_s, "shot_time_s"))
+        object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
+        object.__setattr__(self, "bean_context_name", _optional_string(self.bean_context_name, "bean_context_name"))
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
         if self.optimization_weight is not None:
             object.__setattr__(self, "optimization_weight", _number(self.optimization_weight, "optimization_weight"))
@@ -440,6 +443,7 @@ class MachineStateEvent:
     state: MachineState
     schema_version: int = 1
     bean_context_id: str | None = None
+    bean_context_name: str | None = None
     grinder_context_id: str | None = None
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
@@ -458,6 +462,8 @@ class MachineStateEvent:
         if self.schema_version != 1:
             raise ValueError("unsupported machine state schema_version")
         object.__setattr__(self, "state", MachineState(self.state))
+        object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
+        object.__setattr__(self, "bean_context_name", _optional_string(self.bean_context_name, "bean_context_name"))
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
         object.__setattr__(
             self,

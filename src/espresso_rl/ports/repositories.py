@@ -22,6 +22,14 @@ class ShotRepository(Protocol):
     ) -> list[ShotRecord]:
         ...
 
+    def list_machine_shots(
+        self,
+        install_id: str,
+        machine_id: str,
+        limit: int = 500,
+    ) -> list[ShotRecord]:
+        ...
+
 
 class RecommendationRepository(Protocol):
     def upsert(self, recommendation: Recommendation) -> None:

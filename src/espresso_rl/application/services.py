@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -28,7 +29,7 @@ from espresso_rl.domain.models import (
     ShotType,
     now_ts,
 )
-from espresso_rl.domain.optimization import OptimizationContext
+from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
 from espresso_rl.domain.profile import profile_hash, profile_mse, profile_score, resample_profile_with_quality
 from espresso_rl.domain.reward import compute_reward
 from espresso_rl.domain.staleness import check_recommendation_staleness
@@ -43,6 +44,11 @@ from espresso_rl.ports.repositories import (
     ShotRepository,
     UploadQueueRepository,
 )
+
+
+LOCAL_BEAN_HISTORY_PRIOR_SOURCE = "local_bean_history"
+LOCAL_BEAN_HISTORY_LOOKBACK = 500
+MAX_LOCAL_BEAN_HISTORY_PRIORS = 10
 
 
 @dataclass(frozen=True)
@@ -92,8 +98,8 @@ def _recommendation_signature(recommendation: Recommendation) -> tuple:
     )
 
 
-def _has_optimizer_observation(shots: list[ShotRecord]) -> bool:
-    return any(
+def _is_optimizer_observation(shot: ShotRecord) -> bool:
+    return (
         shot.shot_type == ShotType.ESPRESSO
         and not shot.exclude_from_local_optimization
         and shot.optimization_weight > 0.0
@@ -102,8 +108,108 @@ def _has_optimizer_observation(shots: list[ShotRecord]) -> bool:
         and shot.recommendation_decision
         not in {RecommendationDecision.IGNORED, RecommendationDecision.DISMISSED}
         and shot.recommendation_followed != FollowThroughState.NOT_FOLLOWED
-        for shot in shots
     )
+
+
+def _has_optimizer_observation(shots: list[ShotRecord]) -> bool:
+    return any(_is_optimizer_observation(shot) for shot in shots)
+
+
+def _normal_context_key(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _bean_context_key(bean_context_name: str | None, bean_context_id: str | None) -> str:
+    key = _normal_context_key(bean_context_name)
+    if key:
+        return key
+    if not bean_context_id:
+        return ""
+    context_id = bean_context_id.strip()
+    if context_id.lower().startswith("bean_"):
+        parts = [part for part in context_id[5:].split("_") if part]
+        while parts and parts[-1].isdigit():
+            parts.pop()
+        if parts:
+            return _normal_context_key(" ".join(parts))
+    return _normal_context_key(context_id)
+
+
+def _prior_confidence_from_shot(shot: ShotRecord) -> float:
+    confidence = max(0.0, min(1.0, shot.reward_confidence)) * max(0.0, min(1.0, shot.optimization_weight))
+    if shot.human_rating is not None:
+        confidence += 0.15
+    if shot.recommendation_followed == FollowThroughState.PARTIALLY_FOLLOWED:
+        confidence *= 0.8
+    return max(0.0, min(0.85, confidence))
+
+
+def _same_bean_previous_bag_prior_points(
+    *,
+    current_recipe: Recipe,
+    current_bean_context_id: str | None,
+    current_bean_context_name: str | None,
+    grinder_context_id: str | None,
+    history: list[ShotRecord],
+) -> list[PriorPoint]:
+    if not current_bean_context_id:
+        return []
+    current_key = _bean_context_key(current_bean_context_name, current_bean_context_id)
+    if not current_key:
+        return []
+
+    candidates: list[ShotRecord] = []
+    for shot in history:
+        if shot.bean_context_id == current_bean_context_id:
+            continue
+        if shot.grinder_context_id != grinder_context_id:
+            continue
+        if shot.relative_grind_steps_from_reference is None:
+            continue
+        if not _is_optimizer_observation(shot):
+            continue
+        if _bean_context_key(shot.bean_context_name, shot.bean_context_id) != current_key:
+            continue
+        candidates.append(shot)
+
+    candidates = sorted(
+        candidates,
+        key=lambda shot: (
+            (shot.reward or 0.0) * _prior_confidence_from_shot(shot),
+            shot.timestamp,
+        ),
+        reverse=True,
+    )[:MAX_LOCAL_BEAN_HISTORY_PRIORS]
+
+    points: list[PriorPoint] = []
+    for shot in candidates:
+        confidence = _prior_confidence_from_shot(shot)
+        if confidence <= 0:
+            continue
+        target_ratio = shot.target_ratio or shot.target_yield_g / shot.dose_in_g
+        observation_noise = 0.25 if shot.human_rating is not None else 0.4
+        if shot.recommendation_followed == FollowThroughState.PARTIALLY_FOLLOWED:
+            observation_noise = max(observation_noise, 0.45)
+        points.append(
+            PriorPoint(
+                grind_delta_um_from_current=(
+                    shot.relative_grind_steps_from_reference
+                    - current_recipe.relative_grind_steps_from_reference
+                )
+                * current_recipe.microns_per_step,
+                dose_g=shot.dose_in_g,
+                target_yield_g=shot.target_yield_g,
+                target_ratio=target_ratio,
+                predicted_reward=max(0.0, min(1.0, shot.reward or 0.0)),
+                confidence=confidence,
+                observation_noise=observation_noise,
+                source=LOCAL_BEAN_HISTORY_PRIOR_SOURCE,
+                reason="Same bean previous bag local observation.",
+            )
+        )
+    return points
 
 
 class EspressoRLService:
@@ -157,6 +263,7 @@ class EspressoRLService:
             beverage_out_g=event.beverage_out_g,
             shot_time_s=event.shot_time_s,
             bean_context_id=event.bean_context_id,
+            bean_context_name=event.bean_context_name,
             grinder_context_id=event.grinder_context_id,
             grinder_calibration_mode=event.grinder_calibration_mode,
             grinder_step_direction=event.grinder_step_direction,
@@ -231,6 +338,7 @@ class EspressoRLService:
             install_id=shot.install_id,
             machine_id=shot.machine_id,
             bean_context_id=shot.bean_context_id,
+            bean_context_name=shot.bean_context_name,
             grinder_context_id=shot.grinder_context_id,
             current_recipe=shot.to_recipe(),
             now=now,
@@ -305,6 +413,7 @@ class EspressoRLService:
             install_id=shot.install_id,
             machine_id=shot.machine_id,
             bean_context_id=shot.bean_context_id,
+            bean_context_name=shot.bean_context_name,
             grinder_context_id=shot.grinder_context_id,
             current_recipe=shot.to_recipe(),
             now=now,
@@ -509,6 +618,7 @@ class EspressoRLService:
             install_id=event.install_id,
             machine_id=event.machine_id,
             bean_context_id=event.bean_context_id,
+            bean_context_name=event.bean_context_name,
             grinder_context_id=event.grinder_context_id,
             current_recipe=current_recipe,
             now=now,
@@ -526,6 +636,7 @@ class EspressoRLService:
         machine_id: str,
         bean_context_id: str | None,
         current_recipe: Recipe,
+        bean_context_name: str | None = None,
         grinder_context_id: str | None = None,
         now: int | None = None,
         grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED,
@@ -543,6 +654,10 @@ class EspressoRLService:
             limit=200,
         )
         machine_adapter = recent[-1].machine_adapter if recent else None
+        current_bean_context_name = bean_context_name or next(
+            (shot.bean_context_name for shot in reversed(recent) if shot.bean_context_name),
+            None,
+        )
         last_recommendation = self._recommendations.get_current(
             install_id=install_id,
             machine_id=machine_id,
@@ -567,8 +682,24 @@ class EspressoRLService:
             last_recommendation=last_recommendation,
             grinder_context_id=grinder_context_id,
         )
-        if self._prior_provider is not None:
-            prior_points = self._prior_provider.get_prior_points(context)
+        prior_points: list[PriorPoint] = []
+        if _has_optimizer_observation(recent):
+            prior_points.extend(
+                _same_bean_previous_bag_prior_points(
+                    current_recipe=current_recipe,
+                    current_bean_context_id=bean_context_id,
+                    current_bean_context_name=current_bean_context_name,
+                    grinder_context_id=grinder_context_id,
+                    history=self._shots.list_machine_shots(
+                        install_id=install_id,
+                        machine_id=machine_id,
+                        limit=LOCAL_BEAN_HISTORY_LOOKBACK,
+                    ),
+                )
+            )
+            if self._prior_provider is not None:
+                prior_points.extend(self._prior_provider.get_prior_points(context))
+        if prior_points:
             context = OptimizationContext(
                 install_id=context.install_id,
                 machine_id=context.machine_id,

@@ -122,7 +122,9 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 recs = SQLiteRecommendationRepository(store)
                 service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
-                result = service.ingest_shot_profile(shot_event())
+                result = service.ingest_shot_profile(
+                    shot_event(bean_context_id="bean_lavazza_100_001", bean_context_name="Lavazza")
+                )
                 feedback = service.record_feedback(
                     ShotFeedbackEvent(
                         shot_id="shot_1",
@@ -146,6 +148,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertIsNotNone(stored_shot)
                 self.assertIsNotNone(stored_rec)
                 self.assertEqual(stored_shot.profile.shape, (5, 100))  # type: ignore[union-attr]
+                self.assertEqual(stored_shot.bean_context_name, "Lavazza")  # type: ignore[union-attr]
                 self.assertEqual(stored_shot.weight_source, "hardware_scale")  # type: ignore[union-attr]
                 self.assertEqual(stored_shot.profile_label, "Cremina lever machine")  # type: ignore[union-attr]
                 self.assertEqual(stored_shot.final_phase_name, "ramp")  # type: ignore[union-attr]

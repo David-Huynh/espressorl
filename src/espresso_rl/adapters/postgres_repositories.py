@@ -48,6 +48,7 @@ class PostgresStore:
             if statement.strip():
                 self.conn.execute(statement)
         for column, definition in {
+            "bean_context_name": "TEXT",
             "grinder_context_id": "TEXT",
             "shot_type": "TEXT NOT NULL DEFAULT 'espresso'",
             "exclude_from_local_optimization": "BOOLEAN NOT NULL DEFAULT FALSE",
@@ -167,6 +168,23 @@ class PostgresShotRepository:
             LIMIT %s
             """,
             tuple(params),
+        ).fetchall()
+        return list(reversed([_row_to_shot(row) for row in rows]))
+
+    def list_machine_shots(
+        self,
+        install_id: str,
+        machine_id: str,
+        limit: int = 500,
+    ) -> list[ShotRecord]:
+        rows = self._store.conn.execute(
+            """
+            SELECT * FROM shots
+            WHERE install_id=%s AND machine_id=%s
+            ORDER BY timestamp DESC
+            LIMIT %s
+            """,
+            (install_id, machine_id, limit),
         ).fetchall()
         return list(reversed([_row_to_shot(row) for row in rows]))
 

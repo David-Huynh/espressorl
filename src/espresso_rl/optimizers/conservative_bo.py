@@ -39,7 +39,7 @@ class ConservativeBOOptimizer:
             source_shot_id = None
         else:
             radius_steps, radius_yield_g, dose_radius_g, mode = self._trust_region(shots)
-            if prior_points and any(point.source != "local_history" for point in prior_points) and len(shots) <= 4:
+            if prior_points and len(shots) <= 4:
                 mode = RecommendationMode.WARM_STARTED_BO
             center = self._center_recipe(shots)
             recipe = self._choose_candidate(
@@ -53,7 +53,7 @@ class ConservativeBOOptimizer:
             )
             reason = self._reason(shots, recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference, recipe.target_yield_g - current.target_yield_g)
             if mode == RecommendationMode.WARM_STARTED_BO:
-                reason = "Weak warm-start prior plus local shot data; staying inside the trust region."
+                reason = self._warm_start_reason(prior_points)
             confidence = self._confidence(shots)
             if prior_points and mode == RecommendationMode.WARM_STARTED_BO:
                 confidence = min(0.65, confidence + 0.05)
@@ -301,11 +301,10 @@ class ConservativeBOOptimizer:
             dose_d = abs(candidate.dose_g - point.dose_g) / max(dose_radius_g, 0.5)
             yield_d = abs(candidate.target_yield_g - point.target_yield_g) / max(radius_yield_g, 1.0)
             distance = math.sqrt(grind_d * grind_d + dose_d * dose_d + yield_d * yield_d)
-            source_scale = 0.6 if point.source == "local_history" else 0.35
             weight = (
                 min(point.confidence, 0.8)
                 * prior_decay
-                * source_scale
+                * self._prior_source_scale(point.source)
                 / (point.observation_noise + 0.25 + distance)
             )
             prior_weighted_reward += weight * point.predicted_reward
@@ -342,6 +341,18 @@ class ConservativeBOOptimizer:
                 continue
             points.append(point)
         return points[:10]
+
+    def _warm_start_reason(self, prior_points: list[PriorPoint]) -> str:
+        if any(point.source == "local_bean_history" for point in prior_points):
+            return "Same-bean previous bag history plus local shot data; staying inside the trust region."
+        return "Warm-start prior plus local shot data; staying inside the trust region."
+
+    def _prior_source_scale(self, source: str) -> float:
+        if source == "local_bean_history":
+            return 0.75
+        if source == "local_history":
+            return 0.6
+        return 0.35
 
     def _distance(
         self,

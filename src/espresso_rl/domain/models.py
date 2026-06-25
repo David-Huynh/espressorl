@@ -291,6 +291,7 @@ class ShotRecord:
     target_ratio: float | None = None
     shot_time_s: float | None = None
     bean_context_id: str | None = None
+    bean_context_name: str | None = None
     grinder_context_id: str | None = None
     recommendation_id: str | None = None
     raw_profile_available: bool = True

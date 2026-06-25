@@ -48,6 +48,7 @@ class SQLiteStore:
                 machine_id TEXT NOT NULL,
                 machine_adapter TEXT NOT NULL,
                 bean_context_id TEXT,
+                bean_context_name TEXT,
                 grinder_context_id TEXT,
                 profile_resampled_blob BLOB NOT NULL,
                 raw_profile_available INTEGER NOT NULL,
@@ -196,6 +197,7 @@ class SQLiteStore:
         self._ensure_column("recommendations", "absolute_reference_step", "REAL")
         self._ensure_column("recommendations", "projected_absolute_step", "REAL")
         self._ensure_column("shots", "grinder_context_id", "TEXT")
+        self._ensure_column("shots", "bean_context_name", "TEXT")
         self._ensure_column("shots", "grinder_calibration_mode", "TEXT NOT NULL DEFAULT 'relative_calibrated'")
         self._ensure_column("shots", "grinder_step_direction", "TEXT NOT NULL DEFAULT 'higher_is_finer'")
         self._ensure_column("shots", "grinder_reference_label", "TEXT NOT NULL DEFAULT 'reference'")
@@ -286,7 +288,7 @@ class SQLiteShotRepository:
             """
             INSERT OR REPLACE INTO shots (
                 shot_id, timestamp, install_id, machine_id, machine_adapter,
-                bean_context_id, grinder_context_id, profile_resampled_blob, raw_profile_available,
+                bean_context_id, bean_context_name, grinder_context_id, profile_resampled_blob, raw_profile_available,
                 raw_profile_hash, relative_grind_steps_from_reference, relative_grind_um_from_reference, microns_per_step,
                 dose_in_g, beverage_out_g, brew_ratio, target_yield_g,
                 target_ratio, shot_time_s, recommendation_id,
@@ -315,7 +317,7 @@ class SQLiteShotRepository:
                 created_at, updated_at
             ) VALUES (
                 :shot_id, :timestamp, :install_id, :machine_id, :machine_adapter,
-                :bean_context_id, :grinder_context_id, :profile_resampled_blob, :raw_profile_available,
+                :bean_context_id, :bean_context_name, :grinder_context_id, :profile_resampled_blob, :raw_profile_available,
                 :raw_profile_hash, :relative_grind_steps_from_reference, :relative_grind_um_from_reference, :microns_per_step,
                 :dose_in_g, :beverage_out_g, :brew_ratio, :target_yield_g,
                 :target_ratio, :shot_time_s, :recommendation_id,
@@ -372,6 +374,23 @@ class SQLiteShotRepository:
             LIMIT ?
             """,
             tuple(params),
+        ).fetchall()
+        return list(reversed([_row_to_shot(row) for row in rows]))
+
+    def list_machine_shots(
+        self,
+        install_id: str,
+        machine_id: str,
+        limit: int = 500,
+    ) -> list[ShotRecord]:
+        rows = self._store.conn.execute(
+            """
+            SELECT * FROM shots
+            WHERE install_id=? AND machine_id=?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (install_id, machine_id, limit),
         ).fetchall()
         return list(reversed([_row_to_shot(row) for row in rows]))
 
@@ -982,6 +1001,7 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "machine_id": shot.machine_id,
         "machine_adapter": shot.machine_adapter,
         "bean_context_id": shot.bean_context_id,
+        "bean_context_name": shot.bean_context_name,
         "grinder_context_id": shot.grinder_context_id,
         "profile_resampled_blob": shot.profile.astype(PROFILE_DTYPE).tobytes(),
         "raw_profile_available": bool(shot.raw_profile_available),
@@ -1064,6 +1084,7 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         machine_id=row["machine_id"],
         machine_adapter=row["machine_adapter"],
         bean_context_id=row["bean_context_id"],
+        bean_context_name=row["bean_context_name"],
         grinder_context_id=row["grinder_context_id"],
         profile=profile.copy(),
         raw_profile_available=bool(row["raw_profile_available"]),

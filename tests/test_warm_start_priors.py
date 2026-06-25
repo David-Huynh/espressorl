@@ -86,6 +86,41 @@ class WarmStartPriorTests(unittest.TestCase):
         self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
         self.assertLessEqual(abs(recommendation.target_yield_g - 36.0), 4.0)
 
+    def test_same_bean_history_prior_uses_generic_warm_started_mode(self) -> None:
+        current = Recipe(
+            relative_grind_steps_from_reference=42,
+            microns_per_step=12.5,
+            dose_g=18.0,
+            target_yield_g=36.0,
+        )
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_lavazza_2",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[shot_record("shot_1", timestamp=1, reward=0.55, rating=3)],
+            safety_bounds=SafetyBounds(),
+            now=100,
+            prior_points=[
+                PriorPoint(
+                    grind_delta_um_from_current=-25.0,
+                    dose_g=18.0,
+                    target_yield_g=38.0,
+                    target_ratio=38.0 / 18.0,
+                    predicted_reward=0.95,
+                    confidence=0.85,
+                    observation_noise=0.25,
+                    source="local_bean_history",
+                )
+            ],
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertEqual(recommendation.mode, RecommendationMode.WARM_STARTED_BO)
+        self.assertIn("Same-bean previous bag history", recommendation.reason)
+
     def test_local_data_disables_external_priors_after_sparse_startup(self) -> None:
         current = Recipe(
             relative_grind_steps_from_reference=42,

@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS shots (
     machine_id TEXT NOT NULL,
     machine_adapter TEXT NOT NULL,
     bean_context_id TEXT,
+    bean_context_name TEXT,
     grinder_context_id TEXT,
     profile_resampled_blob BYTEA NOT NULL,
     raw_profile_available BOOLEAN NOT NULL,
