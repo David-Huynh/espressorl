@@ -208,7 +208,7 @@ class CommunityPriorTests(unittest.TestCase):
             shot_time_s=38.0,
             profile_peak_pressure=7.0,
         )
-        different["recommended_grind_delta_um"] = 25.0
+        different["recommended_grind_delta_um_from_current"] = 25.0
         different["recommended_target_yield_g"] = different["target_yield_g"] + 2.0
 
         self.assertNotEqual(

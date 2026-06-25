@@ -51,7 +51,7 @@ class ConservativeBOOptimizer:
                 radius_yield_g=radius_yield_g,
                 dose_radius_g=dose_radius_g,
             )
-            reason = self._reason(shots, recipe.grind_steps - current.grind_steps, recipe.target_yield_g - current.target_yield_g)
+            reason = self._reason(shots, recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference, recipe.target_yield_g - current.target_yield_g)
             if mode == RecommendationMode.WARM_STARTED_BO:
                 reason = "Weak warm-start prior plus local shot data; staying inside the trust region."
             confidence = self._confidence(shots)
@@ -68,10 +68,10 @@ class ConservativeBOOptimizer:
             machine_id=context.machine_id,
             bean_context_id=context.bean_context_id,
             grinder_context_id=context.grinder_context_id,
-            grind_delta_steps=round(recipe.grind_steps - current.grind_steps),
-            grind_delta_um=(recipe.grind_steps - current.grind_steps) * current.grinder_step_size_um,
-            next_grind_steps=recipe.grind_steps,
-            next_grind_um=recipe.grind_um,
+            grind_delta_steps_from_current=round(recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference),
+            grind_delta_um_from_current=(recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference) * current.microns_per_step,
+            projected_relative_step_from_reference=recipe.relative_grind_steps_from_reference,
+            projected_relative_grind_um_from_reference=recipe.relative_grind_um_from_reference,
             next_dose_g=recipe.dose_g,
             target_yield_g=recipe.target_yield_g,
             target_ratio=recipe.target_ratio or recipe.target_yield_g / recipe.dose_g,
@@ -122,13 +122,13 @@ class ConservativeBOOptimizer:
             grind_delta, yield_delta = self._single_point_probe(shots[0])
             return clamp_candidate_recipe(
                 current=current,
-                candidate_grind_steps=current.grind_steps + grind_delta,
+                candidate_relative_grind_steps_from_reference=current.relative_grind_steps_from_reference + grind_delta,
                 candidate_dose_g=current.dose_g,
                 candidate_target_yield_g=current.target_yield_g + yield_delta,
                 bounds=context.safety_bounds,
             )
 
-        center_grind = center.grind_steps if center.grind_steps is not None else current.grind_steps
+        center_grind = center.relative_grind_steps_from_reference if center.relative_grind_steps_from_reference is not None else current.relative_grind_steps_from_reference
         center_dose = center.dose_in_g
         center_yield = center.target_yield_g
         dose_offsets = [0.0] if dose_radius_g == 0 else [-dose_radius_g, 0.0, dose_radius_g]
@@ -141,7 +141,7 @@ class ConservativeBOOptimizer:
                 for yield_offset in yield_offsets:
                     candidate = clamp_candidate_recipe(
                         current=current,
-                        candidate_grind_steps=center_grind + step_offset,
+                        candidate_relative_grind_steps_from_reference=center_grind + step_offset,
                         candidate_dose_g=center_dose + dose_offset,
                         candidate_target_yield_g=center_yield + yield_offset,
                         bounds=context.safety_bounds,
@@ -209,7 +209,7 @@ class ConservativeBOOptimizer:
         weight_sum = 0.0
         min_distance = math.inf
         for shot in eligible:
-            if shot.grind_steps is None:
+            if shot.relative_grind_steps_from_reference is None:
                 continue
             distance = self._distance(candidate, shot, radius_steps, radius_yield_g, dose_radius_g)
             min_distance = min(min_distance, distance)
@@ -237,7 +237,7 @@ class ConservativeBOOptimizer:
             dose_radius_g=dose_radius_g,
         )
 
-        distance_from_current = abs(candidate.grind_steps - context.current_recipe.grind_steps) / max(radius_steps, 1)
+        distance_from_current = abs(candidate.relative_grind_steps_from_reference - context.current_recipe.relative_grind_steps_from_reference) / max(radius_steps, 1)
         distance_from_current += abs(candidate.target_yield_g - context.current_recipe.target_yield_g) / max(radius_yield_g, 1.0)
         distance_from_current += abs(candidate.dose_g - context.current_recipe.dose_g) / max(dose_radius_g, 0.5)
 
@@ -258,8 +258,8 @@ class ConservativeBOOptimizer:
         if not tags:
             return 0.0
 
-        shot_grind = shot.grind_steps if shot.grind_steps is not None else candidate.grind_steps
-        grind_delta = (candidate.grind_steps - shot_grind) / max(radius_steps, 1)
+        shot_grind = shot.relative_grind_steps_from_reference if shot.relative_grind_steps_from_reference is not None else candidate.relative_grind_steps_from_reference
+        grind_delta = (candidate.relative_grind_steps_from_reference - shot_grind) / max(radius_steps, 1)
         yield_delta = (candidate.target_yield_g - shot.target_yield_g) / max(radius_yield_g, 1.0)
         extraction_direction = max(-1.0, min(1.0, 0.65 * grind_delta + 0.35 * yield_delta))
 
@@ -293,11 +293,11 @@ class ConservativeBOOptimizer:
         prior_weighted_reward = 0.0
         prior_weight_sum = 0.0
         for point in prior_points:
-            prior_grind_steps = (
-                context.current_recipe.grind_steps
-                + point.grind_delta_um / context.current_recipe.grinder_step_size_um
+            prior_relative_grind_steps_from_reference = (
+                context.current_recipe.relative_grind_steps_from_reference
+                + point.grind_delta_um_from_current / context.current_recipe.microns_per_step
             )
-            grind_d = abs(candidate.grind_steps - prior_grind_steps) / max(radius_steps, 1)
+            grind_d = abs(candidate.relative_grind_steps_from_reference - prior_relative_grind_steps_from_reference) / max(radius_steps, 1)
             dose_d = abs(candidate.dose_g - point.dose_g) / max(dose_radius_g, 0.5)
             yield_d = abs(candidate.target_yield_g - point.target_yield_g) / max(radius_yield_g, 1.0)
             distance = math.sqrt(grind_d * grind_d + dose_d * dose_d + yield_d * yield_d)
@@ -351,8 +351,8 @@ class ConservativeBOOptimizer:
         radius_yield_g: float,
         dose_radius_g: float,
     ) -> float:
-        shot_grind = shot.grind_steps if shot.grind_steps is not None else candidate.grind_steps
-        grind_d = abs(candidate.grind_steps - shot_grind) / max(radius_steps, 1)
+        shot_grind = shot.relative_grind_steps_from_reference if shot.relative_grind_steps_from_reference is not None else candidate.relative_grind_steps_from_reference
+        grind_d = abs(candidate.relative_grind_steps_from_reference - shot_grind) / max(radius_steps, 1)
         dose_d = abs(candidate.dose_g - shot.dose_in_g) / max(dose_radius_g, 0.5)
         yield_d = abs(candidate.target_yield_g - shot.target_yield_g) / max(radius_yield_g, 1.0)
         return math.sqrt(grind_d * grind_d + dose_d * dose_d + yield_d * yield_d)
@@ -362,7 +362,7 @@ class ConservativeBOOptimizer:
         if last is None or last.status != RecommendationStatus.IGNORED:
             return False
         return (
-            abs(candidate.grind_steps - last.next_grind_steps) < 0.5
+            abs(candidate.relative_grind_steps_from_reference - last.projected_relative_step_from_reference) < 0.5
             and abs(candidate.dose_g - last.next_dose_g) < 0.05
             and abs(candidate.target_yield_g - last.target_yield_g) < 0.1
         )
@@ -371,21 +371,21 @@ class ConservativeBOOptimizer:
         last = context.last_recommendation
         if last is None:
             return 0.0
-        new_delta = candidate.grind_steps - context.current_recipe.grind_steps
-        if new_delta == 0 or last.grind_delta_steps == 0:
+        new_delta = candidate.relative_grind_steps_from_reference - context.current_recipe.relative_grind_steps_from_reference
+        if new_delta == 0 or last.grind_delta_steps_from_current == 0:
             return 0.0
-        if (new_delta > 0) != (last.grind_delta_steps > 0):
+        if (new_delta > 0) != (last.grind_delta_steps_from_current > 0):
             return 0.03
         return 0.0
 
-    def _reason(self, shots: list[ShotRecord], grind_delta_steps: float, yield_delta_g: float) -> str:
+    def _reason(self, shots: list[ShotRecord], grind_delta_steps_from_current: float, yield_delta_g: float) -> str:
         last = shots[-1]
         tags = set(last.taste_tags)
         if {"sour", "weak", "thin", "too_fast"} & tags:
             return "Last shot looked under-extracted; try a small finer/longer adjustment."
         if {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"} & tags:
             return "Last shot looked over-extracted or slow; try a small coarser/shorter adjustment."
-        if grind_delta_steps == 0 and abs(yield_delta_g) < 0.1:
+        if grind_delta_steps_from_current == 0 and abs(yield_delta_g) < 0.1:
             return "Hold near the best known recipe while more feedback is collected."
         return "Small trust-region BO step near the best known recipe."
 

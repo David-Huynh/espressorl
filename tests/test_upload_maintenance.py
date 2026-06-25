@@ -156,8 +156,21 @@ class UploadMaintenanceTests(unittest.TestCase):
         )
 
         self.assertFalse(result.ok)
-        self.assertIn("beverage_out_g out of range", result.errors)
-        self.assertIn("shot_time_s out of range", result.errors)
+        self.assertIn("shot_type must be espresso", result.errors)
+
+    def test_preflight_accepts_bad_espresso_as_useful_negative_signal(self) -> None:
+        result = validate_upload_payload_json(
+            payload(
+                shot_type="espresso",
+                beverage_out_g=1.0,
+                shot_time_s=3.0,
+                target_yield_g=38.0,
+                target_ratio=38.0 / 18.0,
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, [])
 
     def test_preflight_allows_invalid_flow_when_flow_target_is_inactive(self) -> None:
         profile = valid_profile()
@@ -212,122 +225,71 @@ class UploadMaintenanceTests(unittest.TestCase):
 
     def test_requeue_valid_rejected_uploads_leaves_invalid_rows_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            store = SQLiteStore(Path(tmp) / "espresso.db")
-            queue = SQLiteUploadQueueRepository(store)
-            queue.enqueue(queue_item("valid", payload(), local_record_id="shot_valid"))
-            queue.enqueue(
-                queue_item(
-                    "invalid",
-                    payload(shot_id="flush_1", beverage_out_g=1.0, shot_time_s=3.0),
-                    local_record_id="shot_invalid",
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                queue = SQLiteUploadQueueRepository(store)
+                queue.enqueue(queue_item("valid", payload(), local_record_id="shot_valid"))
+                queue.enqueue(
+                    queue_item(
+                        "invalid",
+                        payload(
+                            shot_id="flush_1",
+                            shot_type="utility_flush",
+                            beverage_out_g=1.0,
+                            shot_time_s=3.0,
+                        ),
+                        local_record_id="shot_invalid",
+                    )
                 )
-            )
-            service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
+                service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
 
-            result = service.requeue_valid_rejected(limit=10)
+                result = service.requeue_valid_rejected(limit=10)
 
-            self.assertEqual(result.inspected, 2)
-            self.assertEqual(result.requeued, 1)
-            self.assertEqual(result.skipped, 1)
-            statuses = {
-                row["upload_id"]: row["status"]
-                for row in store.conn.execute("SELECT upload_id, status FROM upload_queue").fetchall()
-            }
-            invalid = store.conn.execute(
-                "SELECT attempt_count, error_message, updated_at FROM upload_queue WHERE upload_id=?",
-                ("invalid",),
-            ).fetchone()
-            self.assertEqual(statuses["valid"], "pending")
-            self.assertEqual(statuses["invalid"], "rejected")
-            self.assertEqual(invalid["attempt_count"], 3)
-            self.assertEqual(invalid["updated_at"], 10)
-            self.assertIn("preflight failed", invalid["error_message"])
-            self.assertIn("beverage_out_g out of range", invalid["error_message"])
+                self.assertEqual(result.inspected, 2)
+                self.assertEqual(result.requeued, 1)
+                self.assertEqual(result.skipped, 1)
+                statuses = {
+                    row["upload_id"]: row["status"]
+                    for row in store.conn.execute("SELECT upload_id, status FROM upload_queue").fetchall()
+                }
+                invalid = store.conn.execute(
+                    "SELECT attempt_count, error_message, updated_at FROM upload_queue WHERE upload_id=?",
+                    ("invalid",),
+                ).fetchone()
+                self.assertEqual(statuses["valid"], "pending")
+                self.assertEqual(statuses["invalid"], "rejected")
+                self.assertEqual(invalid["attempt_count"], 3)
+                self.assertEqual(invalid["updated_at"], 10)
+                self.assertIn("preflight failed", invalid["error_message"])
+                self.assertIn("shot_type must be espresso", invalid["error_message"])
 
     def test_latest_rejected_summary_does_not_expose_payload_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            store = SQLiteStore(Path(tmp) / "espresso.db")
-            queue = SQLiteUploadQueueRepository(store)
-            queue.enqueue(queue_item("rejected", payload(), local_record_id="shot_1"))
-            service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                queue = SQLiteUploadQueueRepository(store)
+                queue.enqueue(queue_item("rejected", payload(), local_record_id="shot_1"))
+                service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
 
-            summary = service.latest_rejected()
+                summary = service.latest_rejected()
 
-            self.assertEqual(summary.upload_id, "rejected")  # type: ignore[union-attr]
-            self.assertEqual(summary.local_record_id, "shot_1")  # type: ignore[union-attr]
-            self.assertFalse(hasattr(summary, "payload_json"))
+                self.assertEqual(summary.upload_id, "rejected")  # type: ignore[union-attr]
+                self.assertEqual(summary.local_record_id, "shot_1")  # type: ignore[union-attr]
+                self.assertFalse(hasattr(summary, "payload_json"))
 
-    def test_purge_rejected_deletes_useless_shots_but_keeps_local_optimizer_data(self) -> None:
+    def test_purge_rejected_deletes_linked_local_shots_after_permanent_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            store = SQLiteStore(Path(tmp) / "espresso.db")
-            shots = SQLiteShotRepository(store)
-            queue = SQLiteUploadQueueRepository(store)
-            profile = np.zeros((5, 100), dtype=np.float32)
-            shots.upsert(
-                ShotRecord(
-                    shot_id="flush_1",
-                    timestamp=1,
-                    install_id="install_1",
-                    machine_id="machine_1",
-                    machine_adapter="gaggimate",
-                    profile=profile,
-                    grinder_step_size_um=12.5,
-                    dose_in_g=18.0,
-                    target_yield_g=36.0,
-                    shot_type=ShotType.UTILITY_FLUSH,
-                    exclude_from_local_optimization=True,
-                    created_at=1,
-                    updated_at=1,
-                )
-            )
-            shots.upsert(
-                ShotRecord(
-                    shot_id="espresso_1",
-                    timestamp=2,
-                    install_id="install_1",
-                    machine_id="machine_1",
-                    machine_adapter="gaggimate",
-                    profile=profile,
-                    grinder_step_size_um=12.5,
-                    dose_in_g=18.0,
-                    target_yield_g=36.0,
-                    shot_type=ShotType.ESPRESSO,
-                    exclude_from_local_optimization=False,
-                    optimization_weight=1.0,
-                    created_at=2,
-                    updated_at=2,
-                )
-            )
-            queue.enqueue(queue_item("flush_upload", payload(), local_record_id="flush_1"))
-            queue.enqueue(queue_item("espresso_upload", payload(), local_record_id="espresso_1"))
-            service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
-
-            result = service.purge_rejected(limit=10)
-
-            self.assertEqual(result.inspected, 2)
-            self.assertEqual(result.purged_uploads, 2)
-            self.assertEqual(result.purged_shots, 1)
-            self.assertEqual(result.kept_linked_records, 1)
-            self.assertIsNone(shots.get("flush_1"))
-            self.assertIsNotNone(shots.get("espresso_1"))
-            self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM upload_queue").fetchone()["count"], 0)
-
-    def test_purge_rejected_can_target_one_selected_local_record(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            store = SQLiteStore(Path(tmp) / "espresso.db")
-            shots = SQLiteShotRepository(store)
-            queue = SQLiteUploadQueueRepository(store)
-            profile = np.zeros((5, 100), dtype=np.float32)
-            for shot_id in ("flush_1", "flush_2"):
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                queue = SQLiteUploadQueueRepository(store)
+                profile = np.zeros((5, 100), dtype=np.float32)
                 shots.upsert(
                     ShotRecord(
-                        shot_id=shot_id,
+                        shot_id="flush_1",
                         timestamp=1,
                         install_id="install_1",
                         machine_id="machine_1",
                         machine_adapter="gaggimate",
                         profile=profile,
-                        grinder_step_size_um=12.5,
+                        microns_per_step=12.5,
                         dose_in_g=18.0,
                         target_yield_g=36.0,
                         shot_type=ShotType.UTILITY_FLUSH,
@@ -336,21 +298,77 @@ class UploadMaintenanceTests(unittest.TestCase):
                         updated_at=1,
                     )
                 )
-            queue.enqueue(queue_item("flush_1_upload", payload(), local_record_id="flush_1"))
-            queue.enqueue(queue_item("flush_2_upload", payload(), local_record_id="flush_2"))
-            service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
+                shots.upsert(
+                    ShotRecord(
+                        shot_id="espresso_1",
+                        timestamp=2,
+                        install_id="install_1",
+                        machine_id="machine_1",
+                        machine_adapter="gaggimate",
+                        profile=profile,
+                        microns_per_step=12.5,
+                        dose_in_g=18.0,
+                        target_yield_g=36.0,
+                        shot_type=ShotType.ESPRESSO,
+                        exclude_from_local_optimization=False,
+                        optimization_weight=1.0,
+                        created_at=2,
+                        updated_at=2,
+                    )
+                )
+                queue.enqueue(queue_item("flush_upload", payload(), local_record_id="flush_1"))
+                queue.enqueue(queue_item("espresso_upload", payload(), local_record_id="espresso_1"))
+                service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
 
-            result = service.purge_rejected(limit=10, local_record_id="flush_1")
+                result = service.purge_rejected(limit=10)
 
-            self.assertEqual(result.inspected, 1)
-            self.assertEqual(result.purged_uploads, 1)
-            self.assertEqual(result.purged_shots, 1)
-            self.assertIsNone(shots.get("flush_1"))
-            self.assertIsNotNone(shots.get("flush_2"))
-            self.assertEqual(
-                store.conn.execute("SELECT local_record_id FROM upload_queue").fetchone()["local_record_id"],
-                "flush_2",
-            )
+                self.assertEqual(result.inspected, 2)
+                self.assertEqual(result.purged_uploads, 2)
+                self.assertEqual(result.purged_shots, 2)
+                self.assertEqual(result.kept_linked_records, 0)
+                self.assertIsNone(shots.get("flush_1"))
+                self.assertIsNone(shots.get("espresso_1"))
+                self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM upload_queue").fetchone()["count"], 0)
+
+    def test_purge_rejected_can_target_one_selected_local_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                queue = SQLiteUploadQueueRepository(store)
+                profile = np.zeros((5, 100), dtype=np.float32)
+                for shot_id in ("flush_1", "flush_2"):
+                    shots.upsert(
+                        ShotRecord(
+                            shot_id=shot_id,
+                            timestamp=1,
+                            install_id="install_1",
+                            machine_id="machine_1",
+                            machine_adapter="gaggimate",
+                            profile=profile,
+                            microns_per_step=12.5,
+                            dose_in_g=18.0,
+                            target_yield_g=36.0,
+                            shot_type=ShotType.UTILITY_FLUSH,
+                            exclude_from_local_optimization=True,
+                            created_at=1,
+                            updated_at=1,
+                        )
+                    )
+                queue.enqueue(queue_item("flush_1_upload", payload(), local_record_id="flush_1"))
+                queue.enqueue(queue_item("flush_2_upload", payload(), local_record_id="flush_2"))
+                service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
+
+                result = service.purge_rejected(limit=10, local_record_id="flush_1")
+
+                self.assertEqual(result.inspected, 1)
+                self.assertEqual(result.purged_uploads, 1)
+                self.assertEqual(result.purged_shots, 1)
+                self.assertIsNone(shots.get("flush_1"))
+                self.assertIsNotNone(shots.get("flush_2"))
+                self.assertEqual(
+                    store.conn.execute("SELECT local_record_id FROM upload_queue").fetchone()["local_record_id"],
+                    "flush_2",
+                )
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from .models import Recipe, Recommendation, SafetyBounds, ShotRecord
 
 @dataclass(frozen=True)
 class PriorPoint:
-    grind_delta_um: float
+    grind_delta_um_from_current: float
     dose_g: float
     target_yield_g: float
     target_ratio: float

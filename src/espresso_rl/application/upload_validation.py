@@ -64,16 +64,30 @@ def mask_untrusted_profile_channels(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
+    _require_number_range(payload, "schema_version", 1, 1, errors)
     _require_string(payload, "shot_id", errors)
     _require_string(payload, "install_id", errors)
     _require_string(payload, "machine_id", errors)
     _optional_string(payload, "grinder_context_id", 120, errors)
     _require_number_range(payload, "timestamp", 0, 9_007_199_254_740_991, errors)
     _require_number_range(payload, "dose_in_g", 5, 30, errors)
-    _optional_number_range(payload, "beverage_out_g", 5, 100, errors)
+    _optional_number_range(payload, "beverage_out_g", 0, 120, errors)
     _require_number_range(payload, "target_yield_g", 5, 100, errors)
     _optional_number_range(payload, "target_ratio", 1.2, 3.5, errors)
-    _optional_number_range(payload, "shot_time_s", 5, 90, errors)
+    _optional_number_range(payload, "shot_time_s", 0, 180, errors)
+    _optional_enum(
+        payload,
+        "grinder_calibration_mode",
+        {"uncalibrated", "relative_calibrated", "absolute_display_calibrated"},
+        errors,
+    )
+    _optional_enum(payload, "step_direction", {"higher_is_finer", "higher_is_coarser"}, errors)
+    _optional_string(payload, "reference_label", 80, errors)
+    _optional_number_range(payload, "microns_per_step", 0.1, 100, errors)
+    _optional_number_range(payload, "relative_grind_steps_from_reference", -10_000, 10_000, errors)
+    _optional_number_range(payload, "relative_grind_um_from_reference", -1_000_000, 1_000_000, errors)
+    _optional_number_range(payload, "current_absolute_step", -10_000, 10_000, errors)
+    _optional_number_range(payload, "absolute_reference_step", -10_000, 10_000, errors)
     _optional_number_range(payload, "human_rating", 1, 5, errors)
     _optional_bool(payload, "feedback_recorded", errors)
     _optional_number_range(payload, "optimization_weight", 0, 1, errors)
@@ -117,16 +131,35 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
         {"espresso", "utility_flush", "cleaning", "calibration", "unknown"},
         errors,
     )
+    if payload.get("shot_type") is not None and payload.get("shot_type") != "espresso":
+        errors.append("non-espresso shot uploads are not trusted training shots")
+        errors.append("shot_type must be espresso")
     profile = payload.get("profile_resampled")
     if profile is not None:
         _validate_profile_resampled(profile, payload.get("beverage_out_g"), errors)
 
 
 def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) -> None:
+    _require_number_range(payload, "schema_version", 1, 1, errors)
     _require_string(payload, "recommendation_id", errors)
     _require_string(payload, "install_id", errors)
     _require_string(payload, "machine_id", errors)
     _optional_string(payload, "grinder_context_id", 120, errors)
+    _optional_enum(
+        payload,
+        "grinder_calibration_mode",
+        {"uncalibrated", "relative_calibrated", "absolute_display_calibrated"},
+        errors,
+    )
+    _optional_enum(payload, "step_direction", {"higher_is_finer", "higher_is_coarser"}, errors)
+    _optional_string(payload, "reference_label", 80, errors)
+    _optional_number_range(payload, "microns_per_step", 0.1, 100, errors)
+    _optional_number_range(payload, "grind_delta_steps_from_current", -1000, 1000, errors)
+    _optional_number_range(payload, "projected_relative_step_from_reference", -10_000, 10_000, errors)
+    _optional_number_range(payload, "projected_relative_grind_um_from_reference", -1_000_000, 1_000_000, errors)
+    _optional_number_range(payload, "current_absolute_step", -10_000, 10_000, errors)
+    _optional_number_range(payload, "absolute_reference_step", -10_000, 10_000, errors)
+    _optional_number_range(payload, "projected_absolute_step", -10_000, 10_000, errors)
     _require_number_range(payload, "next_dose_g", 5, 30, errors)
     _require_number_range(payload, "target_yield_g", 5, 100, errors)
     _require_number_range(payload, "target_ratio", 1.2, 3.5, errors)
@@ -138,7 +171,7 @@ def _validate_profile_resampled(profile: Any, beverage_out_g: Any, errors: list[
         (0, 15, "target_pressure"),
         (0, 20, "flow"),
         (0, 20, "target_flow"),
-        (-1, 100, "weight"),
+        (-1, 120, "weight"),
     ]
     if not isinstance(profile, list) or len(profile) != 5:
         errors.append("profile_resampled must have 5 channels")

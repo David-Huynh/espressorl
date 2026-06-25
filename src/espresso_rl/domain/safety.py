@@ -9,16 +9,16 @@ def clamp(value: float, low: float, high: float) -> float:
 
 def clamp_candidate_recipe(
     current: Recipe,
-    candidate_grind_steps: float,
+    candidate_relative_grind_steps_from_reference: float,
     candidate_dose_g: float,
     candidate_target_yield_g: float,
     bounds: SafetyBounds,
 ) -> Recipe:
-    max_step = bounds.max_grind_delta_steps
-    grind_steps = clamp(
-        candidate_grind_steps,
-        current.grind_steps - max_step,
-        current.grind_steps + max_step,
+    max_relative_delta_steps_from_current = bounds.max_grind_delta_steps_from_current
+    relative_grind_steps_from_reference = clamp(
+        candidate_relative_grind_steps_from_reference,
+        current.relative_grind_steps_from_reference - max_relative_delta_steps_from_current,
+        current.relative_grind_steps_from_reference + max_relative_delta_steps_from_current,
     )
     dose_g = clamp(
         candidate_dose_g,
@@ -37,11 +37,12 @@ def clamp_candidate_recipe(
     )
     target_yield_g = ratio * dose_g
     return Recipe(
-        grind_steps=round(grind_steps),
-        grinder_step_size_um=current.grinder_step_size_um,
+        relative_grind_steps_from_reference=round(relative_grind_steps_from_reference),
+        microns_per_step=current.microns_per_step,
         dose_g=round(dose_g * 2.0) / 2.0,
         target_yield_g=round(target_yield_g, 1),
         target_ratio=ratio,
+        grinder_step_direction=current.grinder_step_direction,
     )
 
 
@@ -50,7 +51,7 @@ def validate_recommendation(
     recommendation: Recommendation,
     bounds: SafetyBounds,
 ) -> None:
-    if abs(recommendation.next_grind_steps - current.grind_steps) > bounds.max_grind_delta_steps:
+    if abs(recommendation.projected_relative_step_from_reference - current.relative_grind_steps_from_reference) > bounds.max_grind_delta_steps_from_current:
         raise ValueError("recommendation exceeds grind delta safety bound")
     if abs(recommendation.next_dose_g - current.dose_g) > bounds.max_dose_delta_g + 1e-9:
         raise ValueError("recommendation exceeds dose delta safety bound")

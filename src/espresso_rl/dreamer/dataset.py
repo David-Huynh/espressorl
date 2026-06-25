@@ -5,11 +5,11 @@ Each espresso shot is one "time-step" in the world model's sequence.
 Consecutive rated shots form the trajectory.
 
 Sequence layout (length T):
-    obs[t]     : (5, 100)  — shot profile
-    actions[t] : (2,)      — [grind_idx, dose_idx] that produced obs[t]
-                             (stored in ShotRecord.action_grind_delta_um / action_dose_g)
-    rewards[t] : scalar    — composite reward for obs[t]
-    conts[t]   : 1.0       — episode continues (always; espresso has no hard resets)
+    obs[t]     : (5, 100)  Ã¢â‚¬â€ shot profile
+    actions[t] : (2,)      Ã¢â‚¬â€ [grind_idx, dose_idx] that produced obs[t]
+                             (stored in ShotRecord.action_grind_delta_um_from_current / action_dose_g)
+    rewards[t] : scalar    Ã¢â‚¬â€ composite reward for obs[t]
+    conts[t]   : 1.0       Ã¢â‚¬â€ episode continues (always; espresso has no hard resets)
 """
 
 import random
@@ -26,7 +26,7 @@ MIN_SHOTS  = 4   # minimum rated shots needed before we can build any batch
 
 def _encode_action(shot: ShotRecord) -> tuple[int, int]:
     """Convert a ShotRecord's stored action back to discrete indices."""
-    delta_steps = shot.action_grind_delta_um / max(shot.step_size_um, 1e-6)
+    delta_steps = shot.action_grind_delta_um_from_current / max(shot.microns_per_step, 1e-6)
     grind_idx = FactoredCategoricalActor.encode_grind(round(delta_steps))
     dose_idx  = FactoredCategoricalActor.encode_dose(shot.action_dose_g)
     return grind_idx, dose_idx
@@ -69,13 +69,13 @@ def sample_batch(
             start = random.randint(0, n - seq_len)
             window = shots[start : start + seq_len]
         else:
-            # Fewer shots than seq_len — use all and pad
+            # Fewer shots than seq_len Ã¢â‚¬â€ use all and pad
             window = _pad_window(shots, seq_len)
 
         obs     = np.stack([s.shot_profile for s in window])            # (T, 5, 100)
         rewards = np.array([s.reward or 0.0 for s in window], dtype=np.float32)
         conts   = np.ones(seq_len, dtype=np.float32)                    # always continue
-        actions = [_encode_action(s) for s in window]                   # [(g_idx, d_idx), …]
+        actions = [_encode_action(s) for s in window]                   # [(g_idx, d_idx), Ã¢â‚¬Â¦]
 
         obs_list.append(obs)
         action_list.append(actions)

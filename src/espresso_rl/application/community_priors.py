@@ -205,7 +205,7 @@ def community_prior_contribution_bucket(payload: dict[str, Any]) -> str:
             target_ratio = yield_value / dose_value
     ratio = _bucket(target_ratio or 0.0, 0.1)
 
-    grind_delta_um = _number(payload.get("recommended_grind_delta_um")) or 0.0
+    grind_delta_um_from_current = _number(payload.get("recommended_grind_delta_um_from_current")) or 0.0
     dose_delta = 0.0
     recommended_dose = _number(payload.get("recommended_dose_g"))
     dose_value = _number(payload.get("dose_in_g"))
@@ -223,7 +223,7 @@ def community_prior_contribution_bucket(payload: dict[str, Any]) -> str:
             f"bean:{_fingerprint(bean_context)}",
             f"grinder:{_fingerprint(grinder_context)}",
             f"recipe:d{dose:.1f}:y{target_yield:.0f}:r{ratio:.1f}",
-            f"action:g{_bucket(grind_delta_um, 25.0):.0f}:d{_bucket(dose_delta, 0.5):.1f}:y{_bucket(yield_delta, 2.0):.0f}",
+            f"action:g{_bucket(grind_delta_um_from_current, 25.0):.0f}:d{_bucket(dose_delta, 0.5):.1f}:y{_bucket(yield_delta, 2.0):.0f}",
             f"profile:{_profile_shape_bucket(payload)}",
         ]
     )
@@ -295,7 +295,7 @@ def aggregate_community_prior(
         },
         "points": [
             {
-                "grind_delta_um": 0.0,
+                "grind_delta_um_from_current": 0.0,
                 "dose_g": dose,
                 "target_yield_g": target_yield,
                 "target_ratio": target_ratio,

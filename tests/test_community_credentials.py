@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,9 +28,9 @@ class CommunityCredentialTests(unittest.TestCase):
                 json.dumps(
                     {
                         "mqtt_host": "localhost",
-                        "grinder_step_size_um": 12.5,
-                        "initial_grind_steps": None,
-                        "initial_grind_um": 525.0,
+                        "microns_per_step": 12.5,
+                        "initial_relative_grind_steps_from_reference": None,
+                        "initial_relative_grind_um_from_reference": 525.0,
                     }
                 )
             )
@@ -43,8 +44,8 @@ class CommunityCredentialTests(unittest.TestCase):
                 config_module._OPTIONS_PATH = original_options_path
                 config_module._DATA_DIR = original_data_dir
 
-        self.assertEqual(config.initial_grind_steps, 42.0)
-        self.assertEqual(config.initial_grind_um, 525.0)
+        self.assertEqual(config.initial_relative_grind_steps_from_reference, 42.0)
+        self.assertEqual(config.initial_relative_grind_um_from_reference, 525.0)
 
     def test_service_prefers_configured_credentials_without_registering(self) -> None:
         store = FakeCredentialStore()
@@ -83,7 +84,8 @@ class CommunityCredentialTests(unittest.TestCase):
 
             self.assertEqual(store.load(), credentials)
             mode = (Path(tmp) / "credentials.json").stat().st_mode & 0o777
-            self.assertEqual(mode, 0o600)
+            if os.name != "nt":
+                self.assertEqual(mode, 0o600)
 
     def test_supabase_registrar_registers_rotates_and_revokes(self) -> None:
         calls = []

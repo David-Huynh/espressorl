@@ -79,10 +79,10 @@ class GaggimateMQTTClient:
             "machine_id": recommendation.machine_id,
             "bean_context_id": recommendation.bean_context_id,
             "grinder_context_id": recommendation.grinder_context_id,
-            "grind_delta_steps": recommendation.grind_delta_steps,
-            "grind_delta_um": recommendation.grind_delta_um,
-            "next_grind_steps": recommendation.next_grind_steps,
-            "next_grind_um": recommendation.next_grind_um,
+            "grind_delta_steps_from_current": recommendation.grind_delta_steps_from_current,
+            "grind_delta_um_from_current": recommendation.grind_delta_um_from_current,
+            "projected_relative_step_from_reference": recommendation.projected_relative_step_from_reference,
+            "projected_relative_grind_um_from_reference": recommendation.projected_relative_grind_um_from_reference,
             "next_dose_g": recommendation.next_dose_g,
             "target_yield_g": recommendation.target_yield_g,
             "target_ratio": recommendation.target_ratio,
@@ -90,6 +90,12 @@ class GaggimateMQTTClient:
             "confidence": recommendation.confidence,
             "reason": recommendation.reason,
             "status": recommendation.status.value,
+            "grinder_calibration_mode": recommendation.grinder_calibration_mode.value,
+            "step_direction": recommendation.grinder_step_direction.value,
+            "reference_label": recommendation.grinder_reference_label,
+            "current_absolute_step": recommendation.current_absolute_step,
+            "absolute_reference_step": recommendation.absolute_reference_step,
+            "projected_absolute_step": recommendation.projected_absolute_step,
             "expires_at": recommendation.expires_at,
         }
         self._client.publish(topic, json.dumps(payload), qos=1, retain=True)
@@ -194,14 +200,22 @@ class GaggimateMQTTClient:
             flow=flow,
             target_flow=target_flow,
             weight=weight,
-            grinder_step_size_um=float(payload.get("grinder_step_size_um", self._config.grinder_step_size_um)),
-            grind_steps=_optional_float(payload.get("grind_steps", self._config.initial_grind_steps)),
+            microns_per_step=float(payload.get("microns_per_step", self._config.microns_per_step)),
+            relative_grind_steps_from_reference=_relative_grind_steps_from_payload(
+                payload,
+                self._config.initial_relative_grind_steps_from_reference,
+            ),
             dose_in_g=float(payload.get("dose_in_g", self._config.initial_dose_g)),
             target_yield_g=target_yield_g,
             beverage_out_g=beverage_out_g,
             shot_time_s=_optional_float(shot_time_s),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
             grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
+            grinder_calibration_mode=payload.get("grinder_calibration_mode", "relative_calibrated"),
+            grinder_step_direction=payload.get("step_direction", "higher_is_finer"),
+            grinder_reference_label=payload.get("reference_label", "reference"),
+            current_absolute_step=_optional_float(payload.get("current_absolute_step")),
+            absolute_reference_step=_optional_float(payload.get("absolute_reference_step")),
             recommendation_id=payload.get("recommendation_id"),
             shot_type=payload.get("shot_type", "espresso"),
             utility=bool(payload.get("utility", False)),
@@ -314,10 +328,18 @@ class GaggimateMQTTClient:
             state=payload.get("state", "unknown"),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
             grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
-            grind_steps=_optional_float(payload.get("grind_steps", self._config.initial_grind_steps)),
-            grinder_step_size_um=_optional_float(
-                payload.get("grinder_step_size_um", self._config.grinder_step_size_um)
+            grinder_calibration_mode=payload.get("grinder_calibration_mode", "relative_calibrated"),
+            grinder_step_direction=payload.get("step_direction", "higher_is_finer"),
+            grinder_reference_label=payload.get("reference_label", "reference"),
+            relative_grind_steps_from_reference=_relative_grind_steps_from_payload(
+                payload,
+                self._config.initial_relative_grind_steps_from_reference,
             ),
+            microns_per_step=_optional_float(
+                payload.get("microns_per_step", self._config.microns_per_step)
+            ),
+            current_absolute_step=_optional_float(payload.get("current_absolute_step")),
+            absolute_reference_step=_optional_float(payload.get("absolute_reference_step")),
             dose_in_g=_optional_float(payload.get("dose_in_g", self._config.initial_dose_g)),
             target_yield_g=_optional_float(
                 payload.get("target_yield_g", self._config.initial_target_yield_g)
@@ -332,6 +354,14 @@ def _optional_float(value: Any) -> float | None:
     if isinstance(value, bool):
         raise ValueError("optional numeric fields cannot be boolean")
     return float(value)
+
+
+def _relative_grind_steps_from_payload(payload: dict[str, Any], fallback: float | None) -> float | None:
+    current_absolute_step = _optional_float(payload.get("current_absolute_step"))
+    absolute_reference_step = _optional_float(payload.get("absolute_reference_step"))
+    if current_absolute_step is not None and absolute_reference_step is not None:
+        return current_absolute_step - absolute_reference_step
+    return _optional_float(payload.get("relative_grind_steps_from_reference", fallback))
 
 
 def _optional_int(value: Any) -> int | None:

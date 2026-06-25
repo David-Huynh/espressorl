@@ -44,7 +44,7 @@ def _large_manual_change(
     policy: StaleRecommendationPolicy,
 ) -> bool:
     grind_changed = (
-        abs(current_recipe.grind_steps - recommendation.next_grind_steps)
+        abs(current_recipe.relative_grind_steps_from_reference - recommendation.projected_relative_step_from_reference)
         > policy.manual_grind_change_steps
     )
     dose_changed = abs(current_recipe.dose_g - recommendation.next_dose_g) > policy.manual_dose_change_g

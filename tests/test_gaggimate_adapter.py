@@ -62,6 +62,13 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "shot_time_s": 31.2,
                 "bean_context_id": "profile_1",
                 "grinder_context_id": "grinder_1",
+                "grinder_calibration_mode": "absolute_display_calibrated",
+                "microns_per_step": 12.5,
+                "step_direction": "higher_is_coarser",
+                "reference_label": "zero point",
+                "relative_grind_steps_from_reference": 99,
+                "current_absolute_step": 45,
+                "absolute_reference_step": 40,
                 "shot_type": "espresso",
                 "utility": False,
                 "local_optimization_enabled": False,
@@ -100,6 +107,12 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.target_yield_g, 40.0)
         self.assertEqual(event.beverage_out_g, 39.8)
         self.assertEqual(event.grinder_context_id, "grinder_1")
+        self.assertEqual(event.grinder_calibration_mode.value, "absolute_display_calibrated")
+        self.assertEqual(event.grinder_step_direction.value, "higher_is_coarser")
+        self.assertEqual(event.grinder_reference_label, "zero point")
+        self.assertEqual(event.relative_grind_steps_from_reference, 5)
+        self.assertEqual(event.current_absolute_step, 45)
+        self.assertEqual(event.absolute_reference_step, 40)
         self.assertEqual(event.recommendation_id, "rec_1")
         self.assertEqual(event.shot_type.value, "espresso")
         self.assertFalse(event.utility)
@@ -215,10 +228,10 @@ class GaggimateAdapterTests(unittest.TestCase):
             machine_id="gaggimate:AA_BB",
             bean_context_id=None,
             grinder_context_id="grinder_1",
-            grind_delta_steps=1,
-            grind_delta_um=12.5,
-            next_grind_steps=43,
-            next_grind_um=537.5,
+            grind_delta_steps_from_current=1,
+            grind_delta_um_from_current=12.5,
+            projected_relative_step_from_reference=43,
+            projected_relative_grind_um_from_reference=537.5,
             next_dose_g=18.0,
             target_yield_g=36.0,
             target_ratio=2.0,
@@ -226,6 +239,12 @@ class GaggimateAdapterTests(unittest.TestCase):
             confidence=0.3,
             reason="test",
             source_shot_id="shot_1",
+            grinder_calibration_mode="absolute_display_calibrated",
+            grinder_step_direction="higher_is_finer",
+            grinder_reference_label="zero point",
+            current_absolute_step=42,
+            absolute_reference_step=40,
+            projected_absolute_step=43,
         )
 
         client.publish_recommendation(rec)
@@ -238,6 +257,12 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(decoded["shot_id"], "shot_1")
         self.assertEqual(decoded["recommendation_id"], "rec_1")
         self.assertEqual(decoded["grinder_context_id"], "grinder_1")
+        self.assertEqual(decoded["grind_delta_steps_from_current"], 1)
+        self.assertEqual(decoded["projected_relative_step_from_reference"], 43)
+        self.assertEqual(decoded["grinder_calibration_mode"], "absolute_display_calibrated")
+        self.assertEqual(decoded["current_absolute_step"], 42)
+        self.assertEqual(decoded["absolute_reference_step"], 40)
+        self.assertEqual(decoded["projected_absolute_step"], 43)
 
     def test_status_payload_is_retained_for_gaggimate_settings(self) -> None:
         client = GaggimateMQTTClient(
@@ -302,7 +327,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "status": "partially_applied",
                 "timestamp": 12,
                 "applied_fields": {"target_yield_g": 40.0},
-                "manual_fields": ["next_grind_steps", "next_dose_g"],
+                "manual_fields": ["projected_relative_step_from_reference", "next_dose_g"],
                 "message": "Target yield applied; grind and dose are manual.",
                 "source": "gaggimate_lvgl",
             },
@@ -313,7 +338,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.status, RecommendationApplyStatus.PARTIALLY_APPLIED)
         self.assertEqual(event.machine_id, "gaggimate:AA_BB")
         self.assertEqual(event.applied_fields["target_yield_g"], 40.0)
-        self.assertEqual(event.manual_fields, ["next_grind_steps", "next_dose_g"])
+        self.assertEqual(event.manual_fields, ["projected_relative_step_from_reference", "next_dose_g"])
 
     def test_correction_payload_records_manual_exclusion_and_follow_through(self) -> None:
         client = GaggimateMQTTClient(
@@ -423,126 +448,126 @@ class GaggimateAdapterTests(unittest.TestCase):
                 mqtt_host="localhost",
                 data_dir=Path(tmp),
                 install_id="install_1",
-                grinder_step_size_um=12.5,
-                initial_grind_steps=42,
+                microns_per_step=12.5,
+                initial_relative_grind_steps_from_reference=42,
                 initial_dose_g=18.0,
                 initial_target_yield_g=36.0,
             )
-            store = SQLiteStore(Path(tmp) / "espresso.db")
-            service = EspressoRLService(
-                SQLiteShotRepository(store),
-                SQLiteRecommendationRepository(store),
-                ConservativeBOOptimizer(),
-                clock=lambda: 100,
-            )
-            client = GaggimateMQTTClient(
-                config=config,
-                on_shot=lambda event: None,
-                on_feedback=lambda event: None,
-                on_correction=lambda event: None,
-                on_upload_maintenance=lambda event: None,
-                on_decision=lambda event: None,
-                on_apply=lambda event: None,
-                on_machine_state=lambda event: None,
-            )
-            fake = FakeMQTT()
-            client._client = fake  # type: ignore[assignment]
-
-            first_payload = {
-                "event_type": "shot_profile",
-                "schema_version": 1,
-                "shot_id": "shot_1",
-                "machine_id": "gaggimate:AA_BB",
-                "machine_adapter": "gaggimate",
-                "timestamp": 1,
-                "n_samples": 4,
-                "time_ms": [0, 250, 500, 750],
-                "pressure": [0.0, 4.0, 8.5, 9.0],
-                "target_pressure": [0.0, 4.0, 8.5, 9.0],
-                "flow": [0.0, 1.0, 2.0, 2.1],
-                "target_flow": [0.0, 1.0, 2.0, 2.0],
-                "weight": [0.0, 8.0, 22.0, 36.0],
-                "grinder_step_size_um": 12.5,
-                "grind_steps": 42,
-                "dose_in_g": 18.0,
-                "target_yield_g": 36.0,
-                "target_ratio": 2.0,
-                "beverage_out_g": 36.0,
-                "shot_time_s": 29.0,
-                "bean_context_id": "profile_1",
-            }
-
-            ingested = service.ingest_shot_profile(client.translate_shot_payload(first_payload, mac="AA_BB"))
-            self.assertIsNone(ingested.recommendation)
-            first = service.record_feedback(
-                client.translate_feedback_payload(
-                    {
-                        "shot_id": "shot_1",
-                        "rating": 3,
-                        "timestamp": 2,
-                        "source": "gaggimate_webui",
-                    },
-                    mac="AA_BB",
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                    clock=lambda: 100,
                 )
-            )
-            client.publish_recommendation(first.recommendation)
+                client = GaggimateMQTTClient(
+                    config=config,
+                    on_shot=lambda event: None,
+                    on_feedback=lambda event: None,
+                    on_correction=lambda event: None,
+                    on_upload_maintenance=lambda event: None,
+                    on_decision=lambda event: None,
+                    on_apply=lambda event: None,
+                    on_machine_state=lambda event: None,
+                )
+                fake = FakeMQTT()
+                client._client = fake  # type: ignore[assignment]
 
-            topic, payload, qos, retain = fake.published[-1]
-            recommendation_payload = json.loads(payload)
-            self.assertEqual(topic, "gaggimate/AA_BB/rl/recommendation")
-            self.assertEqual(qos, 1)
-            self.assertTrue(retain)
-            self.assertEqual(recommendation_payload["recommendation_id"], first.recommendation.recommendation_id)
-            self.assertIn("next_dose_g", recommendation_payload)
-            self.assertIn("target_yield_g", recommendation_payload)
+                first_payload = {
+                    "event_type": "shot_profile",
+                    "schema_version": 1,
+                    "shot_id": "shot_1",
+                    "machine_id": "gaggimate:AA_BB",
+                    "machine_adapter": "gaggimate",
+                    "timestamp": 1,
+                    "n_samples": 4,
+                    "time_ms": [0, 250, 500, 750],
+                    "pressure": [0.0, 4.0, 8.5, 9.0],
+                    "target_pressure": [0.0, 4.0, 8.5, 9.0],
+                    "flow": [0.0, 1.0, 2.0, 2.1],
+                    "target_flow": [0.0, 1.0, 2.0, 2.0],
+                    "weight": [0.0, 8.0, 22.0, 36.0],
+                    "microns_per_step": 12.5,
+                    "relative_grind_steps_from_reference": 42,
+                    "dose_in_g": 18.0,
+                    "target_yield_g": 36.0,
+                    "target_ratio": 2.0,
+                    "beverage_out_g": 36.0,
+                    "shot_time_s": 29.0,
+                    "bean_context_id": "profile_1",
+                }
 
-            accepted = service.record_recommendation_decision(
-                client.translate_decision_payload(
-                    {
-                        "event_type": "recommendation_decision",
-                        "schema_version": 1,
-                        "recommendation_id": first.recommendation.recommendation_id,
-                        "decision": "accepted",
-                        "edited_fields": {
-                            "next_dose_g": recommendation_payload["next_dose_g"],
-                            "target_yield_g": recommendation_payload["target_yield_g"],
+                ingested = service.ingest_shot_profile(client.translate_shot_payload(first_payload, mac="AA_BB"))
+                self.assertIsNone(ingested.recommendation)
+                first = service.record_feedback(
+                    client.translate_feedback_payload(
+                        {
+                            "shot_id": "shot_1",
+                            "rating": 3,
+                            "timestamp": 2,
+                            "source": "gaggimate_webui",
                         },
-                        "timestamp": 2,
-                    },
-                    mac="AA_BB",
+                        mac="AA_BB",
+                    )
                 )
-            )
-            self.assertEqual(accepted.status, RecommendationStatus.ACCEPTED)
+                client.publish_recommendation(first.recommendation)
 
-            second_payload = {
-                **first_payload,
-                "shot_id": "shot_2",
-                "timestamp": 3,
-                "recommendation_id": first.recommendation.recommendation_id,
-                "grind_steps": first.recommendation.next_grind_steps,
-                "dose_in_g": first.recommendation.next_dose_g,
-                "target_yield_g": first.recommendation.target_yield_g,
-                "target_ratio": first.recommendation.target_ratio,
-                "beverage_out_g": first.recommendation.target_yield_g,
-                "weight": [0.0, 9.0, 24.0, first.recommendation.target_yield_g],
-            }
-            second = service.ingest_shot_profile(client.translate_shot_payload(second_payload, mac="AA_BB"))
-            self.assertEqual(second.shot.recommendation_followed, FollowThroughState.FOLLOWED)
+                topic, payload, qos, retain = fake.published[-1]
+                recommendation_payload = json.loads(payload)
+                self.assertEqual(topic, "gaggimate/AA_BB/rl/recommendation")
+                self.assertEqual(qos, 1)
+                self.assertTrue(retain)
+                self.assertEqual(recommendation_payload["recommendation_id"], first.recommendation.recommendation_id)
+                self.assertIn("next_dose_g", recommendation_payload)
+                self.assertIn("target_yield_g", recommendation_payload)
 
-            updated = service.record_feedback(
-                client.translate_feedback_payload(
-                    {
-                        "shot_id": "shot_2",
-                        "rating": 4,
-                        "timestamp": 4,
-                        "source": "gaggimate_webui",
-                    },
-                    mac="AA_BB",
+                accepted = service.record_recommendation_decision(
+                    client.translate_decision_payload(
+                        {
+                            "event_type": "recommendation_decision",
+                            "schema_version": 1,
+                            "recommendation_id": first.recommendation.recommendation_id,
+                            "decision": "accepted",
+                            "edited_fields": {
+                                "next_dose_g": recommendation_payload["next_dose_g"],
+                                "target_yield_g": recommendation_payload["target_yield_g"],
+                            },
+                            "timestamp": 2,
+                        },
+                        mac="AA_BB",
+                    )
                 )
-            )
-            self.assertEqual(updated.shot.human_rating, 4)
-            self.assertGreater(updated.shot.reward_confidence, 0.5)
-            self.assertEqual(updated.recommendation.source_shot_id, "shot_2")
+                self.assertEqual(accepted.status, RecommendationStatus.ACCEPTED)
+
+                second_payload = {
+                    **first_payload,
+                    "shot_id": "shot_2",
+                    "timestamp": 3,
+                    "recommendation_id": first.recommendation.recommendation_id,
+                    "relative_grind_steps_from_reference": first.recommendation.projected_relative_step_from_reference,
+                    "dose_in_g": first.recommendation.next_dose_g,
+                    "target_yield_g": first.recommendation.target_yield_g,
+                    "target_ratio": first.recommendation.target_ratio,
+                    "beverage_out_g": first.recommendation.target_yield_g,
+                    "weight": [0.0, 9.0, 24.0, first.recommendation.target_yield_g],
+                }
+                second = service.ingest_shot_profile(client.translate_shot_payload(second_payload, mac="AA_BB"))
+                self.assertEqual(second.shot.recommendation_followed, FollowThroughState.FOLLOWED)
+
+                updated = service.record_feedback(
+                    client.translate_feedback_payload(
+                        {
+                            "shot_id": "shot_2",
+                            "rating": 4,
+                            "timestamp": 4,
+                            "source": "gaggimate_webui",
+                        },
+                        mac="AA_BB",
+                    )
+                )
+                self.assertEqual(updated.shot.human_rating, 4)
+                self.assertGreater(updated.shot.reward_confidence, 0.5)
+                self.assertEqual(updated.recommendation.source_shot_id, "shot_2")
 
 
 if __name__ == "__main__":

@@ -3,8 +3,8 @@ DreamerV3 top-level class.
 
 Responsibilities:
   1. World model training on real shot sequences (ELBO)
-  2. Actor-critic training on imagined rollouts (λ-returns, REINFORCE)
-  3. BO→DreamerV3 transition: convergence detection via held-out reconstruction loss
+  2. Actor-critic training on imagined rollouts (ÃŽÂ»-returns, REINFORCE)
+  3. BOÃ¢â€ â€™DreamerV3 transition: convergence detection via held-out reconstruction loss
   4. Checkpoint save / load
   5. Recommendation inference from latest latent state
 """
@@ -220,15 +220,15 @@ class DreamerV3:
         return float(critic_loss) + float(actor_loss)
 
     # ------------------------------------------------------------------
-    # Inference — get recommendation from policy
+    # Inference Ã¢â‚¬â€ get recommendation from policy
     # ------------------------------------------------------------------
 
     @torch.no_grad()
     def recommend(
         self,
         shot: ShotRecord,
-        step_size_um: float,
-        current_grind_um: float,
+        microns_per_step: float,
+        current_relative_grind_um_from_reference: float,
         current_dose_g: float,
     ) -> dict[str, Any]:
         """
@@ -239,9 +239,9 @@ class DreamerV3:
         self.actor.eval()
 
         profile = torch.tensor(shot.shot_profile, dtype=torch.float32).unsqueeze(0)
-        grind   = torch.tensor([current_grind_um], dtype=torch.float32)
+        grind   = torch.tensor([current_relative_grind_um_from_reference], dtype=torch.float32)
         dose    = torch.tensor([current_dose_g], dtype=torch.float32)
-        step    = torch.tensor([step_size_um], dtype=torch.float32)
+        step    = torch.tensor([microns_per_step], dtype=torch.float32)
 
         embed = self.world_model.encode(profile, grind, dose, step)  # (1, E)
 
@@ -261,14 +261,14 @@ class DreamerV3:
         # Sample action from policy
         g_idx, d_idx, _, _ = self.actor.sample(h_new, z_new)
 
-        delta_um  = FactoredCategoricalActor.decode_grind(g_idx, step_size_um).item()
+        delta_um  = FactoredCategoricalActor.decode_grind(g_idx, microns_per_step).item()
         next_dose = FactoredCategoricalActor.decode_dose(d_idx).item()
-        next_grind = current_grind_um + delta_um
+        projected_relative_grind_um_from_reference = current_relative_grind_um_from_reference + delta_um
 
         return {
-            "grind_delta_um":    delta_um,
-            "grind_delta_steps": round(delta_um / step_size_um),
-            "next_grind_um":     next_grind,
+            "grind_delta_um_from_current":    delta_um,
+            "grind_delta_steps_from_current": round(delta_um / microns_per_step),
+            "projected_relative_grind_um_from_reference":     projected_relative_grind_um_from_reference,
             "next_dose_g":       next_dose,
             "mode":              "dreamerv3",
         }
@@ -317,9 +317,9 @@ class DreamerV3:
         with torch.no_grad():
             self.world_model.eval()
             profile = torch.tensor(shot.shot_profile, dtype=torch.float32).unsqueeze(0)
-            grind   = torch.tensor([shot.grind_um],     dtype=torch.float32)
+            grind   = torch.tensor([shot.relative_grind_um_from_reference],     dtype=torch.float32)
             dose    = torch.tensor([shot.dose_g],        dtype=torch.float32)
-            step    = torch.tensor([shot.step_size_um],  dtype=torch.float32)
+            step    = torch.tensor([shot.microns_per_step],  dtype=torch.float32)
             embed   = self.world_model.encode(profile, grind, dose, step)
 
             if self._last_h is None:
@@ -328,7 +328,7 @@ class DreamerV3:
                 h, z = self._last_h, self._last_z
 
             g_idx = torch.tensor([FactoredCategoricalActor.encode_grind(
-                round(shot.action_grind_delta_um / max(shot.step_size_um, 1e-6))
+                round(shot.action_grind_delta_um_from_current / max(shot.microns_per_step, 1e-6))
             )])
             d_idx = torch.tensor([FactoredCategoricalActor.encode_dose(shot.action_dose_g)])
             act   = self.world_model.rssm.encode_action(g_idx, d_idx)

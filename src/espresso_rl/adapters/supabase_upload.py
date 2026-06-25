@@ -10,6 +10,7 @@ from typing import Callable
 from urllib import error, request
 
 from espresso_rl.domain.models import UploadQueueItem, UploadQueueStatus
+from espresso_rl.application.upload_validation import validate_upload_payload_json
 from espresso_rl.ports.repositories import UploadQueueRepository
 
 logger = logging.getLogger(__name__)
@@ -27,11 +28,6 @@ class UploadRateLimited(Exception):
     def __init__(self, retry_after: int | None, message: str = "rate limited") -> None:
         super().__init__(message)
         self.retry_after = retry_after
-
-
-# Stop retrying a non-rate-limit failure after this many completed attempts, so a
-# permanently broken upload dead-letters instead of retrying forever.
-MAX_UPLOAD_ATTEMPTS = 8
 
 
 @dataclass(frozen=True)
@@ -120,6 +116,9 @@ class UploadQueueWorker:
         uploaded = 0
         for item in self._queue.list_ready(now=now, limit=limit):
             try:
+                validation = validate_upload_payload_json(item.payload_json)
+                if not validation.ok:
+                    raise UploadRejected(422, "local preflight failed: " + "; ".join(validation.errors[:3]))
                 self._queue.update_status(
                     item.upload_id,
                     UploadQueueStatus.UPLOADING,
@@ -133,11 +132,17 @@ class UploadQueueWorker:
                 )
                 uploaded += 1
             except UploadRejected as exc:
+                rejected_at = int(self._clock())
                 self._queue.update_status(
                     item.upload_id,
                     UploadQueueStatus.REJECTED,
-                    now=int(self._clock()),
+                    now=rejected_at,
                     error_message=f"HTTP {exc.status}: {exc}",
+                )
+                self._queue.purge_rejected_artifacts(
+                    now=rejected_at,
+                    limit=1,
+                    local_record_id=item.local_record_id,
                 )
                 logger.warning("Upload rejected for %s: HTTP %d %s", item.upload_id, exc.status, exc)
             except UploadRateLimited as exc:
@@ -157,29 +162,15 @@ class UploadQueueWorker:
             except Exception as exc:
                 now = int(self._clock())
                 attempts = item.attempt_count + 1
-                if attempts >= MAX_UPLOAD_ATTEMPTS:
-                    self._queue.update_status(
-                        item.upload_id,
-                        UploadQueueStatus.REJECTED,
-                        now=now,
-                        error_message=f"gave up after {attempts} attempts: {exc}",
-                    )
-                    logger.error(
-                        "Dead-lettering upload %s after %d attempts: %s",
-                        item.upload_id,
-                        attempts,
-                        exc,
-                    )
-                else:
-                    retry_at = now + _retry_delay_s(attempts)
-                    self._queue.update_status(
-                        item.upload_id,
-                        UploadQueueStatus.FAILED,
-                        now=now,
-                        error_message=str(exc),
-                        next_retry_at=retry_at,
-                    )
-                    logger.warning("Upload failed for %s; retry at %s", item.upload_id, retry_at)
+                retry_at = now + _retry_delay_s(attempts)
+                self._queue.update_status(
+                    item.upload_id,
+                    UploadQueueStatus.FAILED,
+                    now=now,
+                    error_message=str(exc),
+                    next_retry_at=retry_at,
+                )
+                logger.warning("Upload failed for %s; retry at %s", item.upload_id, retry_at)
         return uploaded
 
 

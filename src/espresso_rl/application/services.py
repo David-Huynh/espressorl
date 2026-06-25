@@ -15,6 +15,8 @@ from espresso_rl.domain.events import (
 from espresso_rl.domain.follow_through import infer_follow_through
 from espresso_rl.domain.models import (
     FollowThroughState,
+    GrinderCalibrationMode,
+    GrinderStepDirection,
     MachineState,
     Recipe,
     Recommendation,
@@ -64,8 +66,8 @@ def _recommendation_signature(recommendation: Recommendation) -> tuple:
     """The *meaningful* state of a recommendation for upload deduplication.
 
     Two recommendations with the same signature differ only in incidental
-    bookkeeping — `shown_count` beyond the first show, `updated_at`, and the
-    per-transition timestamps — so they should not produce a fresh community
+    bookkeeping Ã¢â‚¬â€ `shown_count` beyond the first show, `updated_at`, and the
+    per-transition timestamps Ã¢â‚¬â€ so they should not produce a fresh community
     upload. Real lifecycle transitions (status/apply changes, the first show, or
     a change to the recommended values/reason) all change the signature.
     """
@@ -76,10 +78,10 @@ def _recommendation_signature(recommendation: Recommendation) -> tuple:
         tuple(sorted(recommendation.applied_fields.items())),
         tuple(sorted(recommendation.manual_fields)),
         recommendation.apply_error,
-        recommendation.grind_delta_steps,
-        round(recommendation.grind_delta_um, 4),
-        round(recommendation.next_grind_steps, 4),
-        round(recommendation.next_grind_um, 4),
+        recommendation.grind_delta_steps_from_current,
+        round(recommendation.grind_delta_um_from_current, 4),
+        round(recommendation.projected_relative_step_from_reference, 4),
+        round(recommendation.projected_relative_grind_um_from_reference, 4),
         round(recommendation.next_dose_g, 4),
         round(recommendation.target_yield_g, 4),
         round(recommendation.target_ratio, 4),
@@ -134,14 +136,19 @@ class EspressoRLService:
             machine_id=event.machine_id,
             machine_adapter=event.machine_adapter,
             profile=profile,
-            grinder_step_size_um=event.grinder_step_size_um,
+            microns_per_step=event.microns_per_step,
             dose_in_g=event.dose_in_g,
             target_yield_g=event.target_yield_g,
-            grind_steps=event.grind_steps,
+            relative_grind_steps_from_reference=event.relative_grind_steps_from_reference,
             beverage_out_g=event.beverage_out_g,
             shot_time_s=event.shot_time_s,
             bean_context_id=event.bean_context_id,
             grinder_context_id=event.grinder_context_id,
+            grinder_calibration_mode=event.grinder_calibration_mode,
+            grinder_step_direction=event.grinder_step_direction,
+            grinder_reference_label=event.grinder_reference_label,
+            current_absolute_step=event.current_absolute_step,
+            absolute_reference_step=event.absolute_reference_step,
             recommendation_id=recommendation.recommendation_id if recommendation else event.recommendation_id,
             raw_profile_available=len(event.time_ms) >= 2,
             raw_profile_hash=profile_hash(profile),
@@ -181,9 +188,9 @@ class EspressoRLService:
 
         decision = self._decision_from_recommendation(recommendation)
         if recommendation is not None:
-            shot.recommended_grind_delta_steps = recommendation.grind_delta_steps
-            shot.recommended_grind_delta_um = recommendation.grind_delta_um
-            shot.recommended_next_grind_steps = recommendation.next_grind_steps
+            shot.recommended_grind_delta_steps_from_current = recommendation.grind_delta_steps_from_current
+            shot.recommended_grind_delta_um_from_current = recommendation.grind_delta_um_from_current
+            shot.recommended_projected_relative_step_from_reference = recommendation.projected_relative_step_from_reference
             shot.recommended_dose_g = recommendation.next_dose_g
             shot.recommended_target_yield_g = recommendation.target_yield_g
             shot.recommended_target_ratio = recommendation.target_ratio
@@ -213,6 +220,11 @@ class EspressoRLService:
             grinder_context_id=shot.grinder_context_id,
             current_recipe=shot.to_recipe(),
             now=now,
+            grinder_calibration_mode=shot.grinder_calibration_mode,
+            grinder_step_direction=shot.grinder_step_direction,
+            grinder_reference_label=shot.grinder_reference_label,
+            current_absolute_step=shot.current_absolute_step,
+            absolute_reference_step=shot.absolute_reference_step,
         )
         return IngestResult(shot=shot, recommendation=recommendation)
 
@@ -282,6 +294,11 @@ class EspressoRLService:
             grinder_context_id=shot.grinder_context_id,
             current_recipe=shot.to_recipe(),
             now=now,
+            grinder_calibration_mode=shot.grinder_calibration_mode,
+            grinder_step_direction=shot.grinder_step_direction,
+            grinder_reference_label=shot.grinder_reference_label,
+            current_absolute_step=shot.current_absolute_step,
+            absolute_reference_step=shot.absolute_reference_step,
         )
         return FeedbackResult(shot=shot, recommendation=recommendation)
 
@@ -479,6 +496,11 @@ class EspressoRLService:
             grinder_context_id=event.grinder_context_id,
             current_recipe=current_recipe,
             now=now,
+            grinder_calibration_mode=event.grinder_calibration_mode,
+            grinder_step_direction=event.grinder_step_direction,
+            grinder_reference_label=event.grinder_reference_label,
+            current_absolute_step=event.current_absolute_step,
+            absolute_reference_step=event.absolute_reference_step,
         )
         return self._mark_recommendation_shown(recommendation, now)
 
@@ -490,6 +512,11 @@ class EspressoRLService:
         current_recipe: Recipe,
         grinder_context_id: str | None = None,
         now: int | None = None,
+        grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED,
+        grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER,
+        grinder_reference_label: str = "reference",
+        current_absolute_step: float | None = None,
+        absolute_reference_step: float | None = None,
     ) -> Recommendation:
         timestamp = self._clock() if now is None else now
         recent = self._shots.list_recent(
@@ -540,6 +567,14 @@ class EspressoRLService:
                 prior_points=tuple(prior_points),
             )
         recommendation = self._optimizer.recommend(context)
+        self._apply_grinder_display_metadata(
+            recommendation,
+            grinder_calibration_mode=grinder_calibration_mode,
+            grinder_step_direction=grinder_step_direction,
+            grinder_reference_label=grinder_reference_label,
+            current_absolute_step=current_absolute_step,
+            absolute_reference_step=absolute_reference_step,
+        )
         self._recommendations.supersede_active(
             install_id=install_id,
             machine_id=machine_id,
@@ -551,18 +586,40 @@ class EspressoRLService:
         self._store_recommendation(recommendation, timestamp)
         return recommendation
 
+    def _apply_grinder_display_metadata(
+        self,
+        recommendation: Recommendation,
+        *,
+        grinder_calibration_mode: GrinderCalibrationMode,
+        grinder_step_direction: GrinderStepDirection,
+        grinder_reference_label: str,
+        current_absolute_step: float | None,
+        absolute_reference_step: float | None,
+    ) -> None:
+        recommendation.grinder_calibration_mode = GrinderCalibrationMode(grinder_calibration_mode)
+        recommendation.grinder_step_direction = GrinderStepDirection(grinder_step_direction)
+        recommendation.grinder_reference_label = grinder_reference_label or "reference"
+        recommendation.current_absolute_step = current_absolute_step
+        recommendation.absolute_reference_step = absolute_reference_step
+        recommendation.projected_absolute_step = (
+            current_absolute_step + recommendation.grind_delta_steps_from_current
+            if current_absolute_step is not None
+            else None
+        )
+
     def _recommendation_for_event(
         self,
         event: ShotProfileEvent,
         now: int,
     ) -> Recommendation | None:
         current_recipe = None
-        if event.grind_steps is not None:
+        if event.relative_grind_steps_from_reference is not None:
             current_recipe = Recipe(
-                grind_steps=event.grind_steps,
-                grinder_step_size_um=event.grinder_step_size_um,
+                relative_grind_steps_from_reference=event.relative_grind_steps_from_reference,
+                microns_per_step=event.microns_per_step,
                 dose_g=event.dose_in_g,
                 target_yield_g=event.target_yield_g,
+                grinder_step_direction=event.grinder_step_direction,
             )
         if event.recommendation_id:
             recommendation = self._recommendations.get(event.recommendation_id)
@@ -644,12 +701,12 @@ class EspressoRLService:
         self._store_recommendation(updated, now)
 
     def _apply_edits(self, recommendation: Recommendation, edited_fields: dict) -> None:
-        if "next_grind_steps" in edited_fields:
-            next_grind_steps = float(edited_fields["next_grind_steps"])
-            step_size_um = recommendation.grind_delta_um / recommendation.grind_delta_steps if recommendation.grind_delta_steps else 0.0
-            recommendation.next_grind_steps = next_grind_steps
-            if step_size_um > 0:
-                recommendation.next_grind_um = next_grind_steps * step_size_um
+        if "projected_relative_step_from_reference" in edited_fields:
+            projected_relative_step_from_reference = float(edited_fields["projected_relative_step_from_reference"])
+            microns_per_step = recommendation.grind_delta_um_from_current / recommendation.grind_delta_steps_from_current if recommendation.grind_delta_steps_from_current else 0.0
+            recommendation.projected_relative_step_from_reference = projected_relative_step_from_reference
+            if microns_per_step > 0:
+                recommendation.projected_relative_grind_um_from_reference = projected_relative_step_from_reference * microns_per_step
         if "next_dose_g" in edited_fields:
             recommendation.next_dose_g = float(edited_fields["next_dose_g"])
         if "target_yield_g" in edited_fields:

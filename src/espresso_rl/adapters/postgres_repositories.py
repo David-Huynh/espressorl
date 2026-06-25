@@ -82,9 +82,23 @@ class PostgresStore:
             "profile_temperature_c": "DOUBLE PRECISION",
             "final_phase_temperature_c": "DOUBLE PRECISION",
             "shot_end_state": "TEXT",
+            "grinder_calibration_mode": "TEXT NOT NULL DEFAULT 'relative_calibrated'",
+            "grinder_step_direction": "TEXT NOT NULL DEFAULT 'higher_is_finer'",
+            "grinder_reference_label": "TEXT NOT NULL DEFAULT 'reference'",
+            "current_absolute_step": "DOUBLE PRECISION",
+            "absolute_reference_step": "DOUBLE PRECISION",
         }.items():
             self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
         self.conn.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS grinder_context_id TEXT")
+        for column, definition in {
+            "grinder_calibration_mode": "TEXT NOT NULL DEFAULT 'relative_calibrated'",
+            "grinder_step_direction": "TEXT NOT NULL DEFAULT 'higher_is_finer'",
+            "grinder_reference_label": "TEXT NOT NULL DEFAULT 'reference'",
+            "current_absolute_step": "DOUBLE PRECISION",
+            "absolute_reference_step": "DOUBLE PRECISION",
+            "projected_absolute_step": "DOUBLE PRECISION",
+        }.items():
+            self.conn.execute(f"ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS {column} {definition}")
         for column, definition in {
             "validated_at": "TIMESTAMPTZ",
             "rejected_at": "TIMESTAMPTZ",
@@ -710,16 +724,7 @@ class PostgresUploadQueueRepository:
                 deleted_linked = False
                 if record_type == "shot":
                     shot = conn.execute(
-                        """
-                        DELETE FROM shots
-                        WHERE shot_id=%s
-                          AND (
-                            shot_type != 'espresso'
-                            OR exclude_from_local_optimization = TRUE
-                            OR optimization_weight <= 0
-                          )
-                        RETURNING shot_id
-                        """,
+                        "DELETE FROM shots WHERE shot_id=%s RETURNING shot_id",
                         (record_id,),
                     ).fetchone()
                     if shot is not None:

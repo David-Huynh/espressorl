@@ -35,7 +35,7 @@ class ProfileResampler:
             flow=list(payload.get("flow", [])),
             target_flow=list(payload.get("target_flow", [])),
             weight=list(payload.get("weight", [])),
-            grinder_step_size_um=float(payload.get("grinder_step_size_um", 10.0)),
+            microns_per_step=float(payload.get("microns_per_step", 10.0)),
             dose_in_g=float(payload.get("dose_in_g", 18.0)),
             target_yield_g=float(payload.get("target_yield_g", 36.0)),
         )

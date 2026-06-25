@@ -183,7 +183,7 @@ def main() -> None:
             result.shot.shot_id,
             result.recommendation.recommendation_id,
             result.recommendation.mode.value,
-            result.recommendation.grind_delta_steps,
+            result.recommendation.grind_delta_steps_from_current,
             result.recommendation.next_dose_g,
             result.recommendation.target_yield_g,
         )
@@ -215,7 +215,7 @@ def main() -> None:
                 shot.shot_id,
                 result.recommendation.recommendation_id,
                 result.recommendation.mode.value,
-                result.recommendation.grind_delta_steps,
+                result.recommendation.grind_delta_steps_from_current,
                 result.recommendation.next_dose_g,
                 result.recommendation.target_yield_g,
             )
@@ -443,8 +443,8 @@ def maybe_publish_startup_recommendation(
         )
         return
     recipe = Recipe(
-        grind_steps=config.initial_grind_steps,
-        grinder_step_size_um=config.grinder_step_size_um,
+        relative_grind_steps_from_reference=config.initial_relative_grind_steps_from_reference,
+        microns_per_step=config.microns_per_step,
         dose_g=config.initial_dose_g,
         target_yield_g=config.initial_target_yield_g,
     )
@@ -630,7 +630,18 @@ def best_known_recipe_payload(shots: list) -> dict | None:
     return {
         "shot_id": best.shot_id,
         "rating": best.human_rating,
-        "grind_steps": best.grind_steps,
+        "relative_grind_steps_from_reference": best.relative_grind_steps_from_reference,
+        "relative_grind_um_from_reference": best.relative_grind_um_from_reference,
+        "grinder_calibration_mode": best.grinder_calibration_mode.value,
+        "step_direction": best.grinder_step_direction.value,
+        "reference_label": best.grinder_reference_label,
+        "current_absolute_step": best.current_absolute_step,
+        "absolute_reference_step": best.absolute_reference_step,
+        "restorable_absolute_step": (
+            best.absolute_reference_step + best.relative_grind_steps_from_reference
+            if best.absolute_reference_step is not None and best.relative_grind_steps_from_reference is not None
+            else None
+        ),
         "dose_g": best.dose_in_g,
         "target_yield_g": best.target_yield_g,
         "target_ratio": best.target_ratio,

@@ -29,6 +29,15 @@ class SQLiteStore:
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
 
+    def close(self) -> None:
+        self.conn.close()
+
+    def __enter__(self) -> SQLiteStore:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
     def _create_tables(self) -> None:
         self.conn.execute(
             """
@@ -43,9 +52,9 @@ class SQLiteStore:
                 profile_resampled_blob BLOB NOT NULL,
                 raw_profile_available INTEGER NOT NULL,
                 raw_profile_hash TEXT,
-                grind_steps REAL,
-                grind_um REAL,
-                grinder_step_size_um REAL NOT NULL,
+                relative_grind_steps_from_reference REAL,
+                relative_grind_um_from_reference REAL,
+                microns_per_step REAL NOT NULL,
                 dose_in_g REAL NOT NULL,
                 beverage_out_g REAL,
                 brew_ratio REAL,
@@ -53,9 +62,9 @@ class SQLiteStore:
                 target_ratio REAL,
                 shot_time_s REAL,
                 recommendation_id TEXT,
-                recommended_grind_delta_steps INTEGER,
-                recommended_grind_delta_um REAL,
-                recommended_next_grind_steps REAL,
+                recommended_grind_delta_steps_from_current INTEGER,
+                recommended_grind_delta_um_from_current REAL,
+                recommended_projected_relative_step_from_reference REAL,
                 recommended_dose_g REAL,
                 recommended_target_yield_g REAL,
                 recommended_target_ratio REAL,
@@ -102,6 +111,11 @@ class SQLiteStore:
                 profile_temperature_c REAL,
                 final_phase_temperature_c REAL,
                 shot_end_state TEXT,
+                grinder_calibration_mode TEXT NOT NULL DEFAULT 'relative_calibrated',
+                grinder_step_direction TEXT NOT NULL DEFAULT 'higher_is_finer',
+                grinder_reference_label TEXT NOT NULL DEFAULT 'reference',
+                current_absolute_step REAL,
+                absolute_reference_step REAL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -118,10 +132,10 @@ class SQLiteStore:
                 machine_id TEXT NOT NULL,
                 bean_context_id TEXT,
                 grinder_context_id TEXT,
-                grind_delta_steps INTEGER NOT NULL,
-                grind_delta_um REAL NOT NULL,
-                next_grind_steps REAL NOT NULL,
-                next_grind_um REAL NOT NULL,
+                grind_delta_steps_from_current INTEGER NOT NULL,
+                grind_delta_um_from_current REAL NOT NULL,
+                projected_relative_step_from_reference REAL NOT NULL,
+                projected_relative_grind_um_from_reference REAL NOT NULL,
                 next_dose_g REAL NOT NULL,
                 target_yield_g REAL NOT NULL,
                 target_ratio REAL NOT NULL,
@@ -140,7 +154,13 @@ class SQLiteStore:
                 apply_acknowledged_at INTEGER,
                 applied_fields_json TEXT NOT NULL DEFAULT '{}',
                 manual_fields_json TEXT NOT NULL DEFAULT '[]',
-                apply_error TEXT
+                apply_error TEXT,
+                grinder_calibration_mode TEXT NOT NULL DEFAULT 'relative_calibrated',
+                grinder_step_direction TEXT NOT NULL DEFAULT 'higher_is_finer',
+                grinder_reference_label TEXT NOT NULL DEFAULT 'reference',
+                current_absolute_step REAL,
+                absolute_reference_step REAL,
+                projected_absolute_step REAL
             )
             """
         )
@@ -169,7 +189,18 @@ class SQLiteStore:
         self._ensure_column("recommendations", "manual_fields_json", "TEXT NOT NULL DEFAULT '[]'")
         self._ensure_column("recommendations", "apply_error", "TEXT")
         self._ensure_column("recommendations", "grinder_context_id", "TEXT")
+        self._ensure_column("recommendations", "grinder_calibration_mode", "TEXT NOT NULL DEFAULT 'relative_calibrated'")
+        self._ensure_column("recommendations", "grinder_step_direction", "TEXT NOT NULL DEFAULT 'higher_is_finer'")
+        self._ensure_column("recommendations", "grinder_reference_label", "TEXT NOT NULL DEFAULT 'reference'")
+        self._ensure_column("recommendations", "current_absolute_step", "REAL")
+        self._ensure_column("recommendations", "absolute_reference_step", "REAL")
+        self._ensure_column("recommendations", "projected_absolute_step", "REAL")
         self._ensure_column("shots", "grinder_context_id", "TEXT")
+        self._ensure_column("shots", "grinder_calibration_mode", "TEXT NOT NULL DEFAULT 'relative_calibrated'")
+        self._ensure_column("shots", "grinder_step_direction", "TEXT NOT NULL DEFAULT 'higher_is_finer'")
+        self._ensure_column("shots", "grinder_reference_label", "TEXT NOT NULL DEFAULT 'reference'")
+        self._ensure_column("shots", "current_absolute_step", "REAL")
+        self._ensure_column("shots", "absolute_reference_step", "REAL")
         self._ensure_column("shots", "shot_type", "TEXT NOT NULL DEFAULT 'espresso'")
         self._ensure_column("shots", "exclude_from_local_optimization", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("shots", "optimization_weight", "REAL NOT NULL DEFAULT 1.0")
@@ -256,11 +287,11 @@ class SQLiteShotRepository:
             INSERT OR REPLACE INTO shots (
                 shot_id, timestamp, install_id, machine_id, machine_adapter,
                 bean_context_id, grinder_context_id, profile_resampled_blob, raw_profile_available,
-                raw_profile_hash, grind_steps, grind_um, grinder_step_size_um,
+                raw_profile_hash, relative_grind_steps_from_reference, relative_grind_um_from_reference, microns_per_step,
                 dose_in_g, beverage_out_g, brew_ratio, target_yield_g,
                 target_ratio, shot_time_s, recommendation_id,
-                recommended_grind_delta_steps, recommended_grind_delta_um,
-                recommended_next_grind_steps, recommended_dose_g,
+                recommended_grind_delta_steps_from_current, recommended_grind_delta_um_from_current,
+                recommended_projected_relative_step_from_reference, recommended_dose_g,
                 recommended_target_yield_g, recommended_target_ratio,
                 recommendation_decision, recommendation_followed,
                 recommendation_attribution_weight, human_rating, taste_tags_json,
@@ -278,16 +309,18 @@ class SQLiteShotRepository:
                 final_phase_elapsed_s, final_pump_target,
                 final_target_pressure, final_target_flow, final_valve_open,
                 profile_temperature_c, final_phase_temperature_c,
-                shot_end_state,
+                shot_end_state, grinder_calibration_mode,
+                grinder_step_direction, grinder_reference_label,
+                current_absolute_step, absolute_reference_step,
                 created_at, updated_at
             ) VALUES (
                 :shot_id, :timestamp, :install_id, :machine_id, :machine_adapter,
                 :bean_context_id, :grinder_context_id, :profile_resampled_blob, :raw_profile_available,
-                :raw_profile_hash, :grind_steps, :grind_um, :grinder_step_size_um,
+                :raw_profile_hash, :relative_grind_steps_from_reference, :relative_grind_um_from_reference, :microns_per_step,
                 :dose_in_g, :beverage_out_g, :brew_ratio, :target_yield_g,
                 :target_ratio, :shot_time_s, :recommendation_id,
-                :recommended_grind_delta_steps, :recommended_grind_delta_um,
-                :recommended_next_grind_steps, :recommended_dose_g,
+                :recommended_grind_delta_steps_from_current, :recommended_grind_delta_um_from_current,
+                :recommended_projected_relative_step_from_reference, :recommended_dose_g,
                 :recommended_target_yield_g, :recommended_target_ratio,
                 :recommendation_decision, :recommendation_followed,
                 :recommendation_attribution_weight, :human_rating, :taste_tags_json,
@@ -305,7 +338,9 @@ class SQLiteShotRepository:
                 :final_phase_elapsed_s, :final_pump_target,
                 :final_target_pressure, :final_target_flow, :final_valve_open,
                 :profile_temperature_c, :final_phase_temperature_c,
-                :shot_end_state,
+                :shot_end_state, :grinder_calibration_mode,
+                :grinder_step_direction, :grinder_reference_label,
+                :current_absolute_step, :absolute_reference_step,
                 :created_at, :updated_at
             )
             """,
@@ -567,21 +602,25 @@ class SQLiteRecommendationRepository:
             INSERT OR REPLACE INTO recommendations (
                 recommendation_id, created_at, updated_at, expires_at,
                 install_id, machine_id, bean_context_id, grinder_context_id,
-                grind_delta_steps, grind_delta_um, next_grind_steps, next_grind_um, next_dose_g,
+                grind_delta_steps_from_current, grind_delta_um_from_current, projected_relative_step_from_reference, projected_relative_grind_um_from_reference, next_dose_g,
                 target_yield_g, target_ratio, mode, confidence, reason, status,
                 shown_count, accepted_at, ignored_at, edited_at, used_at,
                 superseded_at, source_shot_id, apply_status,
                 apply_acknowledged_at, applied_fields_json, manual_fields_json,
-                apply_error
+                apply_error, grinder_calibration_mode, grinder_step_direction,
+                grinder_reference_label, current_absolute_step,
+                absolute_reference_step, projected_absolute_step
             ) VALUES (
                 :recommendation_id, :created_at, :updated_at, :expires_at,
                 :install_id, :machine_id, :bean_context_id, :grinder_context_id,
-                :grind_delta_steps, :grind_delta_um, :next_grind_steps, :next_grind_um, :next_dose_g,
+                :grind_delta_steps_from_current, :grind_delta_um_from_current, :projected_relative_step_from_reference, :projected_relative_grind_um_from_reference, :next_dose_g,
                 :target_yield_g, :target_ratio, :mode, :confidence, :reason, :status,
                 :shown_count, :accepted_at, :ignored_at, :edited_at, :used_at,
                 :superseded_at, :source_shot_id, :apply_status,
                 :apply_acknowledged_at, :applied_fields_json, :manual_fields_json,
-                :apply_error
+                :apply_error, :grinder_calibration_mode, :grinder_step_direction,
+                :grinder_reference_label, :current_absolute_step,
+                :absolute_reference_step, :projected_absolute_step
             )
             """,
             _recommendation_to_row(recommendation),
@@ -894,15 +933,7 @@ class SQLiteUploadQueueRepository:
             deleted_linked = False
             if record_type == "shot":
                 cursor = conn.execute(
-                    """
-                    DELETE FROM shots
-                    WHERE shot_id=?
-                      AND (
-                        shot_type != 'espresso'
-                        OR exclude_from_local_optimization = 1
-                        OR optimization_weight <= 0
-                      )
-                    """,
+                    "DELETE FROM shots WHERE shot_id=?",
                     (record_id,),
                 )
                 if cursor.rowcount:
@@ -955,9 +986,9 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "profile_resampled_blob": shot.profile.astype(PROFILE_DTYPE).tobytes(),
         "raw_profile_available": bool(shot.raw_profile_available),
         "raw_profile_hash": shot.raw_profile_hash,
-        "grind_steps": shot.grind_steps,
-        "grind_um": shot.grind_um,
-        "grinder_step_size_um": shot.grinder_step_size_um,
+        "relative_grind_steps_from_reference": shot.relative_grind_steps_from_reference,
+        "relative_grind_um_from_reference": shot.relative_grind_um_from_reference,
+        "microns_per_step": shot.microns_per_step,
         "dose_in_g": shot.dose_in_g,
         "beverage_out_g": shot.beverage_out_g,
         "brew_ratio": shot.brew_ratio,
@@ -965,9 +996,9 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "target_ratio": shot.target_ratio,
         "shot_time_s": shot.shot_time_s,
         "recommendation_id": shot.recommendation_id,
-        "recommended_grind_delta_steps": shot.recommended_grind_delta_steps,
-        "recommended_grind_delta_um": shot.recommended_grind_delta_um,
-        "recommended_next_grind_steps": shot.recommended_next_grind_steps,
+        "recommended_grind_delta_steps_from_current": shot.recommended_grind_delta_steps_from_current,
+        "recommended_grind_delta_um_from_current": shot.recommended_grind_delta_um_from_current,
+        "recommended_projected_relative_step_from_reference": shot.recommended_projected_relative_step_from_reference,
         "recommended_dose_g": shot.recommended_dose_g,
         "recommended_target_yield_g": shot.recommended_target_yield_g,
         "recommended_target_ratio": shot.recommended_target_ratio,
@@ -1014,6 +1045,11 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "profile_temperature_c": shot.profile_temperature_c,
         "final_phase_temperature_c": shot.final_phase_temperature_c,
         "shot_end_state": shot.shot_end_state,
+        "grinder_calibration_mode": shot.grinder_calibration_mode.value,
+        "grinder_step_direction": shot.grinder_step_direction.value,
+        "grinder_reference_label": shot.grinder_reference_label,
+        "current_absolute_step": shot.current_absolute_step,
+        "absolute_reference_step": shot.absolute_reference_step,
         "created_at": shot.created_at,
         "updated_at": shot.updated_at,
     }
@@ -1032,9 +1068,9 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         profile=profile.copy(),
         raw_profile_available=bool(row["raw_profile_available"]),
         raw_profile_hash=row["raw_profile_hash"],
-        grind_steps=row["grind_steps"],
-        grind_um=row["grind_um"],
-        grinder_step_size_um=row["grinder_step_size_um"],
+        relative_grind_steps_from_reference=row["relative_grind_steps_from_reference"],
+        relative_grind_um_from_reference=row["relative_grind_um_from_reference"],
+        microns_per_step=row["microns_per_step"],
         dose_in_g=row["dose_in_g"],
         beverage_out_g=row["beverage_out_g"],
         brew_ratio=row["brew_ratio"],
@@ -1042,9 +1078,9 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         target_ratio=row["target_ratio"],
         shot_time_s=row["shot_time_s"],
         recommendation_id=row["recommendation_id"],
-        recommended_grind_delta_steps=row["recommended_grind_delta_steps"],
-        recommended_grind_delta_um=row["recommended_grind_delta_um"],
-        recommended_next_grind_steps=row["recommended_next_grind_steps"],
+        recommended_grind_delta_steps_from_current=row["recommended_grind_delta_steps_from_current"],
+        recommended_grind_delta_um_from_current=row["recommended_grind_delta_um_from_current"],
+        recommended_projected_relative_step_from_reference=row["recommended_projected_relative_step_from_reference"],
         recommended_dose_g=row["recommended_dose_g"],
         recommended_target_yield_g=row["recommended_target_yield_g"],
         recommended_target_ratio=row["recommended_target_ratio"],
@@ -1091,6 +1127,11 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         profile_temperature_c=row["profile_temperature_c"],
         final_phase_temperature_c=row["final_phase_temperature_c"],
         shot_end_state=row["shot_end_state"],
+        grinder_calibration_mode=row["grinder_calibration_mode"],
+        grinder_step_direction=row["grinder_step_direction"],
+        grinder_reference_label=row["grinder_reference_label"],
+        current_absolute_step=row["current_absolute_step"],
+        absolute_reference_step=row["absolute_reference_step"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -1118,10 +1159,10 @@ def _recommendation_to_row(recommendation: Recommendation) -> dict:
         "machine_id": recommendation.machine_id,
         "bean_context_id": recommendation.bean_context_id,
         "grinder_context_id": recommendation.grinder_context_id,
-        "grind_delta_steps": recommendation.grind_delta_steps,
-        "grind_delta_um": recommendation.grind_delta_um,
-        "next_grind_steps": recommendation.next_grind_steps,
-        "next_grind_um": recommendation.next_grind_um,
+        "grind_delta_steps_from_current": recommendation.grind_delta_steps_from_current,
+        "grind_delta_um_from_current": recommendation.grind_delta_um_from_current,
+        "projected_relative_step_from_reference": recommendation.projected_relative_step_from_reference,
+        "projected_relative_grind_um_from_reference": recommendation.projected_relative_grind_um_from_reference,
         "next_dose_g": recommendation.next_dose_g,
         "target_yield_g": recommendation.target_yield_g,
         "target_ratio": recommendation.target_ratio,
@@ -1141,6 +1182,12 @@ def _recommendation_to_row(recommendation: Recommendation) -> dict:
         "applied_fields_json": json.dumps(recommendation.applied_fields),
         "manual_fields_json": json.dumps(recommendation.manual_fields),
         "apply_error": recommendation.apply_error,
+        "grinder_calibration_mode": recommendation.grinder_calibration_mode.value,
+        "grinder_step_direction": recommendation.grinder_step_direction.value,
+        "grinder_reference_label": recommendation.grinder_reference_label,
+        "current_absolute_step": recommendation.current_absolute_step,
+        "absolute_reference_step": recommendation.absolute_reference_step,
+        "projected_absolute_step": recommendation.projected_absolute_step,
     }
 
 
@@ -1154,10 +1201,10 @@ def _row_to_recommendation(row: sqlite3.Row) -> Recommendation:
         machine_id=row["machine_id"],
         bean_context_id=row["bean_context_id"],
         grinder_context_id=row["grinder_context_id"],
-        grind_delta_steps=row["grind_delta_steps"],
-        grind_delta_um=row["grind_delta_um"],
-        next_grind_steps=row["next_grind_steps"],
-        next_grind_um=row["next_grind_um"],
+        grind_delta_steps_from_current=row["grind_delta_steps_from_current"],
+        grind_delta_um_from_current=row["grind_delta_um_from_current"],
+        projected_relative_step_from_reference=row["projected_relative_step_from_reference"],
+        projected_relative_grind_um_from_reference=row["projected_relative_grind_um_from_reference"],
         next_dose_g=row["next_dose_g"],
         target_yield_g=row["target_yield_g"],
         target_ratio=row["target_ratio"],
@@ -1177,6 +1224,12 @@ def _row_to_recommendation(row: sqlite3.Row) -> Recommendation:
         applied_fields=json.loads(row["applied_fields_json"]),
         manual_fields=json.loads(row["manual_fields_json"]),
         apply_error=row["apply_error"],
+        grinder_calibration_mode=row["grinder_calibration_mode"],
+        grinder_step_direction=row["grinder_step_direction"],
+        grinder_reference_label=row["grinder_reference_label"],
+        current_absolute_step=row["current_absolute_step"],
+        absolute_reference_step=row["absolute_reference_step"],
+        projected_absolute_step=row["projected_absolute_step"],
     )
 
 

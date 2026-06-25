@@ -33,7 +33,7 @@ class LocalHistoryPriorProvider:
         shots = [
             shot
             for shot in context.shots
-            if _shot_is_usable_local_prior(shot) and shot.grind_steps is not None
+            if _shot_is_usable_local_prior(shot) and shot.relative_grind_steps_from_reference is not None
         ]
         shots = sorted(shots, key=_shot_prior_score, reverse=True)[: self._limit]
         points: list[PriorPoint] = []
@@ -41,8 +41,8 @@ class LocalHistoryPriorProvider:
             target_ratio = shot.target_ratio or shot.target_yield_g / shot.dose_in_g
             points.append(
                 PriorPoint(
-                    grind_delta_um=(shot.grind_steps - context.current_recipe.grind_steps)
-                    * context.current_recipe.grinder_step_size_um,
+                    grind_delta_um_from_current=(shot.relative_grind_steps_from_reference - context.current_recipe.relative_grind_steps_from_reference)
+                    * context.current_recipe.microns_per_step,
                     dose_g=shot.dose_in_g,
                     target_yield_g=shot.target_yield_g,
                     target_ratio=target_ratio,
@@ -68,7 +68,7 @@ class RuleBasedPriorProvider:
             return [
                 _point_near_current(
                     context,
-                    grind_delta_um=context.current_recipe.grinder_step_size_um,
+                    grind_delta_um_from_current=context.current_recipe.microns_per_step,
                     yield_delta_g=2.0,
                     predicted_reward=0.58,
                     reason="Weak rule prior: sour/fast/weak shots often improve with finer or slightly longer extraction.",
@@ -78,7 +78,7 @@ class RuleBasedPriorProvider:
             return [
                 _point_near_current(
                     context,
-                    grind_delta_um=-context.current_recipe.grinder_step_size_um,
+                    grind_delta_um_from_current=-context.current_recipe.microns_per_step,
                     yield_delta_g=-2.0,
                     predicted_reward=0.58,
                     reason="Weak rule prior: bitter/slow/harsh shots often improve with coarser or slightly shorter extraction.",
@@ -87,7 +87,7 @@ class RuleBasedPriorProvider:
         return [
             _point_near_current(
                 context,
-                grind_delta_um=0.0,
+                grind_delta_um_from_current=0.0,
                 yield_delta_g=0.0,
                 predicted_reward=0.52,
                 reason="Weak rule prior: hold close to current recipe while collecting feedback.",
@@ -156,14 +156,14 @@ def _prior_points_from_community_prior(
 
 
 def _community_point_from_json(point: dict[str, Any], prior_confidence: float) -> PriorPoint | None:
-    grind_delta_um = _number(point.get("grind_delta_um"))
+    grind_delta_um_from_current = _number(point.get("grind_delta_um_from_current"))
     dose_g = _number(point.get("dose_g"))
     target_yield_g = _number(point.get("target_yield_g"))
     target_ratio = _number(point.get("target_ratio"))
     predicted_reward = _number(point.get("predicted_reward"))
     confidence = _number(point.get("confidence"))
     observation_noise = _number(point.get("observation_noise"))
-    if None in {grind_delta_um, dose_g, target_yield_g, target_ratio, predicted_reward, confidence, observation_noise}:
+    if None in {grind_delta_um_from_current, dose_g, target_yield_g, target_ratio, predicted_reward, confidence, observation_noise}:
         return None
     if not 5.0 <= dose_g <= 30.0:
         return None
@@ -180,7 +180,7 @@ def _community_point_from_json(point: dict[str, Any], prior_confidence: float) -
         return None
 
     return PriorPoint(
-        grind_delta_um=grind_delta_um,
+        grind_delta_um_from_current=grind_delta_um_from_current,
         dose_g=dose_g,
         target_yield_g=target_yield_g,
         target_ratio=target_ratio,
@@ -195,14 +195,14 @@ def _community_point_from_json(point: dict[str, Any], prior_confidence: float) -
 def _point_near_current(
     context: OptimizationContext,
     *,
-    grind_delta_um: float,
+    grind_delta_um_from_current: float,
     yield_delta_g: float,
     predicted_reward: float,
     reason: str,
 ) -> PriorPoint:
     target_yield_g = max(5.0, context.current_recipe.target_yield_g + yield_delta_g)
     return PriorPoint(
-        grind_delta_um=grind_delta_um,
+        grind_delta_um_from_current=grind_delta_um_from_current,
         dose_g=context.current_recipe.dose_g,
         target_yield_g=target_yield_g,
         target_ratio=target_yield_g / context.current_recipe.dose_g,

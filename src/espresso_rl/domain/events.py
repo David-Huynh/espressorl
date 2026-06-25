@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .models import (
+    GrinderCalibrationMode,
+    GrinderStepDirection,
     MachineState,
     RecommendationApplyStatus,
     RecommendationDecision,
@@ -101,15 +103,20 @@ class ShotProfileEvent:
     flow: list[float]
     target_flow: list[float]
     weight: list[float]
-    grinder_step_size_um: float
+    microns_per_step: float
     dose_in_g: float
     target_yield_g: float
     schema_version: int = 1
-    grind_steps: float | None = None
+    relative_grind_steps_from_reference: float | None = None
     beverage_out_g: float | None = None
     shot_time_s: float | None = None
     bean_context_id: str | None = None
     grinder_context_id: str | None = None
+    grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
+    grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
+    grinder_reference_label: str = "reference"
+    current_absolute_step: float | None = None
+    absolute_reference_step: float | None = None
     recommendation_id: str | None = None
     shot_type: ShotType = ShotType.ESPRESSO
     utility: bool = False
@@ -148,11 +155,38 @@ class ShotProfileEvent:
         object.__setattr__(self, "time_ms", _numbers(self.time_ms, "time_ms"))
         for name in ("pressure", "target_pressure", "flow", "target_flow", "weight"):
             object.__setattr__(self, name, _numbers(getattr(self, name), name))
-        object.__setattr__(self, "grinder_step_size_um", _number(self.grinder_step_size_um, "grinder_step_size_um"))
+        object.__setattr__(self, "microns_per_step", _number(self.microns_per_step, "microns_per_step"))
         object.__setattr__(self, "dose_in_g", _number(self.dose_in_g, "dose_in_g"))
         object.__setattr__(self, "target_yield_g", _number(self.target_yield_g, "target_yield_g"))
-        if self.grind_steps is not None:
-            object.__setattr__(self, "grind_steps", _number(self.grind_steps, "grind_steps"))
+        if self.relative_grind_steps_from_reference is not None:
+            object.__setattr__(self, "relative_grind_steps_from_reference", _number(self.relative_grind_steps_from_reference, "relative_grind_steps_from_reference"))
+        object.__setattr__(
+            self,
+            "grinder_calibration_mode",
+            GrinderCalibrationMode(self.grinder_calibration_mode),
+        )
+        object.__setattr__(
+            self,
+            "grinder_step_direction",
+            GrinderStepDirection(self.grinder_step_direction),
+        )
+        object.__setattr__(
+            self,
+            "grinder_reference_label",
+            _optional_string(self.grinder_reference_label, "grinder_reference_label", 80) or "reference",
+        )
+        if self.current_absolute_step is not None:
+            object.__setattr__(
+                self,
+                "current_absolute_step",
+                _number(self.current_absolute_step, "current_absolute_step"),
+            )
+        if self.absolute_reference_step is not None:
+            object.__setattr__(
+                self,
+                "absolute_reference_step",
+                _number(self.absolute_reference_step, "absolute_reference_step"),
+            )
         if self.beverage_out_g is not None:
             object.__setattr__(self, "beverage_out_g", _number(self.beverage_out_g, "beverage_out_g"))
         if self.shot_time_s is not None:
@@ -231,8 +265,8 @@ class ShotProfileEvent:
         }
         if len(lengths) != 1:
             raise ValueError("shot profile arrays must have matching lengths")
-        if self.grinder_step_size_um <= 0:
-            raise ValueError("grinder_step_size_um must be positive")
+        if self.microns_per_step <= 0:
+            raise ValueError("microns_per_step must be positive")
         if self.dose_in_g <= 0:
             raise ValueError("dose_in_g must be positive")
         if self.target_yield_g <= 0:
@@ -349,7 +383,7 @@ class RecommendationDecisionEvent:
             raise ValueError("unsupported decision schema_version")
         object.__setattr__(self, "decision", RecommendationDecision(self.decision))
         allowed_edits = {
-            "next_grind_steps",
+            "projected_relative_step_from_reference",
             "next_dose_g",
             "target_yield_g",
             "target_ratio",
@@ -380,8 +414,8 @@ class RecommendationApplyEvent:
             raise ValueError("unsupported apply schema_version")
         object.__setattr__(self, "status", RecommendationApplyStatus(self.status))
         allowed_fields = {
-            "next_grind_steps",
-            "next_grind_um",
+            "projected_relative_step_from_reference",
+            "projected_relative_grind_um_from_reference",
             "next_dose_g",
             "target_yield_g",
             "target_ratio",
@@ -407,8 +441,13 @@ class MachineStateEvent:
     schema_version: int = 1
     bean_context_id: str | None = None
     grinder_context_id: str | None = None
-    grind_steps: float | None = None
-    grinder_step_size_um: float | None = None
+    grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
+    grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
+    grinder_reference_label: str = "reference"
+    relative_grind_steps_from_reference: float | None = None
+    microns_per_step: float | None = None
+    current_absolute_step: float | None = None
+    absolute_reference_step: float | None = None
     dose_in_g: float | None = None
     target_yield_g: float | None = None
     source: str = "unknown"
@@ -420,8 +459,35 @@ class MachineStateEvent:
             raise ValueError("unsupported machine state schema_version")
         object.__setattr__(self, "state", MachineState(self.state))
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
-        if self.grinder_step_size_um is not None and self.grinder_step_size_um <= 0:
-            raise ValueError("grinder_step_size_um must be positive when present")
+        object.__setattr__(
+            self,
+            "grinder_calibration_mode",
+            GrinderCalibrationMode(self.grinder_calibration_mode),
+        )
+        object.__setattr__(
+            self,
+            "grinder_step_direction",
+            GrinderStepDirection(self.grinder_step_direction),
+        )
+        object.__setattr__(
+            self,
+            "grinder_reference_label",
+            _optional_string(self.grinder_reference_label, "grinder_reference_label", 80) or "reference",
+        )
+        if self.current_absolute_step is not None:
+            object.__setattr__(
+                self,
+                "current_absolute_step",
+                _number(self.current_absolute_step, "current_absolute_step"),
+            )
+        if self.absolute_reference_step is not None:
+            object.__setattr__(
+                self,
+                "absolute_reference_step",
+                _number(self.absolute_reference_step, "absolute_reference_step"),
+            )
+        if self.microns_per_step is not None and self.microns_per_step <= 0:
+            raise ValueError("microns_per_step must be positive when present")
         if self.dose_in_g is not None and self.dose_in_g <= 0:
             raise ValueError("dose_in_g must be positive when present")
         if self.target_yield_g is not None and self.target_yield_g <= 0:
@@ -429,15 +495,16 @@ class MachineStateEvent:
 
     def current_recipe(self) -> Recipe | None:
         if (
-            self.grind_steps is None
-            or self.grinder_step_size_um is None
+            self.relative_grind_steps_from_reference is None
+            or self.microns_per_step is None
             or self.dose_in_g is None
             or self.target_yield_g is None
         ):
             return None
         return Recipe(
-            grind_steps=self.grind_steps,
-            grinder_step_size_um=self.grinder_step_size_um,
+            relative_grind_steps_from_reference=self.relative_grind_steps_from_reference,
+            microns_per_step=self.microns_per_step,
             dose_g=self.dose_in_g,
             target_yield_g=self.target_yield_g,
+            grinder_step_direction=self.grinder_step_direction,
         )

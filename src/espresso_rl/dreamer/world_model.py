@@ -36,9 +36,9 @@ class WMTrainMetrics:
 class WorldModel(nn.Module):
     """
     Wraps all world model components and exposes:
-        encode()      — single-observation embedding
-        observe_seq() — run RSSM over a sequence, returns latent states
-        train_step()  — one gradient step on a batch
+        encode()      Ã¢â‚¬â€ single-observation embedding
+        observe_seq() Ã¢â‚¬â€ run RSSM over a sequence, returns latent states
+        train_step()  Ã¢â‚¬â€ one gradient step on a batch
     """
 
     def __init__(self) -> None:
@@ -58,11 +58,11 @@ class WorldModel(nn.Module):
     def encode(
         self,
         profile:      torch.Tensor,   # (B, 5, 100)
-        grind_um:     torch.Tensor,   # (B,)
+        relative_grind_um_from_reference:     torch.Tensor,   # (B,)
         dose_g:       torch.Tensor,   # (B,)
-        step_size_um: torch.Tensor,   # (B,)
+        microns_per_step: torch.Tensor,   # (B,)
     ) -> torch.Tensor:                # (B, embed_dim)
-        return self.encoder(profile, grind_um, dose_g, step_size_um)
+        return self.encoder(profile, relative_grind_um_from_reference, dose_g, microns_per_step)
 
     def observe_sequence(
         self,
@@ -70,7 +70,7 @@ class WorldModel(nn.Module):
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Roll the RSSM over a batch of sequences (training mode — uses posterior).
+        Roll the RSSM over a batch of sequences (training mode Ã¢â‚¬â€ uses posterior).
 
         batch keys:
             obs     : (B, T, 5, 100)
@@ -88,9 +88,9 @@ class WorldModel(nn.Module):
 
         # Use the scalar fields from the first shot in each sequence as proxies
         # (in practice these change slowly and the encoder is robust to this)
-        grind_um     = torch.zeros(B, device=device)
+        relative_grind_um_from_reference     = torch.zeros(B, device=device)
         dose_g       = torch.zeros(B, device=device)
-        step_size_um = torch.ones(B, device=device) * 10.0  # placeholder
+        microns_per_step = torch.ones(B, device=device) * 10.0  # placeholder
 
         h, z = self.rssm.initial_state(B, device)
 
@@ -100,7 +100,7 @@ class WorldModel(nn.Module):
             obs_t   = obs[:, t]                       # (B, 5, 100)
             act_t   = actions[:, t]                   # (B, 2)
 
-            embed_t = self.encoder(obs_t, grind_um, dose_g, step_size_um)  # (B, E)
+            embed_t = self.encoder(obs_t, relative_grind_um_from_reference, dose_g, microns_per_step)  # (B, E)
             act_enc = self.rssm.encode_action(act_t[:, 0], act_t[:, 1])    # (B, 22)
 
             h, z, post_logits, prior_logits = self.rssm.observe_step(h, z, act_enc, embed_t)
@@ -154,7 +154,7 @@ class WorldModel(nn.Module):
         )
 
         # ---- KL divergence ----
-        # post_logits/prior_logits: (B, T, K, M) → (B*T, K, M)
+        # post_logits/prior_logits: (B, T, K, M) Ã¢â€ â€™ (B*T, K, M)
         kl = kl_categorical(
             post_logits.reshape(B * T, *post_logits.shape[2:]),
             prior_logits.reshape(B * T, *prior_logits.shape[2:]),
@@ -186,7 +186,7 @@ class WorldModel(nn.Module):
         batch:  dict[str, torch.Tensor],
         device: torch.device,
     ) -> float:
-        """Reconstruction loss on a held-out batch — used for convergence detection."""
+        """Reconstruction loss on a held-out batch Ã¢â‚¬â€ used for convergence detection."""
         self.eval()
         obs = batch["obs"]
         B, T = obs.shape[:2]

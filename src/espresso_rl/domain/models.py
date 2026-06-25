@@ -82,6 +82,17 @@ class UploadQueueStatus(str, Enum):
     DISABLED = "disabled"
 
 
+class GrinderCalibrationMode(str, Enum):
+    UNCALIBRATED = "uncalibrated"
+    RELATIVE_CALIBRATED = "relative_calibrated"
+    ABSOLUTE_DISPLAY_CALIBRATED = "absolute_display_calibrated"
+
+
+class GrinderStepDirection(str, Enum):
+    HIGHER_IS_FINER = "higher_is_finer"
+    HIGHER_IS_COARSER = "higher_is_coarser"
+
+
 VALID_TASTE_TAGS = {
     "sour",
     "bitter",
@@ -110,15 +121,17 @@ def now_ts() -> int:
 
 @dataclass(frozen=True)
 class Recipe:
-    grind_steps: float
-    grinder_step_size_um: float
+    relative_grind_steps_from_reference: float
+    microns_per_step: float
     dose_g: float
     target_yield_g: float
     target_ratio: float | None = None
+    grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
 
     def __post_init__(self) -> None:
-        if self.grinder_step_size_um <= 0:
-            raise ValueError("grinder_step_size_um must be positive")
+        object.__setattr__(self, "grinder_step_direction", GrinderStepDirection(self.grinder_step_direction))
+        if self.microns_per_step <= 0:
+            raise ValueError("microns_per_step must be positive")
         if self.dose_g <= 0:
             raise ValueError("dose_g must be positive")
         if self.target_yield_g <= 0:
@@ -127,8 +140,12 @@ class Recipe:
             object.__setattr__(self, "target_ratio", self.target_yield_g / self.dose_g)
 
     @property
-    def grind_um(self) -> float:
-        return self.grind_steps * self.grinder_step_size_um
+    def relative_grind_um_from_reference(self) -> float:
+        return self.relative_grind_steps_from_reference * self.microns_per_step * self.grinder_direction_sign
+
+    @property
+    def grinder_direction_sign(self) -> int:
+        return 1 if self.grinder_step_direction == GrinderStepDirection.HIGHER_IS_FINER else -1
 
 
 @dataclass(frozen=True)
@@ -139,7 +156,7 @@ class SafetyBounds:
     target_yield_max_g: float = 60.0
     target_ratio_min: float = 1.2
     target_ratio_max: float = 3.5
-    max_grind_delta_steps: int = 5
+    max_grind_delta_steps_from_current: int = 5
     max_dose_delta_g: float = 1.0
     max_yield_delta_g: float = 8.0
 
@@ -153,10 +170,10 @@ class Recommendation:
     install_id: str
     machine_id: str
     bean_context_id: str | None
-    grind_delta_steps: int
-    grind_delta_um: float
-    next_grind_steps: float
-    next_grind_um: float
+    grind_delta_steps_from_current: int
+    grind_delta_um_from_current: float
+    projected_relative_step_from_reference: float
+    projected_relative_grind_um_from_reference: float
     next_dose_g: float
     target_yield_g: float
     target_ratio: float
@@ -177,11 +194,19 @@ class Recommendation:
     applied_fields: dict[str, Any] = field(default_factory=dict)
     manual_fields: list[str] = field(default_factory=list)
     apply_error: str | None = None
+    grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
+    grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
+    grinder_reference_label: str = "reference"
+    current_absolute_step: float | None = None
+    absolute_reference_step: float | None = None
+    projected_absolute_step: float | None = None
 
     def __post_init__(self) -> None:
         self.mode = RecommendationMode(self.mode)
         self.status = RecommendationStatus(self.status)
         self.apply_status = RecommendationApplyStatus(self.apply_status)
+        self.grinder_calibration_mode = GrinderCalibrationMode(self.grinder_calibration_mode)
+        self.grinder_step_direction = GrinderStepDirection(self.grinder_step_direction)
         self.confidence = max(0.0, min(1.0, float(self.confidence)))
         if self.next_dose_g <= 0:
             raise ValueError("next_dose_g must be positive")
@@ -256,11 +281,11 @@ class ShotRecord:
     machine_id: str
     machine_adapter: str
     profile: np.ndarray
-    grinder_step_size_um: float
+    microns_per_step: float
     dose_in_g: float
     target_yield_g: float
-    grind_steps: float | None = None
-    grind_um: float | None = None
+    relative_grind_steps_from_reference: float | None = None
+    relative_grind_um_from_reference: float | None = None
     beverage_out_g: float | None = None
     brew_ratio: float | None = None
     target_ratio: float | None = None
@@ -270,9 +295,9 @@ class ShotRecord:
     recommendation_id: str | None = None
     raw_profile_available: bool = True
     raw_profile_hash: str | None = None
-    recommended_grind_delta_steps: int | None = None
-    recommended_grind_delta_um: float | None = None
-    recommended_next_grind_steps: float | None = None
+    recommended_grind_delta_steps_from_current: int | None = None
+    recommended_grind_delta_um_from_current: float | None = None
+    recommended_projected_relative_step_from_reference: float | None = None
     recommended_dose_g: float | None = None
     recommended_target_yield_g: float | None = None
     recommended_target_ratio: float | None = None
@@ -319,6 +344,11 @@ class ShotRecord:
     profile_temperature_c: float | None = None
     final_phase_temperature_c: float | None = None
     shot_end_state: str | None = None
+    grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
+    grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
+    grinder_reference_label: str = "reference"
+    current_absolute_step: float | None = None
+    absolute_reference_step: float | None = None
     created_at: int = field(default_factory=now_ts)
     updated_at: int = field(default_factory=now_ts)
 
@@ -341,19 +371,25 @@ class ShotRecord:
         self.shot_type = ShotType(self.shot_type)
         self.recommendation_decision = RecommendationDecision(self.recommendation_decision)
         self.recommendation_followed = FollowThroughState(self.recommendation_followed)
+        self.grinder_calibration_mode = GrinderCalibrationMode(self.grinder_calibration_mode)
+        self.grinder_step_direction = GrinderStepDirection(self.grinder_step_direction)
         self.optimization_weight = float(self.optimization_weight)
         if not 0.0 <= self.optimization_weight <= 1.0:
             raise ValueError("optimization_weight must be between 0 and 1")
-        if self.grinder_step_size_um <= 0:
-            raise ValueError("grinder_step_size_um must be positive")
+        if self.microns_per_step <= 0:
+            raise ValueError("microns_per_step must be positive")
         if self.dose_in_g <= 0:
             raise ValueError("dose_in_g must be positive")
         if self.target_yield_g <= 0:
             raise ValueError("target_yield_g must be positive")
-        if self.grind_um is None and self.grind_steps is not None:
-            self.grind_um = self.grind_steps * self.grinder_step_size_um
-        if self.grind_steps is None and self.grind_um is not None:
-            self.grind_steps = self.grind_um / self.grinder_step_size_um
+        if self.relative_grind_um_from_reference is None and self.relative_grind_steps_from_reference is not None:
+            self.relative_grind_um_from_reference = (
+                self.relative_grind_steps_from_reference * self.microns_per_step * self.grinder_direction_sign
+            )
+        if self.relative_grind_steps_from_reference is None and self.relative_grind_um_from_reference is not None:
+            self.relative_grind_steps_from_reference = (
+                self.relative_grind_um_from_reference / self.microns_per_step / self.grinder_direction_sign
+            )
         if self.beverage_out_g is not None and self.brew_ratio is None:
             self.brew_ratio = self.beverage_out_g / self.dose_in_g
         if self.target_ratio is None:
@@ -397,20 +433,12 @@ class ShotRecord:
         self.dose_in_g = value
 
     @property
-    def step_size_um(self) -> float:
-        return self.grinder_step_size_um
+    def action_grind_delta_um_from_current(self) -> float:
+        return self.recommended_grind_delta_um_from_current or 0.0
 
-    @step_size_um.setter
-    def step_size_um(self, value: float) -> None:
-        self.grinder_step_size_um = value
-
-    @property
-    def action_grind_delta_um(self) -> float:
-        return self.recommended_grind_delta_um or 0.0
-
-    @action_grind_delta_um.setter
-    def action_grind_delta_um(self, value: float) -> None:
-        self.recommended_grind_delta_um = value
+    @action_grind_delta_um_from_current.setter
+    def action_grind_delta_um_from_current(self, value: float) -> None:
+        self.recommended_grind_delta_um_from_current = value
 
     @property
     def action_dose_g(self) -> float:
@@ -421,15 +449,20 @@ class ShotRecord:
         self.recommended_dose_g = value
 
     def to_recipe(self) -> Recipe:
-        if self.grind_steps is None:
-            raise ValueError("shot has no grind_steps")
+        if self.relative_grind_steps_from_reference is None:
+            raise ValueError("shot has no relative_grind_steps_from_reference")
         return Recipe(
-            grind_steps=self.grind_steps,
-            grinder_step_size_um=self.grinder_step_size_um,
+            relative_grind_steps_from_reference=self.relative_grind_steps_from_reference,
+            microns_per_step=self.microns_per_step,
             dose_g=self.dose_in_g,
             target_yield_g=self.target_yield_g,
             target_ratio=self.target_ratio,
+            grinder_step_direction=self.grinder_step_direction,
         )
+
+    @property
+    def grinder_direction_sign(self) -> int:
+        return 1 if self.grinder_step_direction == GrinderStepDirection.HIGHER_IS_FINER else -1
 
     def as_optimizer_payload(self) -> dict[str, Any]:
         return {

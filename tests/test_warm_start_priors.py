@@ -36,7 +36,7 @@ class WarmStartPriorTests(unittest.TestCase):
             prior_provider=StaticPriorProvider(
                 [
                     PriorPoint(
-                        grind_delta_um=0.0,
+                        grind_delta_um_from_current=0.0,
                         dose_g=18.0,
                         target_yield_g=40.0,
                         target_ratio=40.0 / 18.0,
@@ -54,7 +54,7 @@ class WarmStartPriorTests(unittest.TestCase):
 
         self.assertEqual(recommendation.mode, RecommendationMode.WARM_STARTED_BO)
         self.assertLessEqual(abs(recommendation.target_yield_g - 36.0), 4.0)
-        self.assertLessEqual(abs(recommendation.grind_delta_steps), 2)
+        self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
 
     def test_bad_prior_outside_safety_bounds_is_not_used_for_warm_start(self) -> None:
         shots = MemoryShotRepository()
@@ -66,7 +66,7 @@ class WarmStartPriorTests(unittest.TestCase):
             prior_provider=StaticPriorProvider(
                 [
                     PriorPoint(
-                        grind_delta_um=500.0,
+                        grind_delta_um_from_current=500.0,
                         dose_g=40.0,
                         target_yield_g=120.0,
                         target_ratio=3.0,
@@ -83,13 +83,13 @@ class WarmStartPriorTests(unittest.TestCase):
         recommendation = ingest_and_feedback(service, shot_event("shot_1", 1))
 
         self.assertEqual(recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
-        self.assertLessEqual(abs(recommendation.grind_delta_steps), 2)
+        self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
         self.assertLessEqual(abs(recommendation.target_yield_g - 36.0), 4.0)
 
     def test_local_data_disables_external_priors_after_sparse_startup(self) -> None:
         current = Recipe(
-            grind_steps=42,
-            grinder_step_size_um=12.5,
+            relative_grind_steps_from_reference=42,
+            microns_per_step=12.5,
             dose_g=18.0,
             target_yield_g=36.0,
         )
@@ -107,7 +107,7 @@ class WarmStartPriorTests(unittest.TestCase):
             now=100,
             prior_points=[
                 PriorPoint(
-                    grind_delta_um=25.0,
+                    grind_delta_um_from_current=25.0,
                     dose_g=18.0,
                     target_yield_g=44.0,
                     target_ratio=44.0 / 18.0,
@@ -144,7 +144,7 @@ class WarmStartPriorTests(unittest.TestCase):
 
         self.assertEqual(recommendation.source_shot_id, "shot_2")
         self.assertTrue(
-            recommendation.next_grind_steps > current.grind_steps
+            recommendation.projected_relative_step_from_reference > current.relative_grind_steps_from_reference
             or recommendation.target_yield_g > current.target_yield_g
         )
 
@@ -167,10 +167,10 @@ class WarmStartPriorTests(unittest.TestCase):
         recommendation = ConservativeBOOptimizer().recommend(context)
 
         self.assertTrue(
-            recommendation.next_grind_steps != current.grind_steps
+            recommendation.projected_relative_step_from_reference != current.relative_grind_steps_from_reference
             or recommendation.target_yield_g != current.target_yield_g
         )
-        self.assertLessEqual(abs(recommendation.grind_delta_steps), 2)
+        self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
         self.assertLessEqual(abs(recommendation.target_yield_g - current.target_yield_g), 4.0)
 
     def test_ignored_and_not_followed_shots_are_not_optimizer_observations(self) -> None:
@@ -194,7 +194,7 @@ class WarmStartPriorTests(unittest.TestCase):
 
         self.assertEqual(recommendation.mode, RecommendationMode.ZERO_OBSERVE)
         self.assertIsNone(recommendation.source_shot_id)
-        self.assertEqual(recommendation.next_grind_steps, current.grind_steps)
+        self.assertEqual(recommendation.projected_relative_step_from_reference, current.relative_grind_steps_from_reference)
 
     def test_community_provider_revalidates_and_caps_released_prior_json(self) -> None:
         repo = FakeCommunityPriorRepo(
@@ -210,7 +210,7 @@ class WarmStartPriorTests(unittest.TestCase):
                         },
                         "points": [
                             {
-                                "grind_delta_um": 999.0,
+                                "grind_delta_um_from_current": 999.0,
                                 "dose_g": 18.0,
                                 "target_yield_g": 36.0,
                                 "target_ratio": 2.0,
@@ -230,8 +230,8 @@ class WarmStartPriorTests(unittest.TestCase):
             bean_context_id="bean_1",
             machine_adapter="gaggimate",
             current_recipe=Recipe(
-                grind_steps=42,
-                grinder_step_size_um=12.5,
+                relative_grind_steps_from_reference=42,
+                microns_per_step=12.5,
                 dose_g=18.0,
                 target_yield_g=36.0,
             ),
@@ -280,7 +280,7 @@ def released_prior(
             },
             "points": [
                 {
-                    "grind_delta_um": 0.0,
+                    "grind_delta_um_from_current": 0.0,
                     "dose_g": 18.0,
                     "target_yield_g": 36.0,
                     "target_ratio": 2.0,
@@ -309,10 +309,10 @@ def shot_record(
         machine_id="machine_1",
         machine_adapter="gaggimate",
         profile=np.zeros((5, 100), dtype=np.float32),
-        grinder_step_size_um=12.5,
+        microns_per_step=12.5,
         dose_in_g=18.0,
         target_yield_g=36.0,
-        grind_steps=42,
+        relative_grind_steps_from_reference=42,
         beverage_out_g=36.0,
         bean_context_id="bean_1",
         reward=reward,

@@ -1,5 +1,5 @@
 """
-Observation encoder: (5, 100) shot profile + 3 scalars → 256-dim embedding.
+Observation encoder: (5, 100) shot profile + 3 scalars Ã¢â€ â€™ 256-dim embedding.
 
 Profile channels (axis 0):
     0  pressure         actual pump pressure (bar)
@@ -9,9 +9,9 @@ Profile channels (axis 0):
     4  weight           scale output weight (g)
 
 Scalar features:
-    grind_um / 5000       (typical range 0–5000 μm → roughly 0–1)
-    dose_g   / 25         (typical range 15–20 g   → roughly 0–1)
-    step_size_um / 20     (typical range 5–15 μm   → roughly 0–1)
+    relative_grind_um_from_reference / 5000       (typical range 0Ã¢â‚¬â€œ5000 ÃŽÂ¼m Ã¢â€ â€™ roughly 0Ã¢â‚¬â€œ1)
+    dose_g   / 25         (typical range 15Ã¢â‚¬â€œ20 g   Ã¢â€ â€™ roughly 0Ã¢â‚¬â€œ1)
+    microns_per_step / 20     (typical range 5Ã¢â‚¬â€œ15 ÃŽÂ¼m   Ã¢â€ â€™ roughly 0Ã¢â‚¬â€œ1)
 """
 
 import torch
@@ -31,13 +31,13 @@ class ObservationEncoder(nn.Module):
 
         # 1D-CNN over the 100-point time axis
         # Input : (B, 5, 100)
-        # Output: (B, 128, 13) → flatten → 1664 → Linear(embed_dim)
+        # Output: (B, 128, 13) Ã¢â€ â€™ flatten Ã¢â€ â€™ 1664 Ã¢â€ â€™ Linear(embed_dim)
         self.cnn = nn.Sequential(
-            nn.Conv1d(5,  32,  kernel_size=5, stride=2, padding=2),  # → (B, 32, 50)
+            nn.Conv1d(5,  32,  kernel_size=5, stride=2, padding=2),  # Ã¢â€ â€™ (B, 32, 50)
             nn.ELU(),
-            nn.Conv1d(32, 64,  kernel_size=5, stride=2, padding=2),  # → (B, 64, 25)
+            nn.Conv1d(32, 64,  kernel_size=5, stride=2, padding=2),  # Ã¢â€ â€™ (B, 64, 25)
             nn.ELU(),
-            nn.Conv1d(64, 128, kernel_size=3, stride=2, padding=1),  # → (B, 128, 13)
+            nn.Conv1d(64, 128, kernel_size=3, stride=2, padding=1),  # Ã¢â€ â€™ (B, 128, 13)
             nn.ELU(),
         )
         cnn_out_dim = 128 * 13  # 1664
@@ -68,9 +68,9 @@ class ObservationEncoder(nn.Module):
     def forward(
         self,
         profile: torch.Tensor,     # (*, 5, 100)
-        grind_um: torch.Tensor,    # (*,)
+        relative_grind_um_from_reference: torch.Tensor,    # (*,)
         dose_g: torch.Tensor,      # (*,)
-        step_size_um: torch.Tensor,  # (*,)
+        microns_per_step: torch.Tensor,  # (*,)
     ) -> torch.Tensor:             # (*, embed_dim)
 
         *batch, C, T = profile.shape
@@ -89,9 +89,9 @@ class ObservationEncoder(nn.Module):
 
         # Scalar features
         scalars = torch.stack([
-            grind_um.view(B)    / 5000.0,
+            relative_grind_um_from_reference.view(B)    / 5000.0,
             dose_g.view(B)      / 25.0,
-            step_size_um.view(B) / 20.0,
+            microns_per_step.view(B) / 20.0,
         ], dim=-1)                                  # (B, 3)
         scalar_emb = self.scalar_mlp(scalars)       # (B, 32)
 

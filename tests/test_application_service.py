@@ -242,8 +242,8 @@ def idle_event(timestamp: int, **overrides) -> MachineStateEvent:
         "timestamp": timestamp,
         "state": MachineState.IDLE,
         "bean_context_id": "bean_1",
-        "grind_steps": 42,
-        "grinder_step_size_um": 12.5,
+        "relative_grind_steps_from_reference": 42,
+        "microns_per_step": 12.5,
         "dose_in_g": 18.0,
         "target_yield_g": 36.0,
     }
@@ -264,8 +264,8 @@ def shot_event(shot_id: str, timestamp: int, **overrides) -> ShotProfileEvent:
         "flow": [0.0, 2.0, 2.0],
         "target_flow": [0.0, 2.0, 2.0],
         "weight": [0.0, 10.0, 36.0],
-        "grinder_step_size_um": 12.5,
-        "grind_steps": 42,
+        "microns_per_step": 12.5,
+        "relative_grind_steps_from_reference": 42,
         "dose_in_g": 18.0,
         "target_yield_g": 36.0,
         "beverage_out_g": 36.0,
@@ -325,7 +325,7 @@ class ApplicationServiceTests(unittest.TestCase):
         feedback = service.record_feedback(feedback_event("shot_1", 3, rating=4))
         self.assertEqual(feedback.recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
         self.assertEqual(feedback.recommendation.next_dose_g, 18.0)
-        self.assertLessEqual(abs(feedback.recommendation.grind_delta_steps), 2)
+        self.assertLessEqual(abs(feedback.recommendation.grind_delta_steps_from_current), 2)
         self.assertLessEqual(abs(feedback.recommendation.target_yield_g - 36.0), 4.0)
         self.assertTrue(feedback.shot.feedback_recorded)
         self.assertLess(shots.get("shot_1").reward_confidence, 1.0)  # type: ignore[union-attr]
@@ -407,7 +407,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service.ingest_shot_profile(shot_event("shot_a", 1, grinder_context_id="grinder_a"))
         rec_a = service.record_feedback(feedback_event("shot_a", 2, rating=4)).recommendation
         service.ingest_shot_profile(
-            shot_event("shot_b", 3, grinder_context_id="grinder_b", grind_steps=52)
+            shot_event("shot_b", 3, grinder_context_id="grinder_b", relative_grind_steps_from_reference=52)
         )
         rec_b = service.record_feedback(feedback_event("shot_b", 4, rating=2)).recommendation
 
@@ -430,6 +430,62 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(current_a.recommendation_id, rec_a.recommendation_id)  # type: ignore[union-attr]
         self.assertEqual(current_b.recommendation_id, rec_b.recommendation_id)  # type: ignore[union-attr]
         self.assertNotEqual(current_a.recommendation_id, current_b.recommendation_id)  # type: ignore[union-attr]
+
+    def test_relative_only_grinder_context_emits_relative_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        service.ingest_shot_profile(
+            shot_event(
+                "shot_1",
+                1,
+                grinder_calibration_mode="relative_calibrated",
+                grinder_context_id="grinder_a",
+                relative_grind_steps_from_reference=3,
+                current_absolute_step=None,
+                absolute_reference_step=None,
+            )
+        )
+        rec = service.record_feedback(feedback_event("shot_1", 2, rating=4)).recommendation
+
+        self.assertIsNotNone(rec)
+        self.assertIsNone(rec.current_absolute_step)  # type: ignore[union-attr]
+        self.assertIsNone(rec.projected_absolute_step)  # type: ignore[union-attr]
+        self.assertEqual(
+            rec.projected_relative_step_from_reference,  # type: ignore[union-attr]
+            3 + rec.grind_delta_steps_from_current,  # type: ignore[union-attr]
+        )
+
+    def test_absolute_display_grinder_context_keeps_optimizer_input_relative(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        service.ingest_shot_profile(
+            shot_event(
+                "shot_1",
+                1,
+                grinder_calibration_mode="absolute_display_calibrated",
+                grinder_context_id="grinder_a",
+                relative_grind_steps_from_reference=3,
+                current_absolute_step=42,
+                absolute_reference_step=39,
+            )
+        )
+        rec = service.record_feedback(feedback_event("shot_1", 2, rating=4)).recommendation
+
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec.current_absolute_step, 42)  # type: ignore[union-attr]
+        self.assertEqual(rec.absolute_reference_step, 39)  # type: ignore[union-attr]
+        self.assertEqual(
+            rec.projected_relative_step_from_reference,  # type: ignore[union-attr]
+            3 + rec.grind_delta_steps_from_current,  # type: ignore[union-attr]
+        )
+        self.assertEqual(
+            rec.projected_absolute_step,  # type: ignore[union-attr]
+            42 + rec.grind_delta_steps_from_current,  # type: ignore[union-attr]
+        )
 
     def test_feedback_rejects_a_recommendation_id_mismatch(self) -> None:
         shots = MemoryShotRepository()
@@ -575,7 +631,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 "shot_2",
                 3,
                 recommendation_id=rec.recommendation_id,
-                grind_steps=rec.next_grind_steps,
+                relative_grind_steps_from_reference=rec.projected_relative_step_from_reference,
                 dose_in_g=rec.next_dose_g,
                 target_yield_g=rec.target_yield_g,
                 beverage_out_g=rec.target_yield_g,
@@ -643,7 +699,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 "shot_2",
                 3,
                 recommendation_id=first.recommendation_id,
-                grind_steps=first.next_grind_steps,
+                relative_grind_steps_from_reference=first.projected_relative_step_from_reference,
                 dose_in_g=first.next_dose_g,
                 target_yield_g=first.target_yield_g,
                 beverage_out_g=first.target_yield_g,
@@ -689,7 +745,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 "shot_2",
                 3,
                 recommendation_id=first.recommendation_id,
-                grind_steps=first.next_grind_steps,
+                relative_grind_steps_from_reference=first.projected_relative_step_from_reference,
                 dose_in_g=first.next_dose_g,
                 target_yield_g=38.0,
                 beverage_out_g=37.5,
@@ -717,8 +773,8 @@ class ApplicationServiceTests(unittest.TestCase):
                 timestamp=2,
                 state=MachineState.IDLE,
                 bean_context_id="bean_1",
-                grind_steps=42,
-                grinder_step_size_um=12.5,
+                relative_grind_steps_from_reference=42,
+                microns_per_step=12.5,
                 dose_in_g=18.0,
                 target_yield_g=36.0,
             )
@@ -743,8 +799,8 @@ class ApplicationServiceTests(unittest.TestCase):
                 timestamp=2,
                 state=MachineState.IDLE,
                 bean_context_id="bean_1",
-                grind_steps=old.next_grind_steps + 10,
-                grinder_step_size_um=12.5,
+                relative_grind_steps_from_reference=old.projected_relative_step_from_reference + 10,
+                microns_per_step=12.5,
                 dose_in_g=18.0,
                 target_yield_g=36.0,
             )
@@ -775,8 +831,8 @@ class ApplicationServiceTests(unittest.TestCase):
                 timestamp=3,
                 state=MachineState.IDLE,
                 bean_context_id="bean_1",
-                grind_steps=rec.next_grind_steps,
-                grinder_step_size_um=12.5,
+                relative_grind_steps_from_reference=rec.projected_relative_step_from_reference,
+                microns_per_step=12.5,
                 dose_in_g=rec.next_dose_g,
                 target_yield_g=rec.target_yield_g,
             )
@@ -805,7 +861,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 status=RecommendationApplyStatus.PARTIALLY_APPLIED,
                 timestamp=3,
                 applied_fields={"target_yield_g": rec.target_yield_g},
-                manual_fields=["next_grind_steps", "next_dose_g"],
+                manual_fields=["projected_relative_step_from_reference", "next_dose_g"],
                 message="Target yield applied; grind and dose are manual.",
             )
         )
@@ -813,7 +869,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(applied.status, RecommendationStatus.ACCEPTED)
         self.assertEqual(applied.apply_status, RecommendationApplyStatus.PARTIALLY_APPLIED)
         self.assertEqual(applied.applied_fields["target_yield_g"], rec.target_yield_g)
-        self.assertEqual(applied.manual_fields, ["next_grind_steps", "next_dose_g"])
+        self.assertEqual(applied.manual_fields, ["projected_relative_step_from_reference", "next_dose_g"])
         self.assertIsNone(applied.used_at)
         self.assertEqual(recs.get(rec.recommendation_id).status, RecommendationStatus.ACCEPTED)  # type: ignore[union-attr]
 
@@ -833,8 +889,8 @@ class ApplicationServiceTests(unittest.TestCase):
                     timestamp=shown_count + 1,
                     state=MachineState.IDLE,
                     bean_context_id="bean_1",
-                    grind_steps=42,
-                    grinder_step_size_um=12.5,
+                    relative_grind_steps_from_reference=42,
+                    microns_per_step=12.5,
                     dose_in_g=18.0,
                     target_yield_g=36.0,
                 )
@@ -868,7 +924,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 "shot_2",
                 2,
                 recommendation_id=rec.recommendation_id,
-                grind_steps=rec.next_grind_steps,
+                relative_grind_steps_from_reference=rec.projected_relative_step_from_reference,
                 dose_in_g=rec.next_dose_g,
                 target_yield_g=rec.target_yield_g,
                 beverage_out_g=rec.target_yield_g,
@@ -943,7 +999,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 status=RecommendationApplyStatus.PARTIALLY_APPLIED,
                 timestamp=4,
                 applied_fields={"target_yield_g": rec.target_yield_g},
-                manual_fields=["next_grind_steps"],
+                manual_fields=["projected_relative_step_from_reference"],
             )
         )  # applied
 

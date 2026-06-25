@@ -14,8 +14,8 @@ class Config:
     mqtt_port: int = 1883
     mqtt_user: str = ""
     mqtt_password: str = ""
-    # Grinder geometry — user registers once
-    grinder_step_size_um: float = 10.0  # μm per click/step
+    # Grinder geometry Ã¢â‚¬â€ user registers once
+    microns_per_step: float = 10.0  # ÃŽÂ¼m per click/step
     grinder_model: str = ""
     install_id: str = "local_install"
     machine_id: str = "gaggimate:local"
@@ -24,9 +24,9 @@ class Config:
     # Machine geometry
     machine_pressure_bar: float = 9.0
     basket_size_ml: float = 18.0
-    # Initial state — user sets these before first run
-    initial_grind_steps: float | None = None
-    initial_grind_um: float = 0.0
+    # Initial state Ã¢â‚¬â€ user sets these before first run
+    initial_relative_grind_steps_from_reference: float | None = None
+    initial_relative_grind_um_from_reference: float = 0.0
     initial_dose_g: float = 18.0
     initial_target_yield_g: float = 36.0
     # Reward weighting: r = alpha*human + (1-alpha)*profile_score
@@ -78,15 +78,15 @@ class Config:
         data_dir = _DATA_DIR
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        step_size_um = float(opts.get("grinder_step_size_um", 10.0))
-        initial_grind_um = float(opts.get("initial_grind_um", 0.0))
-        raw_steps = _optional_number(opts.get("initial_grind_steps"))
+        microns_per_step = float(opts.get("microns_per_step", 10.0))
+        initial_relative_grind_um_from_reference = float(opts.get("initial_relative_grind_um_from_reference", 0.0))
+        raw_steps = _optional_number(opts.get("initial_relative_grind_steps_from_reference"))
         if raw_steps is None:
-            initial_grind_steps = initial_grind_um / step_size_um if initial_grind_um else 0.0
+            initial_relative_grind_steps_from_reference = initial_relative_grind_um_from_reference / microns_per_step if initial_relative_grind_um_from_reference else 0.0
         else:
-            initial_grind_steps = raw_steps
-        if initial_grind_um == 0.0 and initial_grind_steps:
-            initial_grind_um = initial_grind_steps * step_size_um
+            initial_relative_grind_steps_from_reference = raw_steps
+        if initial_relative_grind_um_from_reference == 0.0 and initial_relative_grind_steps_from_reference:
+            initial_relative_grind_um_from_reference = initial_relative_grind_steps_from_reference * microns_per_step
 
         storage_backend = str(
             opts.get("storage_backend", os.getenv("ESPRESSORL_STORAGE_BACKEND", "sqlite"))
@@ -107,7 +107,7 @@ class Config:
             mqtt_port=int(opts.get("mqtt_port", 1883)),
             mqtt_user=opts.get("mqtt_user", os.getenv("MQTT_USER", "")),
             mqtt_password=opts.get("mqtt_password", os.getenv("MQTT_PASSWORD", "")),
-            grinder_step_size_um=step_size_um,
+            microns_per_step=microns_per_step,
             grinder_model=opts.get("grinder_model", ""),
             install_id=opts.get("install_id", os.getenv("ESPRESSORL_INSTALL_ID", "local_install")),
             machine_id=opts.get("machine_id", "gaggimate:local"),
@@ -117,8 +117,8 @@ class Config:
             ),
             machine_pressure_bar=float(opts.get("machine_pressure_bar", 9.0)),
             basket_size_ml=float(opts.get("basket_size_ml", 18.0)),
-            initial_grind_steps=initial_grind_steps,
-            initial_grind_um=initial_grind_um,
+            initial_relative_grind_steps_from_reference=initial_relative_grind_steps_from_reference,
+            initial_relative_grind_um_from_reference=initial_relative_grind_um_from_reference,
             initial_dose_g=float(opts.get("initial_dose_g", 18.0)),
             initial_target_yield_g=float(opts.get("initial_target_yield_g", 36.0)),
             alpha=float(opts.get("alpha", 0.5)),
