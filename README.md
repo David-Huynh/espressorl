@@ -461,17 +461,29 @@ model training. Exports are written under `training_export_dir` and are capped
 by `training_export_max_rows`. The export format is intentionally boring and
 auditable:
 
-- `training_rows.jsonl`: canonical UTF-8 JSON Lines, one revalidated training
-  row per line. This is the authoritative training file.
+- `training_rows.jsonl`: canonical UTF-8 JSON Lines, one
+  `espresso_rl_training_transition_v1` object per line. This is the
+  authoritative trainer input.
 - `training_rows.csv`: a spreadsheet-friendly summary for review. It omits the
   profile arrays and escapes formula-looking string cells.
 - `manifest.json`: row counts, file hashes, dataset SHA-256, schema version,
-  source git SHA, and zero-trust flags.
+  canonical row format, source git SHA, and zero-trust flags.
 - `README.txt`: plain-language format notes.
 
+Each JSONL transition has `source`, `context`, `action`, `recommendation`,
+`observation`, and `reward` sections. It is not a raw upload dump. The exporter
+revalidates each row, strips adapter payload shape, excludes absolute grinder
+display fields, and canonicalizes grind as relative steps plus relative microns
+from the grinder context reference. Not-followed or ignored recommendations may
+remain visible for analysis, but their recommendation attribution weight is
+zero so they are not treated as successful optimizer actions. Sequence trainers
+should group rows by `install_id`, `machine_id`, `bean_context_id`, and
+`grinder_context_id`.
+
 No export artifact uses pickle, model binaries, SQLite dumps, parquet, macros,
-or another executable/opaque format. Trainers should publish the model file
-SHA-256 separately and configure it with `optimizer_model_artifact_sha256`.
+absolute grinder settings, or another executable/opaque format. Trainers should
+publish the model file SHA-256 separately and configure it with
+`optimizer_model_artifact_sha256`.
 
 ## Warm-Started BO Priors
 

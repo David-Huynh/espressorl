@@ -4,22 +4,30 @@ import csv
 import hashlib
 import io
 import json
+import math
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 from espresso_rl.application.upload_validation import validate_upload_payload
 from espresso_rl.domain.artifacts import ArtifactInfo
 from espresso_rl.domain.community import CommunityTrainingRow
+from espresso_rl.domain.training import (
+    TRAINING_DATASET_FORMAT,
+    TRAINING_SCHEMA_VERSION,
+    TRAINING_TRANSITION_FORMAT,
+    validate_training_transition,
+)
 from espresso_rl.ports.artifacts import TextArtifactWriter
 from espresso_rl.ports.community import CommunityWarehouseRepository
 
-EXPORT_SCHEMA_VERSION = 1
-TRAINING_ROW_FORMAT = "espresso_rl_training_row_v1"
-DATASET_FORMAT = "espresso_rl_training_dataset_v1"
+EXPORT_SCHEMA_VERSION = TRAINING_SCHEMA_VERSION
+TRAINING_ROW_FORMAT = TRAINING_TRANSITION_FORMAT
+DATASET_FORMAT = TRAINING_DATASET_FORMAT
 JSONL_FILENAME = "training_rows.jsonl"
 CSV_FILENAME = "training_rows.csv"
 README_FILENAME = "README.txt"
 MANIFEST_FILENAME = "manifest.json"
+_INVALID_RECOMMENDATION = object()
 
 CSV_COLUMNS = [
     "training_row_id",
@@ -35,20 +43,31 @@ CSV_COLUMNS = [
     "grinder_context_id",
     "profile_resampled_sha256",
     "raw_profile_hash",
-    "dose_in_g",
+    "dose_g",
     "target_yield_g",
-    "beverage_out_g",
     "target_ratio",
-    "shot_time_s",
-    "microns_per_step",
     "relative_grind_steps_from_reference",
     "relative_grind_um_from_reference",
+    "microns_per_step",
+    "step_direction",
+    "beverage_out_g",
+    "brew_ratio",
+    "shot_time_s",
     "human_rating",
     "taste_tags",
     "reward",
     "reward_confidence",
-    "recommendation_followed",
     "optimization_weight",
+    "recommendation_id",
+    "recommendation_followed",
+    "recommendation_attribution_weight",
+    "recommended_grind_delta_steps_from_current",
+    "recommended_grind_delta_um_from_current",
+    "recommended_projected_relative_step_from_reference",
+    "recommended_projected_relative_grind_um_from_reference",
+    "recommended_dose_g",
+    "recommended_target_yield_g",
+    "recommended_target_ratio",
     "profile_flow_valid",
     "profile_flow_masked",
 ]
@@ -166,16 +185,175 @@ def _export_training_row(row: CommunityTrainingRow) -> dict[str, Any] | None:
     validation = validate_upload_payload(payload)
     if not validation.ok:
         return None
-    return {
+    transition = _training_transition_from_payload(row, payload)
+    if transition is None:
+        return None
+    if validate_training_transition(transition):
+        return None
+    return transition
+
+
+def _training_transition_from_payload(
+    row: CommunityTrainingRow,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    microns_per_step = _number(payload.get("microns_per_step"))
+    if microns_per_step is None or microns_per_step <= 0:
+        return None
+    step_direction = str(payload.get("step_direction") or "higher_is_finer")
+    if step_direction not in {"higher_is_finer", "higher_is_coarser"}:
+        return None
+
+    relative_steps = _relative_grind_steps_from_reference(payload)
+    if relative_steps is None:
+        return None
+    relative_um = _number(payload.get("relative_grind_um_from_reference"))
+    if relative_um is None:
+        relative_um = relative_steps * microns_per_step * _direction_sign(step_direction)
+
+    dose_g = _number(payload.get("dose_in_g"))
+    target_yield_g = _number(payload.get("target_yield_g"))
+    if dose_g is None or target_yield_g is None:
+        return None
+    target_ratio = _number(payload.get("target_ratio"))
+    if target_ratio is None:
+        target_ratio = target_yield_g / dose_g
+
+    recommendation = _recommendation_from_payload(payload, microns_per_step, step_direction)
+    if recommendation is _INVALID_RECOMMENDATION:
+        return None
+
+    transition = {
         "format": TRAINING_ROW_FORMAT,
         "schema_version": EXPORT_SCHEMA_VERSION,
-        "training_row_id": row.training_row_id,
-        "source_validation_id": row.source_validation_id,
-        "install_id": row.install_id,
-        "payload_hash": row.payload_hash,
-        "trust_weight": round(float(row.trust_weight), 6),
-        "payload": payload,
+        "training_row_id": int(row.training_row_id),
+        "source": {
+            "source_kind": "community_validated_shot",
+            "source_validation_id": int(row.source_validation_id),
+            "install_id": row.install_id,
+            "payload_hash": row.payload_hash,
+            "trust_weight": round(float(row.trust_weight), 6),
+        },
+        "context": {
+            "machine_id": payload.get("machine_id"),
+            "machine_adapter": payload.get("machine_adapter"),
+            "bean_context_id": payload.get("bean_context_id"),
+            "grinder_context_id": payload.get("grinder_context_id"),
+            "microns_per_step": round(microns_per_step, 6),
+            "step_direction": step_direction,
+        },
+        "action": {
+            "relative_grind_steps_from_reference": round(relative_steps, 6),
+            "relative_grind_um_from_reference": round(relative_um, 6),
+            "dose_g": round(dose_g, 4),
+            "target_yield_g": round(target_yield_g, 4),
+            "target_ratio": round(target_ratio, 6),
+        },
+        "recommendation": recommendation,
+        "observation": {
+            "shot_id": payload.get("shot_id"),
+            "timestamp": int(payload.get("timestamp")),
+            "beverage_out_g": _rounded(payload.get("beverage_out_g"), 4),
+            "brew_ratio": _rounded(payload.get("brew_ratio"), 6),
+            "shot_time_s": _rounded(payload.get("shot_time_s"), 4),
+            "profile_resampled": payload.get("profile_resampled"),
+            "raw_profile_available": bool(payload.get("raw_profile_available", payload.get("profile_resampled") is not None)),
+            "raw_profile_hash": payload.get("raw_profile_hash"),
+            "profile_score": _rounded(payload.get("profile_score"), 6),
+            "profile_mse": _rounded(payload.get("profile_mse"), 6),
+            "profile_flow_valid": bool(payload.get("profile_flow_valid", True)),
+            "profile_flow_masked": bool(payload.get("profile_flow_masked", False)),
+            "profile_id": payload.get("profile_id"),
+            "profile_type": payload.get("profile_type"),
+            "profile_phase_count": payload.get("profile_phase_count"),
+            "shot_end_state": payload.get("shot_end_state"),
+        },
+        "reward": {
+            "human_rating": payload.get("human_rating"),
+            "taste_tags": list(payload.get("taste_tags") or []),
+            "reward": _rounded(payload.get("reward"), 6),
+            "confidence": round(_clamp(_number(payload.get("reward_confidence")) or 0.0, 0.0, 1.0), 6),
+            "feedback_recorded": bool(payload.get("feedback_recorded", payload.get("human_rating") is not None)),
+            "optimization_weight": round(_clamp(_number(payload.get("optimization_weight")) or 0.0, 0.0, 1.0), 6),
+        },
     }
+    return _drop_none_values(transition)
+
+
+def _recommendation_from_payload(
+    payload: dict[str, Any],
+    microns_per_step: float,
+    step_direction: str,
+) -> dict[str, Any] | None | object:
+    has_recommendation = any(
+        payload.get(key) is not None
+        for key in (
+            "recommendation_id",
+            "recommended_grind_delta_steps_from_current",
+            "recommended_grind_delta_um_from_current",
+            "recommended_projected_relative_step_from_reference",
+            "recommended_dose_g",
+            "recommended_target_yield_g",
+            "recommended_target_ratio",
+        )
+    )
+    if not has_recommendation:
+        return None
+
+    grind_delta_steps = _integer_number(payload.get("recommended_grind_delta_steps_from_current"))
+    if payload.get("recommended_grind_delta_steps_from_current") is not None and grind_delta_steps is None:
+        return _INVALID_RECOMMENDATION
+
+    projected_relative_step = _number(payload.get("recommended_projected_relative_step_from_reference"))
+    projected_relative_um = None
+    if projected_relative_step is not None:
+        projected_relative_um = projected_relative_step * microns_per_step * _direction_sign(step_direction)
+
+    return _drop_none_values(
+        {
+            "recommendation_id": payload.get("recommendation_id"),
+            "grind_delta_steps_from_current": grind_delta_steps,
+            "grind_delta_um_from_current": _rounded(payload.get("recommended_grind_delta_um_from_current"), 6),
+            "projected_relative_step_from_reference": _rounded(projected_relative_step, 6),
+            "projected_relative_grind_um_from_reference": _rounded(projected_relative_um, 6),
+            "next_dose_g": _rounded(payload.get("recommended_dose_g"), 4),
+            "target_yield_g": _rounded(payload.get("recommended_target_yield_g"), 4),
+            "target_ratio": _rounded(payload.get("recommended_target_ratio"), 6),
+            "decision": payload.get("recommendation_decision", "unknown"),
+            "follow_through": payload.get("recommendation_followed", "unknown"),
+            "attribution_weight": _recommendation_attribution_weight(payload),
+            "field_trust": _drop_none_values(
+                {
+                    "grind": _rounded(_clamp_optional(payload.get("grind_recommendation_trust")), 6),
+                    "dose": _rounded(_clamp_optional(payload.get("dose_recommendation_trust")), 6),
+                    "yield": _rounded(_clamp_optional(payload.get("yield_recommendation_trust")), 6),
+                }
+            ),
+        }
+    )
+
+
+def _relative_grind_steps_from_reference(payload: dict[str, Any]) -> float | None:
+    relative_steps = _number(payload.get("relative_grind_steps_from_reference"))
+    if relative_steps is not None:
+        return relative_steps
+    current_absolute_step = _number(payload.get("current_absolute_step"))
+    absolute_reference_step = _number(payload.get("absolute_reference_step"))
+    if current_absolute_step is None or absolute_reference_step is None:
+        return None
+    return current_absolute_step - absolute_reference_step
+
+
+def _recommendation_attribution_weight(payload: dict[str, Any]) -> float:
+    decision = payload.get("recommendation_decision", "unknown")
+    follow_through = payload.get("recommendation_followed", "unknown")
+    if decision in {"ignored", "dismissed"} or follow_through in {"not_followed", "unknown"}:
+        return 0.0
+    raw_weight = _number(payload.get("recommendation_attribution_weight")) or 0.0
+    weight = _clamp(raw_weight, 0.0, 1.0)
+    if follow_through == "partially_followed":
+        return round(min(weight, 0.5), 6)
+    return round(weight, 6)
 
 
 def _csv_text(rows: list[dict[str, Any]]) -> str:
@@ -188,37 +366,56 @@ def _csv_text(rows: list[dict[str, Any]]) -> str:
 
 
 def _csv_row(row: dict[str, Any]) -> dict[str, Any]:
-    payload = row["payload"]
+    source = row["source"]
+    context = row["context"]
+    action = row["action"]
+    recommendation = row.get("recommendation") or {}
+    observation = row["observation"]
+    reward = row["reward"]
     return {
         "training_row_id": row["training_row_id"],
-        "source_validation_id": row["source_validation_id"],
-        "install_id": _safe_csv_cell(row["install_id"]),
-        "payload_hash": row.get("payload_hash") or "",
-        "trust_weight": row["trust_weight"],
-        "shot_id": _safe_csv_cell(payload.get("shot_id")),
-        "timestamp": payload.get("timestamp"),
-        "machine_id": _safe_csv_cell(payload.get("machine_id")),
-        "machine_adapter": _safe_csv_cell(payload.get("machine_adapter")),
-        "bean_context_id": _safe_csv_cell(payload.get("bean_context_id")),
-        "grinder_context_id": _safe_csv_cell(payload.get("grinder_context_id")),
-        "profile_resampled_sha256": _value_sha256(payload.get("profile_resampled")),
-        "raw_profile_hash": payload.get("raw_profile_hash") or "",
-        "dose_in_g": payload.get("dose_in_g"),
-        "target_yield_g": payload.get("target_yield_g"),
-        "beverage_out_g": payload.get("beverage_out_g"),
-        "target_ratio": payload.get("target_ratio"),
-        "shot_time_s": payload.get("shot_time_s"),
-        "microns_per_step": payload.get("microns_per_step"),
-        "relative_grind_steps_from_reference": payload.get("relative_grind_steps_from_reference"),
-        "relative_grind_um_from_reference": payload.get("relative_grind_um_from_reference"),
-        "human_rating": payload.get("human_rating"),
-        "taste_tags": "|".join(str(tag) for tag in payload.get("taste_tags", [])),
-        "reward": payload.get("reward"),
-        "reward_confidence": payload.get("reward_confidence"),
-        "recommendation_followed": payload.get("recommendation_followed"),
-        "optimization_weight": payload.get("optimization_weight"),
-        "profile_flow_valid": payload.get("profile_flow_valid"),
-        "profile_flow_masked": payload.get("profile_flow_masked"),
+        "source_validation_id": source["source_validation_id"],
+        "install_id": _safe_csv_cell(source["install_id"]),
+        "payload_hash": source.get("payload_hash") or "",
+        "trust_weight": source["trust_weight"],
+        "shot_id": _safe_csv_cell(observation.get("shot_id")),
+        "timestamp": observation.get("timestamp"),
+        "machine_id": _safe_csv_cell(context.get("machine_id")),
+        "machine_adapter": _safe_csv_cell(context.get("machine_adapter")),
+        "bean_context_id": _safe_csv_cell(context.get("bean_context_id")),
+        "grinder_context_id": _safe_csv_cell(context.get("grinder_context_id")),
+        "profile_resampled_sha256": _value_sha256(observation.get("profile_resampled")),
+        "raw_profile_hash": observation.get("raw_profile_hash") or "",
+        "dose_g": action.get("dose_g"),
+        "target_yield_g": action.get("target_yield_g"),
+        "target_ratio": action.get("target_ratio"),
+        "relative_grind_steps_from_reference": action.get("relative_grind_steps_from_reference"),
+        "relative_grind_um_from_reference": action.get("relative_grind_um_from_reference"),
+        "microns_per_step": context.get("microns_per_step"),
+        "step_direction": context.get("step_direction"),
+        "beverage_out_g": observation.get("beverage_out_g"),
+        "brew_ratio": observation.get("brew_ratio"),
+        "shot_time_s": observation.get("shot_time_s"),
+        "human_rating": reward.get("human_rating"),
+        "taste_tags": "|".join(str(tag) for tag in reward.get("taste_tags", [])),
+        "reward": reward.get("reward"),
+        "reward_confidence": reward.get("confidence"),
+        "optimization_weight": reward.get("optimization_weight"),
+        "recommendation_id": _safe_csv_cell(recommendation.get("recommendation_id")),
+        "recommendation_followed": recommendation.get("follow_through") or "",
+        "recommendation_attribution_weight": recommendation.get("attribution_weight", ""),
+        "recommended_grind_delta_steps_from_current": recommendation.get("grind_delta_steps_from_current", ""),
+        "recommended_grind_delta_um_from_current": recommendation.get("grind_delta_um_from_current", ""),
+        "recommended_projected_relative_step_from_reference": recommendation.get("projected_relative_step_from_reference", ""),
+        "recommended_projected_relative_grind_um_from_reference": recommendation.get(
+            "projected_relative_grind_um_from_reference",
+            "",
+        ),
+        "recommended_dose_g": recommendation.get("next_dose_g", ""),
+        "recommended_target_yield_g": recommendation.get("target_yield_g", ""),
+        "recommended_target_ratio": recommendation.get("target_ratio", ""),
+        "profile_flow_valid": observation.get("profile_flow_valid"),
+        "profile_flow_masked": observation.get("profile_flow_masked"),
     }
 
 
@@ -245,14 +442,20 @@ def _manifest(
         "limit": limit,
         "dataset_sha256": dataset_sha256,
         "canonical_dataset_file": JSONL_FILENAME,
+        "canonical_row_format": TRAINING_ROW_FORMAT,
         "files": [_manifest_file_info(file) for file in files],
         "zero_trust": {
             "raw_uploads_included": False,
+            "adapter_payloads_included": False,
             "secrets_included": False,
             "executable_content_included": False,
             "canonical_rows_revalidated": True,
+            "canonical_transitions_only": True,
+            "absolute_grinder_fields_included": False,
+            "canonical_grind": "relative_normalized_only",
             "formats": ["jsonl", "csv", "json", "txt"],
             "csv_formula_strings_escaped": True,
+            "sequence_group_keys": ["install_id", "machine_id", "bean_context_id", "grinder_context_id"],
         },
     }
 
@@ -272,11 +475,18 @@ def _readme_text() -> str:
         "\n"
         "This export intentionally uses plain UTF-8 text files only.\n"
         "training_rows.jsonl is the canonical dataset: one JSON object per line.\n"
+        "Each line is an espresso_rl_training_transition_v1 object with context, action,\n"
+        "recommendation, observation, reward, and source sections.\n"
         "training_rows.csv is a human-inspection summary and omits profile arrays.\n"
         "manifest.json records file hashes, row counts, and provenance metadata.\n"
         "\n"
+        "The JSONL file is not a raw upload dump. It excludes adapter payloads,\n"
+        "absolute grinder display fields, secrets, and executable content.\n"
+        "Grind is canonicalized as relative steps and relative microns from the\n"
+        "grinder context reference. CSV string cells that could be interpreted as\n"
+        "spreadsheet formulas are escaped.\n"
+        "\n"
         "There are no pickles, model binaries, SQLite dumps, parquet files, macros, or executable files.\n"
-        "CSV string cells that could be interpreted as spreadsheet formulas are escaped.\n"
     )
 
 
@@ -330,3 +540,56 @@ def _warnings(skipped: int) -> list[str]:
     if skipped <= 0:
         return []
     return [f"Skipped {skipped} training rows that failed export-time zero-trust validation."]
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _integer_number(value: Any) -> int | None:
+    parsed = _number(value)
+    if parsed is None or not parsed.is_integer():
+        return None
+    return int(parsed)
+
+
+def _rounded(value: Any, digits: int) -> float | int | None:
+    parsed = _number(value)
+    if parsed is None:
+        return None
+    rounded = round(parsed, digits)
+    if isinstance(value, int) and float(rounded).is_integer():
+        return int(rounded)
+    return rounded
+
+
+def _direction_sign(step_direction: str) -> int:
+    return 1 if step_direction == "higher_is_finer" else -1
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, float(value)))
+
+
+def _clamp_optional(value: Any) -> float | None:
+    parsed = _number(value)
+    if parsed is None:
+        return None
+    return _clamp(parsed, 0.0, 1.0)
+
+
+def _drop_none_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _drop_none_values(item)
+            for key, item in value.items()
+            if item is not None and _drop_none_values(item) != {}
+        }
+    if isinstance(value, list):
+        return [_drop_none_values(item) for item in value]
+    return value

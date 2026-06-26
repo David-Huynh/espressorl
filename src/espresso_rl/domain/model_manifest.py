@@ -5,12 +5,12 @@ from typing import Any
 
 from espresso_rl.domain.dreamer_actions import DREAMER_ACTION_SCHEMA_VERSION
 from espresso_rl.domain.optimization import OPTIMIZER_MODE_DREAMER_V3_SHADOW
+from espresso_rl.domain.training import TRAINING_DATASET_FORMAT
 
 MODEL_MANIFEST_FORMAT = "espresso_rl_model_manifest_v1"
 MODEL_MANIFEST_SCHEMA_VERSION = 1
 MODEL_FAMILY_DREAMER_V3 = "dreamer_v3"
 MODEL_ARTIFACT_FORMAT_SAFETENSORS = "safetensors"
-TRAINING_DATASET_FORMAT = "espresso_rl_training_dataset_v1"
 STATE_SCHEMA_VERSION = 1
 ACTION_SCHEMA_VERSION = DREAMER_ACTION_SCHEMA_VERSION
 REWARD_SCHEMA_VERSION = 1

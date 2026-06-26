@@ -10,6 +10,7 @@ from typing import Any
 from espresso_rl.adapters.file_artifacts import LocalTextArtifactWriter
 from espresso_rl.application.training_export import TrainingDatasetExportService
 from espresso_rl.domain.community import CommunityTrainingRow
+from espresso_rl.domain.training import FORBIDDEN_TRAINING_FIELD_NAMES, validate_training_transition
 
 
 class TrainingDatasetExportTests(unittest.TestCase):
@@ -48,13 +49,22 @@ class TrainingDatasetExportTests(unittest.TestCase):
             manifest = json.loads(files["manifest.json"].read_text(encoding="utf-8"))
 
         exported_row = json.loads(jsonl_text)
-        self.assertEqual(exported_row["format"], "espresso_rl_training_row_v1")
-        self.assertEqual(exported_row["payload"]["shot_id"], "shot_1")
+        self.assertEqual(exported_row["format"], "espresso_rl_training_transition_v1")
+        self.assertNotIn("payload", exported_row)
+        self.assertEqual(exported_row["observation"]["shot_id"], "shot_1")
+        self.assertEqual(exported_row["context"]["grinder_context_id"], "=formula_like_context")
+        self.assertEqual(exported_row["action"]["relative_grind_steps_from_reference"], 0.0)
+        self.assertEqual(validate_training_transition(exported_row), [])
         self.assertIn("'=formula_like_context", csv_text)
         self.assertEqual(manifest["format"], "espresso_rl_training_dataset_v1")
+        self.assertEqual(manifest["canonical_row_format"], "espresso_rl_training_transition_v1")
         self.assertEqual(manifest["source_git_sha"], "abc123")
         self.assertFalse(manifest["zero_trust"]["executable_content_included"])
+        self.assertFalse(manifest["zero_trust"]["adapter_payloads_included"])
+        self.assertFalse(manifest["zero_trust"]["absolute_grinder_fields_included"])
         self.assertTrue(manifest["zero_trust"]["canonical_rows_revalidated"])
+        self.assertTrue(manifest["zero_trust"]["canonical_transitions_only"])
+        self.assertEqual(manifest["zero_trust"]["canonical_grind"], "relative_normalized_only")
         self.assertTrue(manifest["zero_trust"]["csv_formula_strings_escaped"])
         self.assertEqual(manifest["dataset_sha256"], hashlib.sha256(jsonl_text.encode("utf-8")).hexdigest())
 
@@ -76,6 +86,109 @@ class TrainingDatasetExportTests(unittest.TestCase):
             self.assertEqual(result.row_count, 1)
             self.assertEqual(result.skipped_row_count, 1)
             self.assertIn("Skipped 1", result.warnings[0])
+
+    def test_export_canonicalizes_absolute_display_grinder_state_without_emitting_absolute_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = TrainingDatasetExportService(
+                warehouse=FakeWarehouse(
+                    [
+                        training_row(
+                            1,
+                            payload_overrides={
+                                "relative_grind_steps_from_reference": None,
+                                "relative_grind_um_from_reference": None,
+                                "current_absolute_step": 42,
+                                "absolute_reference_step": 40,
+                                "step_direction": "higher_is_coarser",
+                            },
+                        )
+                    ]
+                ),
+                writer=LocalTextArtifactWriter(tmp),
+                clock=lambda: 1_800_000_000,
+            )
+
+            result = service.export_once(limit=10)
+            files = {Path(file.relative_path).name: Path(file.absolute_path) for file in result.files}
+            jsonl_text = files["training_rows.jsonl"].read_text(encoding="utf-8")
+
+        exported_row = json.loads(jsonl_text)
+        self.assertEqual(exported_row["action"]["relative_grind_steps_from_reference"], 2.0)
+        self.assertEqual(exported_row["action"]["relative_grind_um_from_reference"], -25.0)
+        for forbidden in FORBIDDEN_TRAINING_FIELD_NAMES:
+            self.assertNotIn(forbidden, jsonl_text)
+
+    def test_not_followed_recommendations_are_not_successful_training_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = TrainingDatasetExportService(
+                warehouse=FakeWarehouse(
+                    [
+                        training_row(
+                            1,
+                            payload_overrides={
+                                "recommendation_id": "rec_1",
+                                "recommended_grind_delta_steps_from_current": -2,
+                                "recommended_projected_relative_step_from_reference": -2,
+                                "recommendation_decision": "accepted",
+                                "recommendation_followed": "not_followed",
+                                "recommendation_attribution_weight": 1.0,
+                            },
+                        )
+                    ]
+                ),
+                writer=LocalTextArtifactWriter(tmp),
+                clock=lambda: 1_800_000_000,
+            )
+
+            result = service.export_once(limit=10)
+            files = {Path(file.relative_path).name: Path(file.absolute_path) for file in result.files}
+            exported_row = json.loads(files["training_rows.jsonl"].read_text(encoding="utf-8"))
+
+        self.assertEqual(result.row_count, 1)
+        self.assertEqual(exported_row["recommendation"]["follow_through"], "not_followed")
+        self.assertEqual(exported_row["recommendation"]["attribution_weight"], 0.0)
+
+    def test_export_skips_noncanonical_recommendation_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = TrainingDatasetExportService(
+                warehouse=FakeWarehouse(
+                    [
+                        training_row(
+                            1,
+                            payload_overrides={
+                                "recommendation_id": "rec_1",
+                                "recommended_grind_delta_steps_from_current": 1.5,
+                            },
+                        )
+                    ]
+                ),
+                writer=LocalTextArtifactWriter(tmp),
+                clock=lambda: 1_800_000_000,
+            )
+
+            result = service.export_once(limit=10)
+
+        self.assertEqual(result.row_count, 0)
+        self.assertEqual(result.skipped_row_count, 1)
+
+    def test_export_order_is_deterministic_by_training_row_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = TrainingDatasetExportService(
+                warehouse=FakeWarehouse([training_row(2), training_row(1)]),
+                writer=LocalTextArtifactWriter(tmp),
+                clock=lambda: 1_800_000_000,
+            )
+
+            result = service.export_once(limit=10)
+            files = {Path(file.relative_path).name: Path(file.absolute_path) for file in result.files}
+            lines = [
+                json.loads(line)
+                for line in files["training_rows.jsonl"].read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+
+        self.assertEqual(result.row_count, 2)
+        self.assertEqual([line["observation"]["shot_id"] for line in lines], ["shot_1", "shot_2"])
 
     def test_file_writer_rejects_paths_outside_export_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
