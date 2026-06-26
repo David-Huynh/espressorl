@@ -62,8 +62,8 @@ from espresso_rl.domain.events import (
     UploadQueueMaintenanceEvent,
 )
 from espresso_rl.domain.models import Recipe, SafetyBounds, UploadQueueStatus
-from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE
-from espresso_rl.optimizers.runtime import RuntimeOptimizer
+from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW
+from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import LocalDataRepository, RecommendationRepository, ShotRepository, UploadQueueRepository
 
@@ -97,6 +97,7 @@ def main() -> None:
         optimizer_mode=config.optimizer_mode,
         model_artifact_path=config.optimizer_model_artifact_path,
         model_artifact_sha256=config.optimizer_model_artifact_sha256,
+        model_artifact_max_bytes=config.optimizer_model_artifact_max_bytes,
     )
     service = EspressoRLService(
         shots=shot_repo,
@@ -581,9 +582,12 @@ def build_status_payload(
         for item in rejected_summaries
         if item.local_record_type == "shot" and item.local_record_id
     }
-    config_dreamer_v3_available = bool(
-        config.optimizer_model_artifact_path and config.optimizer_model_artifact_sha256
+    model_artifact_status = verify_model_artifact(
+        config.optimizer_model_artifact_path,
+        config.optimizer_model_artifact_sha256,
+        max_bytes=config.optimizer_model_artifact_max_bytes,
     )
+    config_dreamer_v3_available = model_artifact_status.verified
     config_optimizer_mode = (
         config.optimizer_mode
         if config.optimizer_mode == DEFAULT_OPTIMIZER_MODE or config_dreamer_v3_available
@@ -592,9 +596,21 @@ def build_status_payload(
     optimizer_status = optimizer_status or {
         "configured_mode": config_optimizer_mode,
         "effective_mode": DEFAULT_OPTIMIZER_MODE,
-        "model_artifact_path": config.optimizer_model_artifact_path or None,
-        "model_artifact_sha256": config.optimizer_model_artifact_sha256 or None,
+        "model_artifact_path": model_artifact_status.path,
+        "model_artifact_sha256": model_artifact_status.expected_sha256,
+        "model_artifact_actual_sha256": model_artifact_status.actual_sha256,
+        "model_artifact_size_bytes": model_artifact_status.size_bytes,
+        "model_artifact_verified": model_artifact_status.verified,
+        "model_artifact_unavailable_reason": model_artifact_status.unavailable_reason,
         "dreamer_v3_available": config_dreamer_v3_available,
+        "available_modes": [DEFAULT_OPTIMIZER_MODE]
+        + ([OPTIMIZER_MODE_DREAMER_V3_SHADOW] if config_dreamer_v3_available else []),
+        "unavailable_modes": {}
+        if config_dreamer_v3_available
+        else {
+            OPTIMIZER_MODE_DREAMER_V3_SHADOW: model_artifact_status.unavailable_reason
+            or "DreamerV3 model artifact is not verified."
+        },
         "fallback_reason": None
         if config_optimizer_mode == DEFAULT_OPTIMIZER_MODE
         else "Bayesian Optimization is serving recommendations.",
@@ -622,7 +638,13 @@ def build_status_payload(
         "optimizer_effective_mode": optimizer_status.get("effective_mode"),
         "optimizer_model_artifact_path": optimizer_status.get("model_artifact_path"),
         "optimizer_model_artifact_sha256": optimizer_status.get("model_artifact_sha256"),
+        "optimizer_model_artifact_actual_sha256": optimizer_status.get("model_artifact_actual_sha256"),
+        "optimizer_model_artifact_size_bytes": optimizer_status.get("model_artifact_size_bytes"),
+        "optimizer_model_artifact_verified": bool(optimizer_status.get("model_artifact_verified")),
+        "optimizer_model_artifact_unavailable_reason": optimizer_status.get("model_artifact_unavailable_reason"),
         "optimizer_dreamer_v3_available": bool(optimizer_status.get("dreamer_v3_available")),
+        "optimizer_available_modes": optimizer_status.get("available_modes") or [DEFAULT_OPTIMIZER_MODE],
+        "optimizer_unavailable_modes": optimizer_status.get("unavailable_modes") or {},
         "optimizer_fallback_reason": optimizer_status.get("fallback_reason"),
         "local_shot_count": len(optimizer_shots),
         "rated_shot_count": len(rated_shots),

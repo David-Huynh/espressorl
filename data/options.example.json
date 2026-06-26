@@ -19,6 +19,8 @@
   "optimizer_mode": "bayesian_optimization",
   "optimizer_model_artifact_path": "",
   "optimizer_model_artifact_sha256": "",
+  "default_optimizer_model_artifact_sha256": "",
+  "optimizer_model_artifact_max_bytes": 536870912,
   "storage_backend": "postgres",
   "postgres_dsn": "postgresql://espresso_rl:espresso_rl@postgres:5432/espresso_rl",
   "deployment_role": "public",

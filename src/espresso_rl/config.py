@@ -8,6 +8,12 @@ from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, normalize_op
 
 _OPTIONS_PATH = Path("/data/options.json")
 _DATA_DIR = Path("/data/espresso_rl")
+_DEFAULT_DREAMER_V3_MODEL_ARTIFACT_PATH = _DATA_DIR / "models" / "dreamer_v3.pt"
+_DEFAULT_MODEL_ARTIFACT_MAX_BYTES = 512 * 1024 * 1024
+_RELEASE_DEFAULT_MODEL_ARTIFACT_SHA256 = os.getenv(
+    "ESPRESSORL_RELEASE_MODEL_ARTIFACT_SHA256",
+    "",
+)
 
 
 @dataclass
@@ -36,6 +42,8 @@ class Config:
     optimizer_mode: str = DEFAULT_OPTIMIZER_MODE
     optimizer_model_artifact_path: str = ""
     optimizer_model_artifact_sha256: str = ""
+    default_optimizer_model_artifact_sha256: str = ""
+    optimizer_model_artifact_max_bytes: int = _DEFAULT_MODEL_ARTIFACT_MAX_BYTES
     # When True: run DreamerV3 training thread locally (central-server install only).
     # When False (default): inference + BO only; downloads weights from central server.
     training_mode: bool = False
@@ -68,6 +76,8 @@ class Config:
 
     def __post_init__(self) -> None:
         self.optimizer_mode = normalize_optimizer_mode(self.optimizer_mode)
+        if self.optimizer_model_artifact_max_bytes <= 0:
+            raise ValueError("optimizer_model_artifact_max_bytes must be positive")
 
     def now(self) -> int:
         return int(time.time())
@@ -136,15 +146,22 @@ class Config:
                     os.getenv("ESPRESSORL_OPTIMIZER_MODE", DEFAULT_OPTIMIZER_MODE),
                 )
             ),
-            optimizer_model_artifact_path=_option_string_or_env(
+            optimizer_model_artifact_path=_model_artifact_path(opts),
+            optimizer_model_artifact_sha256=_model_artifact_sha256(opts),
+            default_optimizer_model_artifact_sha256=_option_string_or_env(
                 opts,
-                "optimizer_model_artifact_path",
-                "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_PATH",
+                "default_optimizer_model_artifact_sha256",
+                "ESPRESSORL_DEFAULT_OPTIMIZER_MODEL_ARTIFACT_SHA256",
+                _RELEASE_DEFAULT_MODEL_ARTIFACT_SHA256,
             ),
-            optimizer_model_artifact_sha256=_option_string_or_env(
-                opts,
-                "optimizer_model_artifact_sha256",
-                "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_SHA256",
+            optimizer_model_artifact_max_bytes=int(
+                opts.get(
+                    "optimizer_model_artifact_max_bytes",
+                    os.getenv(
+                        "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_MAX_BYTES",
+                        _DEFAULT_MODEL_ARTIFACT_MAX_BYTES,
+                    ),
+                )
             ),
             training_mode=bool(opts.get("training_mode", False)),
             community_upload_enabled=bool(opts.get("community_upload_enabled", False)),
@@ -263,6 +280,35 @@ def _option_string_or_env(
     if option_value is not None:
         return option_value
     return os.getenv(env_name, default)
+
+
+def _model_artifact_sha256(opts: dict) -> str:
+    release_default = _option_string_or_env(
+        opts,
+        "default_optimizer_model_artifact_sha256",
+        "ESPRESSORL_DEFAULT_OPTIMIZER_MODEL_ARTIFACT_SHA256",
+        _RELEASE_DEFAULT_MODEL_ARTIFACT_SHA256,
+    )
+    return _option_string_or_env(
+        opts,
+        "optimizer_model_artifact_sha256",
+        "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_SHA256",
+        release_default,
+    )
+
+
+def _model_artifact_path(opts: dict) -> str:
+    default_path = (
+        str(_DEFAULT_DREAMER_V3_MODEL_ARTIFACT_PATH)
+        if _model_artifact_sha256(opts)
+        else ""
+    )
+    return _option_string_or_env(
+        opts,
+        "optimizer_model_artifact_path",
+        "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_PATH",
+        default_path,
+    )
 
 
 def _optional_number(value: object) -> float | None:

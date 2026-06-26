@@ -65,6 +65,8 @@ Important fields in `data/options.json`:
   "optimizer_mode": "bayesian_optimization",
   "optimizer_model_artifact_path": "",
   "optimizer_model_artifact_sha256": "",
+  "default_optimizer_model_artifact_sha256": "",
+  "optimizer_model_artifact_max_bytes": 536870912,
 
   "storage_backend": "postgres",
   "postgres_dsn": "postgresql://espresso_rl:espresso_rl@postgres:5432/espresso_rl",
@@ -88,8 +90,20 @@ contexts.
 Gaggimate can override `optimizer_mode` at runtime by publishing a retained
 `gaggimate/<machine>/rl/settings` payload. `bayesian_optimization` is always
 available. DreamerV3 is only advertised to the Gaggimate UI when model artifact
-metadata is configured; until active Dreamer inference is safety-gated, BO
-remains the effective recommendation path.
+metadata is configured and the local artifact file matches its SHA-256; until
+active Dreamer inference is safety-gated, BO remains the effective
+recommendation path.
+
+Official Docker builds can embed a release-default model SHA with the
+`ESPRESSORL_RELEASE_MODEL_ARTIFACT_SHA256` build arg, normally supplied by the
+GitHub repository variable with the same name. If that default SHA is present
+and no explicit path is configured, EspressoRL looks for
+`/data/espresso_rl/models/dreamer_v3.pt`. A trainer using their own model can
+set `optimizer_model_artifact_path` and `optimizer_model_artifact_sha256` in
+`data/options.json` or via `ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_PATH` and
+`ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_SHA256`; those explicit values override
+the release default. Oversized artifacts are refused by
+`optimizer_model_artifact_max_bytes`.
 
 Start the local service and Postgres:
 

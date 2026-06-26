@@ -311,7 +311,13 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         "effective_mode": "bayesian_optimization",
                         "model_artifact_path": "models/dreamer.pt",
                         "model_artifact_sha256": "a" * 64,
+                        "model_artifact_actual_sha256": "a" * 64,
+                        "model_artifact_size_bytes": 123,
+                        "model_artifact_verified": True,
+                        "model_artifact_unavailable_reason": None,
                         "dreamer_v3_available": True,
+                        "available_modes": ["bayesian_optimization", "dreamer_v3_shadow"],
+                        "unavailable_modes": {},
                         "fallback_reason": "Bayesian Optimization is serving recommendations.",
                     },
                 )
@@ -320,6 +326,10 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(status["optimizer_effective_mode"], "bayesian_optimization")
             self.assertTrue(status["optimizer_dreamer_v3_available"])
             self.assertEqual(status["optimizer_model_artifact_path"], "models/dreamer.pt")
+            self.assertEqual(status["optimizer_model_artifact_actual_sha256"], "a" * 64)
+            self.assertTrue(status["optimizer_model_artifact_verified"])
+            self.assertEqual(status["optimizer_model_artifact_size_bytes"], 123)
+            self.assertIn("dreamer_v3_shadow", status["optimizer_available_modes"])
             self.assertIn("Bayesian Optimization", status["optimizer_fallback_reason"])
 
     def test_status_payload_derives_grinder_catalog_search_url_from_supabase_function_url(self) -> None:
