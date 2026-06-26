@@ -95,6 +95,7 @@ def main() -> None:
         prior_provider=open_prior_provider(config),
         safety_bounds=SafetyBounds(),
         clock=config.now,
+        community_upload_enabled_default=False,
     )
     upload_maintenance = UploadQueueMaintenanceService(upload_queue_repo, clock=config.now)
     local_data_service = LocalDataService(
@@ -580,7 +581,8 @@ def build_status_payload(
         "upload_queue_last_rejected_record_id": latest_rejected.local_record_id if latest_rejected else None,
         "upload_queue_last_rejected_error": latest_rejected.error_message if latest_rejected else None,
         "upload_queue_last_rejected_at": latest_rejected.updated_at if latest_rejected else None,
-        "community_upload_enabled": config.should_enqueue_community_uploads(),
+        "community_upload_enabled": config.should_enqueue_community_uploads()
+        and service.community_upload_enabled_for(config.install_id, machine_id),
         "grinder_catalog_search_url": grinder_catalog_search_url(config),
     }
 

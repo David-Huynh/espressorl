@@ -210,6 +210,14 @@ payloads.
 Community upload is optional. Local recommendations and local Postgres data
 collection work without Supabase.
 
+`community_upload_enabled` is the backend deployment gate. It must be true for
+the container to register upload credentials and run the upload worker, but it
+does not override the user's Gaggimate setting. Gaggimate publishes the user's
+anonymous community upload opt-in over MQTT, and EspressoRL only queues upload
+snapshots when both the backend gate and that per-machine opt-in are enabled.
+If EspressoRL has not received an explicit per-machine opt-in, uploads remain
+disabled.
+
 Public deployment settings:
 
 ```json

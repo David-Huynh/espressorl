@@ -708,7 +708,14 @@ class ApplicationServiceTests(unittest.TestCase):
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
         uploads = MemoryUploadQueue()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), upload_queue=uploads, clock=lambda: 10)
+        service = EspressoRLService(
+            shots,
+            recs,
+            ConservativeBOOptimizer(),
+            upload_queue=uploads,
+            clock=lambda: 10,
+            community_upload_enabled_default=True,
+        )
 
         result = service.ingest_shot_profile(
             shot_event(
@@ -727,7 +734,14 @@ class ApplicationServiceTests(unittest.TestCase):
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
         uploads = MemoryUploadQueue()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), upload_queue=uploads, clock=lambda: 10)
+        service = EspressoRLService(
+            shots,
+            recs,
+            ConservativeBOOptimizer(),
+            upload_queue=uploads,
+            clock=lambda: 10,
+            community_upload_enabled_default=True,
+        )
 
         service.ingest_shot_profile(shot_event("shot_1", 1))
         corrected = service.record_shot_correction(
@@ -800,7 +814,14 @@ class ApplicationServiceTests(unittest.TestCase):
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
         uploads = MemoryUploadQueue()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), upload_queue=uploads, clock=lambda: 10)
+        service = EspressoRLService(
+            shots,
+            recs,
+            ConservativeBOOptimizer(),
+            upload_queue=uploads,
+            clock=lambda: 10,
+            community_upload_enabled_default=True,
+        )
 
         result = service.ingest_shot_profile(
             shot_event(
@@ -1080,6 +1101,7 @@ class ApplicationServiceTests(unittest.TestCase):
             ConservativeBOOptimizer(),
             upload_queue=uploads,
             clock=lambda: 10,
+            community_upload_enabled_default=True,
         )
 
         result = service.ingest_shot_profile(shot_event("shot_1", 1))
@@ -1094,12 +1116,82 @@ class ApplicationServiceTests(unittest.TestCase):
             any(feedback.recommendation.recommendation_id in payload for payload in payloads)
         )
 
+    def test_community_upload_requires_explicit_consent_before_queueing(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        uploads = MemoryUploadQueue()
+        service = EspressoRLService(
+            shots,
+            recs,
+            ConservativeBOOptimizer(),
+            upload_queue=uploads,
+            clock=lambda: 10,
+        )
+
+        result = service.ingest_shot_profile(shot_event("shot_1", 1))
+        feedback = service.record_feedback(feedback_event("shot_1", 2, rating=4))
+
+        self.assertIsNotNone(result.shot)
+        self.assertIsNotNone(feedback.recommendation)
+        self.assertEqual(uploads.rows, {})
+        self.assertFalse(service.community_upload_enabled_for("install_1", "machine_1"))
+
+    def test_community_upload_consent_enables_shot_and_recommendation_uploads(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        uploads = MemoryUploadQueue()
+        service = EspressoRLService(
+            shots,
+            recs,
+            ConservativeBOOptimizer(),
+            upload_queue=uploads,
+            clock=lambda: 10,
+        )
+
+        result = service.ingest_shot_profile(
+            shot_event("shot_1", 1, community_upload_enabled=True)
+        )
+        feedback = service.record_feedback(feedback_event("shot_1", 2, rating=4))
+
+        self.assertIsNotNone(result.shot)
+        self.assertIsNotNone(feedback.recommendation)
+        self.assertTrue(service.community_upload_enabled_for("install_1", "machine_1"))
+        self.assertTrue(any(item.local_record_type == "shot" for item in uploads.rows.values()))
+        self.assertTrue(any(item.local_record_type == "recommendation" for item in uploads.rows.values()))
+
+    def test_community_upload_consent_disables_shot_and_recommendation_uploads(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        uploads = MemoryUploadQueue()
+        service = EspressoRLService(
+            shots,
+            recs,
+            ConservativeBOOptimizer(),
+            upload_queue=uploads,
+            clock=lambda: 10,
+        )
+
+        result = service.ingest_shot_profile(
+            shot_event("shot_1", 1, community_upload_enabled=False)
+        )
+        feedback = service.record_feedback(feedback_event("shot_1", 2, rating=4))
+
+        self.assertIsNotNone(result.shot)
+        self.assertIsNotNone(feedback.recommendation)
+        self.assertEqual(uploads.rows, {})
+        self.assertFalse(service.community_upload_enabled_for("install_1", "machine_1"))
+
     def test_idle_reshows_do_not_reenqueue_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
         queue = RecordingUploadQueue()
         service = EspressoRLService(
-            shots, recs, ConservativeBOOptimizer(), upload_queue=queue, clock=lambda: 10
+            shots,
+            recs,
+            ConservativeBOOptimizer(),
+            upload_queue=queue,
+            clock=lambda: 10,
+            community_upload_enabled_default=True,
         )
 
         rec = ingest_and_feedback(service, shot_event("shot_1", 1))
@@ -1117,7 +1209,12 @@ class ApplicationServiceTests(unittest.TestCase):
         recs = MemoryRecommendationRepository()
         queue = RecordingUploadQueue()
         service = EspressoRLService(
-            shots, recs, ConservativeBOOptimizer(), upload_queue=queue, clock=lambda: 10
+            shots,
+            recs,
+            ConservativeBOOptimizer(),
+            upload_queue=queue,
+            clock=lambda: 10,
+            community_upload_enabled_default=True,
         )
 
         rec = ingest_and_feedback(service, shot_event("shot_1", 1))  # created after feedback

@@ -222,6 +222,7 @@ class GaggimateMQTTClient:
             utility=bool(payload.get("utility", False)),
             exclude_from_local_optimization=bool(payload.get("exclude_from_local_optimization", False)),
             local_optimization_enabled=bool(payload.get("local_optimization_enabled", True)),
+            community_upload_enabled=_optional_bool(payload.get("community_upload_enabled")),
             optimization_weight=_optional_float(payload.get("optimization_weight")),
             rating_prompt_allowed=bool(payload.get("rating_prompt_allowed", True)),
             weight_source=_optional_string(payload.get("weight_source")),
@@ -346,6 +347,7 @@ class GaggimateMQTTClient:
             target_yield_g=_optional_float(
                 payload.get("target_yield_g", self._config.initial_target_yield_g)
             ),
+            community_upload_enabled=_optional_bool(payload.get("community_upload_enabled")),
             source=payload.get("source", "gaggimate_mqtt"),
         )
 

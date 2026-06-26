@@ -224,6 +224,7 @@ class EspressoRLService:
         prior_provider: PriorProvider | None = None,
         safety_bounds: SafetyBounds | None = None,
         clock: Callable[[], int] = now_ts,
+        community_upload_enabled_default: bool = False,
     ) -> None:
         self._shots = shots
         self._recommendations = recommendations
@@ -232,6 +233,8 @@ class EspressoRLService:
         self._prior_provider = prior_provider
         self._safety_bounds = safety_bounds or SafetyBounds()
         self._clock = clock
+        self._community_upload_enabled_default = bool(community_upload_enabled_default)
+        self._community_upload_enabled_by_machine: dict[tuple[str, str], bool] = {}
 
     def ingest_shot_profile(self, event: ShotProfileEvent) -> IngestResult:
         now = self._clock()
@@ -330,7 +333,7 @@ class EspressoRLService:
         )
         shot.reward = reward.reward
         shot.reward_confidence = reward.confidence
-        self._store_shot(shot, now)
+        self._store_shot(shot, now, community_upload_enabled=event.community_upload_enabled)
 
         if not shot.feedback_recorded:
             return IngestResult(shot=shot, recommendation=None)
@@ -571,6 +574,12 @@ class EspressoRLService:
         )
 
     def handle_machine_state(self, event: MachineStateEvent) -> Recommendation | None:
+        if event.community_upload_enabled is not None:
+            self.set_community_upload_enabled(
+                event.install_id,
+                event.machine_id,
+                event.community_upload_enabled,
+            )
         if event.state not in {MachineState.WAKE, MachineState.IDLE, MachineState.STANDBY}:
             return None
         if not event.bean_context_id:
@@ -733,6 +742,15 @@ class EspressoRLService:
         self._store_recommendation(recommendation, timestamp)
         return recommendation
 
+    def set_community_upload_enabled(self, install_id: str, machine_id: str, enabled: bool) -> None:
+        self._community_upload_enabled_by_machine[(install_id, machine_id)] = bool(enabled)
+
+    def community_upload_enabled_for(self, install_id: str, machine_id: str) -> bool:
+        return self._community_upload_enabled_by_machine.get(
+            (install_id, machine_id),
+            self._community_upload_enabled_default,
+        )
+
     def _apply_grinder_display_metadata(
         self,
         recommendation: Recommendation,
@@ -863,9 +881,25 @@ class EspressoRLService:
         else:
             recommendation.target_ratio = recommendation.target_yield_g / recommendation.next_dose_g
 
-    def _store_shot(self, shot: ShotRecord, now: int) -> None:
+    def _store_shot(
+        self,
+        shot: ShotRecord,
+        now: int,
+        *,
+        community_upload_enabled: bool | None = None,
+    ) -> None:
+        if community_upload_enabled is not None:
+            self.set_community_upload_enabled(
+                shot.install_id,
+                shot.machine_id,
+                community_upload_enabled,
+            )
         self._shots.upsert(shot)
-        if self._upload_queue is not None and _shot_is_community_uploadable(shot):
+        if (
+            self._upload_queue is not None
+            and self.community_upload_enabled_for(shot.install_id, shot.machine_id)
+            and _shot_is_community_uploadable(shot)
+        ):
             self._upload_queue.enqueue(make_shot_upload_item(shot, now))
 
     def _store_recommendation(
@@ -876,6 +910,8 @@ class EspressoRLService:
         prior = self._recommendations.get(recommendation.recommendation_id)
         self._recommendations.upsert(recommendation)
         if self._upload_queue is None:
+            return
+        if not self.community_upload_enabled_for(recommendation.install_id, recommendation.machine_id):
             return
         # Upload only meaningful lifecycle transitions (created/shown/accepted/
         # ignored/edited/used/applied/expired). Skip incidental churn such as

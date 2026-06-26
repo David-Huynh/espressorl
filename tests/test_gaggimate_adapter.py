@@ -73,6 +73,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "shot_type": "espresso",
                 "utility": False,
                 "local_optimization_enabled": False,
+                "community_upload_enabled": False,
                 "exclude_from_local_optimization": True,
                 "optimization_weight": 0.0,
                 "rating_prompt_allowed": True,
@@ -119,6 +120,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.shot_type.value, "espresso")
         self.assertFalse(event.utility)
         self.assertFalse(event.local_optimization_enabled)
+        self.assertFalse(event.community_upload_enabled)
         self.assertTrue(event.exclude_from_local_optimization)
         self.assertEqual(event.optimization_weight, 0.0)
         self.assertTrue(event.rating_prompt_allowed)
@@ -143,6 +145,34 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.profile_temperature_c, 86.5)
         self.assertEqual(event.final_phase_temperature_c, 86.5)
         self.assertEqual(event.shot_end_state, "manual_or_interrupted")
+
+    def test_machine_state_payload_accepts_community_upload_consent(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_machine_state_payload(
+            {
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 100,
+                "state": "idle",
+                "bean_context_id": "bean_1",
+                "relative_grind_steps_from_reference": 42,
+                "dose_in_g": 18.0,
+                "target_yield_g": 36.0,
+                "community_upload_enabled": True,
+            },
+            mac="AA_BB",
+        )
+
+        self.assertTrue(event.community_upload_enabled)
 
     def test_shot_profile_payload_treats_zero_final_weight_as_missing(self) -> None:
         client = GaggimateMQTTClient(

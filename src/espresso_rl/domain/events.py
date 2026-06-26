@@ -123,6 +123,7 @@ class ShotProfileEvent:
     utility: bool = False
     exclude_from_local_optimization: bool = False
     local_optimization_enabled: bool = True
+    community_upload_enabled: bool | None = None
     optimization_weight: float | None = None
     rating_prompt_allowed: bool = True
     weight_source: str | None = None
@@ -197,6 +198,8 @@ class ShotProfileEvent:
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
         if self.optimization_weight is not None:
             object.__setattr__(self, "optimization_weight", _number(self.optimization_weight, "optimization_weight"))
+        if self.community_upload_enabled is not None and not isinstance(self.community_upload_enabled, bool):
+            raise ValueError("community_upload_enabled must be boolean")
         object.__setattr__(self, "weight_source", _optional_string(self.weight_source, "weight_source", 80))
         object.__setattr__(self, "flow_source", _optional_string(self.flow_source, "flow_source", 80))
         object.__setattr__(self, "flow_units", _optional_string(self.flow_units, "flow_units", 40))
@@ -454,6 +457,7 @@ class MachineStateEvent:
     absolute_reference_step: float | None = None
     dose_in_g: float | None = None
     target_yield_g: float | None = None
+    community_upload_enabled: bool | None = None
     source: str = "unknown"
 
     event_type: str = field(default="machine_state", init=False)
@@ -498,6 +502,8 @@ class MachineStateEvent:
             raise ValueError("dose_in_g must be positive when present")
         if self.target_yield_g is not None and self.target_yield_g <= 0:
             raise ValueError("target_yield_g must be positive when present")
+        if self.community_upload_enabled is not None and not isinstance(self.community_upload_enabled, bool):
+            raise ValueError("community_upload_enabled must be boolean")
 
     def current_recipe(self) -> Recipe | None:
         if (
