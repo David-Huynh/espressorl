@@ -485,6 +485,40 @@ absolute grinder settings, or another executable/opaque format. Trainers should
 publish the model file SHA-256 separately and configure it with
 `optimizer_model_artifact_sha256`.
 
+The offline artifact-contract builder consumes the canonical export and creates
+the expected DreamerV3 release filenames:
+
+```bash
+uv run espresso-rl-build-dreamer-artifacts \
+  --write-default-config training_config.json
+
+uv run espresso-rl-build-dreamer-artifacts \
+  --dataset-jsonl training_rows.jsonl \
+  --dataset-manifest manifest.json \
+  --training-config training_config.json \
+  --output-dir model_out \
+  --trainer-git-sha TRAINER_REPO_COMMIT
+```
+
+It validates the dataset hash, revalidates every JSONL transition, rejects
+absolute grinder fields, writes only fixed safe filenames, and produces:
+
+- `dreamer_v3.safetensors`
+- `dreamer_v3_manifest.json`
+- `training_config.json`
+- `audit_report.json`
+- `checksums.txt`
+
+This command is intentionally an artifact pipeline skeleton. The generated
+`.safetensors` file is marked `artifact_contract_only` and
+`inference_ready=false`, so the runtime verifier will not expose it as an active
+DreamerV3 model. A real offline trainer must replace that placeholder with
+trained tensors and set runtime compatibility only after inference is safe. The
+command has a configurable `--max-dataset-bytes` resource guard, defaulting to
+8 GiB, because this skeleton validates JSONL in-process. That guard is not a
+training policy; real large-scale Dreamer training should use streaming or
+sharded dataset loading so the corpus can grow beyond one in-memory JSONL file.
+
 ## Warm-Started BO Priors
 
 Runtime recommendation generation can consume canonical `PriorPoint` values

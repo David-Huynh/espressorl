@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 espresso-rl = "espresso_rl.main:main"
+espresso-rl-build-dreamer-artifacts = "espresso_rl.trainer_cli:main"
 
 [build-system]
 requires = ["hatchling"]

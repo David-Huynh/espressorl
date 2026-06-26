@@ -110,6 +110,11 @@ def validate_model_manifest(
         return _invalid("DreamerV3 model manifest optimizer_mode is incompatible.")
     if _int_value(runtime.get("espresso_rl_runtime_schema_version")) != RUNTIME_SCHEMA_VERSION:
         return _invalid("DreamerV3 model manifest runtime schema is incompatible.")
+    inference_ready = runtime.get("inference_ready")
+    if inference_ready is False:
+        return _invalid("DreamerV3 model manifest marks artifact as not inference-ready.")
+    if inference_ready is not None and inference_ready is not True:
+        return _invalid("DreamerV3 model manifest inference_ready is invalid.")
 
     return ModelManifestValidation(
         verified=True,
