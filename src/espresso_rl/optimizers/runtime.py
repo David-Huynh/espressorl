@@ -43,6 +43,7 @@ class ModelManifestStatus:
     verified: bool = False
     unavailable_reason: str | None = None
     model_family: str | None = None
+    model_artifact_format: str | None = None
     model_artifact_sha256: str | None = None
     dataset_sha256: str | None = None
     dataset_manifest_sha256: str | None = None
@@ -69,6 +70,7 @@ class RuntimeOptimizerStatus:
     model_manifest_verified: bool = False
     model_manifest_unavailable_reason: str | None = None
     model_manifest_model_family: str | None = None
+    model_manifest_artifact_format: str | None = None
     model_manifest_dataset_sha256: str | None = None
     model_manifest_dataset_manifest_sha256: str | None = None
     model_manifest_trainer_git_sha: str | None = None
@@ -97,6 +99,7 @@ class RuntimeOptimizerStatus:
             "model_manifest_verified": self.model_manifest_verified,
             "model_manifest_unavailable_reason": self.model_manifest_unavailable_reason,
             "model_manifest_model_family": self.model_manifest_model_family,
+            "model_manifest_artifact_format": self.model_manifest_artifact_format,
             "model_manifest_dataset_sha256": self.model_manifest_dataset_sha256,
             "model_manifest_dataset_manifest_sha256": self.model_manifest_dataset_manifest_sha256,
             "model_manifest_trainer_git_sha": self.model_manifest_trainer_git_sha,
@@ -208,6 +211,7 @@ class RuntimeOptimizer:
             model_manifest_verified=manifest_status.verified,
             model_manifest_unavailable_reason=manifest_status.unavailable_reason,
             model_manifest_model_family=manifest_status.model_family,
+            model_manifest_artifact_format=manifest_status.model_artifact_format,
             model_manifest_dataset_sha256=manifest_status.dataset_sha256,
             model_manifest_dataset_manifest_sha256=manifest_status.dataset_manifest_sha256,
             model_manifest_trainer_git_sha=manifest_status.trainer_git_sha,
@@ -420,6 +424,7 @@ def _manifest_status_from_validation(
         verified=validation.verified,
         unavailable_reason=validation.unavailable_reason,
         model_family=validation.model_family,
+        model_artifact_format=validation.model_artifact_format,
         model_artifact_sha256=validation.model_artifact_sha256,
         dataset_sha256=validation.dataset_sha256,
         dataset_manifest_sha256=validation.dataset_manifest_sha256,

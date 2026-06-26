@@ -8,7 +8,7 @@ from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, normalize_op
 
 _OPTIONS_PATH = Path("/data/options.json")
 _DATA_DIR = Path("/data/espresso_rl")
-_DEFAULT_DREAMER_V3_MODEL_ARTIFACT_PATH = _DATA_DIR / "models" / "dreamer_v3.pt"
+_DEFAULT_DREAMER_V3_MODEL_ARTIFACT_PATH = _DATA_DIR / "models" / "dreamer_v3.safetensors"
 _DEFAULT_DREAMER_V3_MODEL_MANIFEST_PATH = _DATA_DIR / "models" / "dreamer_v3_manifest.json"
 _DEFAULT_MODEL_ARTIFACT_MAX_BYTES = 512 * 1024 * 1024
 _DEFAULT_TRAINING_EXPORT_DIR = _DATA_DIR / "exports"

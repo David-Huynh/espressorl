@@ -321,6 +321,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         "model_manifest_verified": True,
                         "model_manifest_unavailable_reason": None,
                         "model_manifest_model_family": "dreamer_v3",
+                        "model_manifest_artifact_format": "safetensors",
                         "model_manifest_dataset_sha256": "c" * 64,
                         "model_manifest_dataset_manifest_sha256": "d" * 64,
                         "model_manifest_trainer_git_sha": "trainerabc",
@@ -344,6 +345,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(status["optimizer_model_artifact_size_bytes"], 123)
             self.assertEqual(status["optimizer_model_manifest_path"], "models/dreamer_manifest.json")
             self.assertTrue(status["optimizer_model_manifest_verified"])
+            self.assertEqual(status["optimizer_model_manifest_artifact_format"], "safetensors")
             self.assertEqual(status["optimizer_model_manifest_dataset_sha256"], "c" * 64)
             self.assertEqual(status["optimizer_model_manifest_trainer_git_sha"], "trainerabc")
             self.assertIn("dreamer_v3_shadow", status["optimizer_available_modes"])

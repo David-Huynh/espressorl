@@ -68,6 +68,7 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertEqual(status.model_artifact_actual_sha256, digest)
         self.assertEqual(status.model_manifest_dataset_sha256, "b" * 64)
         self.assertEqual(status.model_manifest_trainer_git_sha, "trainerabc")
+        self.assertEqual(status.model_manifest_artifact_format, "safetensors")
         self.assertIn(OPTIMIZER_MODE_DREAMER_V3_SHADOW, status.available_modes)
         self.assertIn("Bayesian Optimization", status.fallback_reason or "")
 
@@ -139,6 +140,19 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertFalse(status.verified)
         self.assertIn("model_family", status.unavailable_reason or "")
 
+    def test_model_manifest_rejects_pickle_style_artifact_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = write_manifest(
+                Path(tmp),
+                "a" * 64,
+                overrides={"model_artifact": {"format": "torch_pickle", "sha256": "a" * 64}},
+            )
+
+            status = verify_model_manifest_file(str(manifest_path), expected_model_sha256="a" * 64)
+
+        self.assertFalse(status.verified)
+        self.assertIn("safetensors", status.unavailable_reason or "")
+
     def test_model_manifest_invalid_json_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = Path(tmp) / "dreamer_v3_manifest.json"
@@ -160,7 +174,7 @@ class RuntimeOptimizerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "espresso_rl"
-            default_path = data_dir / "models" / "dreamer_v3.pt"
+            default_path = data_dir / "models" / "dreamer_v3.safetensors"
             default_manifest_path = data_dir / "models" / "dreamer_v3_manifest.json"
             with (
                 patch.object(config_module, "_OPTIONS_PATH", root / "options.json"),
@@ -225,7 +239,7 @@ def write_manifest(
         "format": "espresso_rl_model_manifest_v1",
         "schema_version": 1,
         "model_family": "dreamer_v3",
-        "model_artifact": {"sha256": model_sha256},
+        "model_artifact": {"format": "safetensors", "sha256": model_sha256},
         "dataset": {
             "format": "espresso_rl_training_dataset_v1",
             "sha256": "b" * 64,

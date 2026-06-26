@@ -100,7 +100,7 @@ Official Docker builds can embed a release-default model SHA with the
 `ESPRESSORL_RELEASE_MODEL_ARTIFACT_SHA256` build arg, normally supplied by the
 GitHub repository variable with the same name. If that default SHA is present
 and no explicit path is configured, EspressoRL looks for
-`/data/espresso_rl/models/dreamer_v3.pt` and
+`/data/espresso_rl/models/dreamer_v3.safetensors` and
 `/data/espresso_rl/models/dreamer_v3_manifest.json`. A trainer using their own
 model can set `optimizer_model_artifact_path`,
 `optimizer_model_artifact_sha256`, and `optimizer_model_manifest_path` in
@@ -111,9 +111,12 @@ release default. Oversized artifacts are refused by
 `optimizer_model_artifact_max_bytes`.
 
 The model manifest is regular UTF-8 JSON. It must identify the model family,
-model artifact SHA-256, training dataset SHA-256, training dataset manifest
-SHA-256, trainer git SHA, training config SHA-256, state/action/reward schema
-versions, and EspressoRL runtime schema compatibility. Example:
+model artifact format, model artifact SHA-256, training dataset SHA-256,
+training dataset manifest SHA-256, trainer git SHA, training config SHA-256,
+state/action/reward schema versions, and EspressoRL runtime schema
+compatibility. Runtime inference artifacts must use `safetensors`; pickle-style
+formats such as full `torch.save(model)` files are intentionally not accepted
+by the manifest verifier. Example:
 
 ```json
 {
@@ -121,6 +124,7 @@ versions, and EspressoRL runtime schema compatibility. Example:
   "schema_version": 1,
   "model_family": "dreamer_v3",
   "model_artifact": {
+    "format": "safetensors",
     "sha256": "MODEL_FILE_SHA256"
   },
   "dataset": {
@@ -143,6 +147,29 @@ versions, and EspressoRL runtime schema compatibility. Example:
   }
 }
 ```
+
+Dreamer action schema version `1` is also intentionally narrow and
+machine-agnostic. Model output may propose only canonical relative recipe
+actions:
+
+```json
+{
+  "format": "espresso_rl_dreamer_action_v1",
+  "schema_version": 1,
+  "grind_delta_steps_from_current": -3,
+  "next_dose_g": 18.5,
+  "target_yield_g": 40.0,
+  "target_ratio": 2.16,
+  "confidence": 0.62,
+  "reason": "DreamerV3 candidate."
+}
+```
+
+Absolute grinder settings, profile edits, machine topics, and adapter payloads
+are not part of the Dreamer action schema. The action space can use the same
+full safety envelope available to BO, currently up to 5 relative grind steps,
+1.0 g dose change, and 8.0 g target-yield change from the current recipe, while
+still respecting global dose/yield/ratio bounds.
 
 Start the local service and Postgres:
 

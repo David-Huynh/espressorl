@@ -3,18 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from espresso_rl.domain.dreamer_actions import DREAMER_ACTION_SCHEMA_VERSION
 from espresso_rl.domain.optimization import OPTIMIZER_MODE_DREAMER_V3_SHADOW
 
 MODEL_MANIFEST_FORMAT = "espresso_rl_model_manifest_v1"
 MODEL_MANIFEST_SCHEMA_VERSION = 1
 MODEL_FAMILY_DREAMER_V3 = "dreamer_v3"
+MODEL_ARTIFACT_FORMAT_SAFETENSORS = "safetensors"
 TRAINING_DATASET_FORMAT = "espresso_rl_training_dataset_v1"
 STATE_SCHEMA_VERSION = 1
-ACTION_SCHEMA_VERSION = 1
+ACTION_SCHEMA_VERSION = DREAMER_ACTION_SCHEMA_VERSION
 REWARD_SCHEMA_VERSION = 1
 RUNTIME_SCHEMA_VERSION = 1
 
 ALLOWED_MODEL_FAMILIES = {MODEL_FAMILY_DREAMER_V3}
+ALLOWED_MODEL_ARTIFACT_FORMATS = {MODEL_ARTIFACT_FORMAT_SAFETENSORS}
 _HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
@@ -23,6 +26,7 @@ class ModelManifestValidation:
     verified: bool
     unavailable_reason: str | None = None
     model_family: str | None = None
+    model_artifact_format: str | None = None
     model_artifact_sha256: str | None = None
     dataset_sha256: str | None = None
     dataset_manifest_sha256: str | None = None
@@ -53,6 +57,9 @@ def validate_model_manifest(
     artifact = manifest.get("model_artifact")
     if not isinstance(artifact, dict):
         return _invalid("DreamerV3 model manifest model_artifact is missing.")
+    model_artifact_format = artifact.get("format")
+    if model_artifact_format not in ALLOWED_MODEL_ARTIFACT_FORMATS:
+        return _invalid("DreamerV3 model manifest model_artifact.format must be safetensors.")
     model_artifact_sha256 = _sha256(artifact.get("sha256"))
     if model_artifact_sha256 is None:
         return _invalid("DreamerV3 model manifest model_artifact.sha256 is invalid.")
@@ -107,6 +114,7 @@ def validate_model_manifest(
     return ModelManifestValidation(
         verified=True,
         model_family=model_family,
+        model_artifact_format=model_artifact_format,
         model_artifact_sha256=model_artifact_sha256,
         dataset_sha256=dataset_sha256,
         dataset_manifest_sha256=dataset_manifest_sha256,
