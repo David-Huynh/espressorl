@@ -29,6 +29,7 @@ VALID_CORRECTION_TAGS = {
 VALID_FINAL_PHASE_TYPES = {"preinfusion", "brew"}
 VALID_FINAL_PUMP_TARGETS = {"simple", "pressure", "flow"}
 VALID_SHOT_END_STATES = {"finished", "manual_or_interrupted", "unknown"}
+VALID_PUMP_TARGET_MODES = {0, 1, 2}
 _HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
@@ -49,6 +50,16 @@ def _numbers(values: list[Any], field_name: str) -> list[float]:
         return [_number(v, field_name) for v in values]
     except TypeError as exc:
         raise ValueError(f"{field_name} must contain only finite numbers") from exc
+
+
+def _pump_target_modes(values: list[Any], field_name: str) -> list[int]:
+    try:
+        modes = [int(v) for v in values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must contain only pump target mode codes") from exc
+    if any(isinstance(v, bool) for v in values) or any(mode not in VALID_PUMP_TARGET_MODES for mode in modes):
+        raise ValueError(f"{field_name} must contain only pump target mode codes")
+    return modes
 
 
 def _optional_string(value: Any, field_name: str, max_len: int = 120) -> str | None:
@@ -102,13 +113,17 @@ class ShotProfileEvent:
     time_ms: list[float]
     pressure: list[float]
     target_pressure: list[float]
-    flow: list[float]
+    pump_flow: list[float]
     target_flow: list[float]
+    beverage_flow: list[float]
     weight: list[float]
     microns_per_step: float
     dose_in_g: float
     target_yield_g: float
     schema_version: int = 1
+    temperature: list[float] | None = None
+    target_temperature: list[float] | None = None
+    pump_target_mode: list[int] | None = None
     relative_grind_steps_from_reference: float | None = None
     beverage_out_g: float | None = None
     shot_time_s: float | None = None
@@ -157,8 +172,14 @@ class ShotProfileEvent:
             raise ValueError("unsupported shot profile schema_version")
         object.__setattr__(self, "shot_type", ShotType(self.shot_type))
         object.__setattr__(self, "time_ms", _numbers(self.time_ms, "time_ms"))
-        for name in ("pressure", "target_pressure", "flow", "target_flow", "weight"):
+        for name in ("pressure", "target_pressure", "pump_flow", "target_flow", "beverage_flow", "weight"):
             object.__setattr__(self, name, _numbers(getattr(self, name), name))
+        for name in ("temperature", "target_temperature"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _numbers(value, name))
+        if self.pump_target_mode is not None:
+            object.__setattr__(self, "pump_target_mode", _pump_target_modes(self.pump_target_mode, "pump_target_mode"))
         object.__setattr__(self, "microns_per_step", _number(self.microns_per_step, "microns_per_step"))
         object.__setattr__(self, "dose_in_g", _number(self.dose_in_g, "dose_in_g"))
         object.__setattr__(self, "target_yield_g", _number(self.target_yield_g, "target_yield_g"))
@@ -267,10 +288,17 @@ class ShotProfileEvent:
             len(self.time_ms),
             len(self.pressure),
             len(self.target_pressure),
-            len(self.flow),
+            len(self.pump_flow),
             len(self.target_flow),
+            len(self.beverage_flow),
             len(self.weight),
         }
+        if self.temperature is not None:
+            lengths.add(len(self.temperature))
+        if self.target_temperature is not None:
+            lengths.add(len(self.target_temperature))
+        if self.pump_target_mode is not None:
+            lengths.add(len(self.pump_target_mode))
         if len(lengths) != 1:
             raise ValueError("shot profile arrays must have matching lengths")
         if self.microns_per_step <= 0:

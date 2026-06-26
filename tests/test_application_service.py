@@ -311,8 +311,9 @@ def shot_event(shot_id: str, timestamp: int, **overrides) -> ShotProfileEvent:
         "time_ms": [0, 500, 1000],
         "pressure": [0.0, 8.0, 9.0],
         "target_pressure": [0.0, 8.0, 9.0],
-        "flow": [0.0, 2.0, 2.0],
+        "pump_flow": [0.0, 2.0, 2.0],
         "target_flow": [0.0, 2.0, 2.0],
+        "beverage_flow": [0.0, 1.8, 2.0],
         "weight": [0.0, 10.0, 36.0],
         "microns_per_step": 12.5,
         "relative_grind_steps_from_reference": 42,
@@ -691,7 +692,7 @@ class ApplicationServiceTests(unittest.TestCase):
             shot_event(
                 "shot_1",
                 1,
-                flow=[100_000.0, 100_000.0, 100_000.0],
+                pump_flow=[100_000.0, 100_000.0, 100_000.0],
                 target_flow=[2.0, 2.0, 2.0],
             )
         )

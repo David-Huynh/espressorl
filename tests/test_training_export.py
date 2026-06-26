@@ -26,6 +26,10 @@ class TrainingDatasetExportTests(unittest.TestCase):
                                 "human_rating": 4,
                                 "reward": 0.8,
                                 "reward_confidence": 0.7,
+                                "beverage_flow_profile": [1.5 for _ in range(100)],
+                                "temperature_profile": [93.0 for _ in range(100)],
+                                "target_temperature_profile": [92.5 for _ in range(100)],
+                                "pump_target_mode_profile": [1 for _ in range(100)],
                             },
                         )
                     ]
@@ -54,8 +58,14 @@ class TrainingDatasetExportTests(unittest.TestCase):
         self.assertEqual(exported_row["observation"]["shot_id"], "shot_1")
         self.assertEqual(exported_row["context"]["grinder_context_id"], "=formula_like_context")
         self.assertEqual(exported_row["action"]["relative_grind_steps_from_reference"], 0.0)
+        self.assertEqual(exported_row["observation"]["temperature_profile"][0], 93.0)
+        self.assertEqual(exported_row["observation"]["target_temperature_profile"][0], 92.5)
+        self.assertEqual(exported_row["observation"]["pump_target_mode_profile"][0], 1)
+        self.assertEqual(exported_row["observation"]["beverage_flow_profile"][0], 1.5)
         self.assertEqual(validate_training_transition(exported_row), [])
         self.assertIn("'=formula_like_context", csv_text)
+        self.assertIn("temperature_profile_sha256", csv_text)
+        self.assertIn("beverage_flow_profile_sha256", csv_text)
         self.assertEqual(manifest["format"], "espresso_rl_training_dataset_v1")
         self.assertEqual(manifest["canonical_row_format"], "espresso_rl_training_transition_v1")
         self.assertEqual(manifest["source_git_sha"], "abc123")
@@ -224,6 +234,8 @@ def training_row(
         "beverage_out_g": 36.0,
         "target_ratio": 2.0,
         "shot_time_s": 30.0,
+        "profile_temperature_c": 93.0,
+        "final_phase_temperature_c": 92.5,
         "microns_per_step": 12.5,
         "relative_grind_steps_from_reference": 0,
         "relative_grind_um_from_reference": 0,

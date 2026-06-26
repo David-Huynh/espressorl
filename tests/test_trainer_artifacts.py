@@ -216,6 +216,8 @@ def training_row(row_id: int) -> dict:
             "shot_time_s": 30.0,
             "profile_flow_valid": True,
             "profile_flow_masked": False,
+            "profile_temperature_c": 93.0,
+            "final_phase_temperature_c": 92.5,
         },
         "reward": {
             "human_rating": 4,

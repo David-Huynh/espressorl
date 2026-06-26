@@ -30,6 +30,8 @@ def payload(**overrides) -> str:
         "target_ratio": 2.0,
         "beverage_out_g": 36.0,
         "shot_time_s": 30.0,
+        "profile_temperature_c": 93.0,
+        "final_phase_temperature_c": 92.5,
     }
     data.update(overrides)
     return json.dumps(data, sort_keys=True)
@@ -122,6 +124,37 @@ class UploadMaintenanceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.errors, [])
 
+    def test_preflight_requires_temperature_metadata(self) -> None:
+        result = validate_upload_payload_json(payload(profile_temperature_c=None))
+
+        self.assertFalse(result.ok)
+        self.assertIn("profile_temperature_c out of range", result.errors)
+
+    def test_preflight_accepts_resampled_temperature_and_pump_mode_profiles(self) -> None:
+        result = validate_upload_payload_json(
+            payload(
+                beverage_flow_profile=[1.5 for _ in range(100)],
+                temperature_profile=[93.0 for _ in range(100)],
+                target_temperature_profile=[92.5 for _ in range(100)],
+                pump_target_mode_profile=[2 for _ in range(100)],
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, [])
+
+    def test_preflight_rejects_invalid_pump_mode_profile(self) -> None:
+        result = validate_upload_payload_json(payload(pump_target_mode_profile=[3 for _ in range(100)]))
+
+        self.assertFalse(result.ok)
+        self.assertIn("pump_target_mode_profile contains invalid pump target mode values", result.errors)
+
+    def test_preflight_rejects_invalid_beverage_flow_profile(self) -> None:
+        result = validate_upload_payload_json(payload(beverage_flow_profile=[21.0 for _ in range(100)]))
+
+        self.assertFalse(result.ok)
+        self.assertIn("beverage_flow_profile out of range", result.errors)
+
     def test_preflight_rejects_weight_below_tare_noise_floor(self) -> None:
         profile = valid_profile()
         profile[4][0] = -1.01
@@ -198,7 +231,7 @@ class UploadMaintenanceTests(unittest.TestCase):
         result = validate_upload_payload_json(payload(profile_resampled=profile))
 
         self.assertFalse(result.ok)
-        self.assertIn("profile_resampled flow contains non-finite or nonnumeric values", result.errors)
+        self.assertIn("profile_resampled pump_flow contains non-finite or nonnumeric values", result.errors)
 
     def test_trusted_payload_copy_masks_invalid_inactive_flow(self) -> None:
         profile = valid_profile()

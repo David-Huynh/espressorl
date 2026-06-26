@@ -7,8 +7,10 @@ from pathlib import Path
 import numpy as np
 
 from espresso_rl.domain.models import (
+    AUX_PROFILE_SHAPE,
     PROFILE_DTYPE,
     PROFILE_SHAPE,
+    PUMP_TARGET_MODE_DTYPE,
     FollowThroughState,
     Recommendation,
     RecommendationApplyStatus,
@@ -111,6 +113,10 @@ class SQLiteStore:
                 final_valve_open INTEGER,
                 profile_temperature_c REAL,
                 final_phase_temperature_c REAL,
+                beverage_flow_profile_blob BLOB,
+                temperature_profile_blob BLOB,
+                target_temperature_profile_blob BLOB,
+                pump_target_mode_profile_blob BLOB,
                 shot_end_state TEXT,
                 grinder_calibration_mode TEXT NOT NULL DEFAULT 'relative_calibrated',
                 grinder_step_direction TEXT NOT NULL DEFAULT 'higher_is_finer',
@@ -239,6 +245,10 @@ class SQLiteStore:
         self._ensure_column("shots", "final_valve_open", "INTEGER")
         self._ensure_column("shots", "profile_temperature_c", "REAL")
         self._ensure_column("shots", "final_phase_temperature_c", "REAL")
+        self._ensure_column("shots", "beverage_flow_profile_blob", "BLOB")
+        self._ensure_column("shots", "temperature_profile_blob", "BLOB")
+        self._ensure_column("shots", "target_temperature_profile_blob", "BLOB")
+        self._ensure_column("shots", "pump_target_mode_profile_blob", "BLOB")
         self._ensure_column("shots", "shot_end_state", "TEXT")
         self.conn.execute(
             """
@@ -311,6 +321,8 @@ class SQLiteShotRepository:
                 final_phase_elapsed_s, final_pump_target,
                 final_target_pressure, final_target_flow, final_valve_open,
                 profile_temperature_c, final_phase_temperature_c,
+                beverage_flow_profile_blob, temperature_profile_blob, target_temperature_profile_blob,
+                pump_target_mode_profile_blob,
                 shot_end_state, grinder_calibration_mode,
                 grinder_step_direction, grinder_reference_label,
                 current_absolute_step, absolute_reference_step,
@@ -340,6 +352,8 @@ class SQLiteShotRepository:
                 :final_phase_elapsed_s, :final_pump_target,
                 :final_target_pressure, :final_target_flow, :final_valve_open,
                 :profile_temperature_c, :final_phase_temperature_c,
+                :beverage_flow_profile_blob, :temperature_profile_blob, :target_temperature_profile_blob,
+                :pump_target_mode_profile_blob,
                 :shot_end_state, :grinder_calibration_mode,
                 :grinder_step_direction, :grinder_reference_label,
                 :current_absolute_step, :absolute_reference_step,
@@ -1064,6 +1078,10 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "final_valve_open": shot.final_valve_open,
         "profile_temperature_c": shot.profile_temperature_c,
         "final_phase_temperature_c": shot.final_phase_temperature_c,
+        "beverage_flow_profile_blob": _optional_profile_vector_to_blob(shot.beverage_flow_profile),
+        "temperature_profile_blob": _optional_profile_vector_to_blob(shot.temperature_profile),
+        "target_temperature_profile_blob": _optional_profile_vector_to_blob(shot.target_temperature_profile),
+        "pump_target_mode_profile_blob": _optional_pump_target_mode_to_blob(shot.pump_target_mode_profile),
         "shot_end_state": shot.shot_end_state,
         "grinder_calibration_mode": shot.grinder_calibration_mode.value,
         "grinder_step_direction": shot.grinder_step_direction.value,
@@ -1147,6 +1165,10 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         final_valve_open=_optional_int_to_bool(row["final_valve_open"]),
         profile_temperature_c=row["profile_temperature_c"],
         final_phase_temperature_c=row["final_phase_temperature_c"],
+        beverage_flow_profile=_optional_profile_vector_from_blob(row["beverage_flow_profile_blob"]),
+        temperature_profile=_optional_profile_vector_from_blob(row["temperature_profile_blob"]),
+        target_temperature_profile=_optional_profile_vector_from_blob(row["target_temperature_profile_blob"]),
+        pump_target_mode_profile=_optional_pump_target_mode_from_blob(row["pump_target_mode_profile_blob"]),
         shot_end_state=row["shot_end_state"],
         grinder_calibration_mode=row["grinder_calibration_mode"],
         grinder_step_direction=row["grinder_step_direction"],
@@ -1156,6 +1178,30 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _optional_profile_vector_to_blob(value: np.ndarray | None) -> bytes | None:
+    if value is None:
+        return None
+    return np.asarray(value, dtype=PROFILE_DTYPE).reshape(AUX_PROFILE_SHAPE).tobytes()
+
+
+def _optional_profile_vector_from_blob(value: bytes | None) -> np.ndarray | None:
+    if value is None:
+        return None
+    return np.frombuffer(value, dtype=PROFILE_DTYPE).reshape(AUX_PROFILE_SHAPE).copy()
+
+
+def _optional_pump_target_mode_to_blob(value: np.ndarray | None) -> bytes | None:
+    if value is None:
+        return None
+    return np.asarray(value, dtype=PUMP_TARGET_MODE_DTYPE).reshape(AUX_PROFILE_SHAPE).tobytes()
+
+
+def _optional_pump_target_mode_from_blob(value: bytes | None) -> np.ndarray | None:
+    if value is None:
+        return None
+    return np.frombuffer(value, dtype=PUMP_TARGET_MODE_DTYPE).reshape(AUX_PROFILE_SHAPE).copy()
 
 
 def _optional_bool_to_int(value: bool | None) -> int | None:

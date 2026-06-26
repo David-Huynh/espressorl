@@ -20,6 +20,7 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     RecommendationStatus,
 )
+from espresso_rl.domain.profile import resample_profile, resample_shot_metadata
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 
 
@@ -88,7 +89,11 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "pressure": [0, 4, 9],
                 "target_pressure": [0, 4, 9],
                 "flow": [0, 1, 2],
+                "pump_flow": [0, 1.2, 2.4],
                 "target_flow": [0, 1, 2],
+                "temperature": [86.0, 86.2, 86.5],
+                "target_temperature": [86.5, 86.5, 86.5],
+                "pump_target_mode": [1, 1, 2],
                 "weight": [0, 8, 36],
                 "dose_in_g": 18.5,
                 "target_yield_g": 40.0,
@@ -162,6 +167,13 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.weight_source, "hardware_scale")
         self.assertEqual(event.flow_source, "beverage_weight_derivative")
         self.assertEqual(event.flow_units, "g_per_s")
+        self.assertEqual(event.beverage_flow, [0.0, 1.0, 2.0])
+        self.assertEqual(event.pump_flow, [0.0, 1.2, 2.4])
+        self.assertAlmostEqual(float(resample_profile(event)[2, -1]), 2.4, places=6)
+        self.assertAlmostEqual(float(resample_shot_metadata(event).beverage_flow_profile[-1]), 2.0)  # type: ignore[index]
+        self.assertEqual(event.temperature, [86.0, 86.2, 86.5])
+        self.assertEqual(event.target_temperature, [86.5, 86.5, 86.5])
+        self.assertEqual(event.pump_target_mode, [1, 1, 2])
         self.assertEqual(event.pump_flow_source, "gaggimate_pump_model")
         self.assertEqual(event.pump_flow_units, "ml_per_s")
         self.assertFalse(event.pump_flow_calibration_required)
@@ -229,6 +241,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "pressure": [0, 4, 9],
                 "target_pressure": [0, 4, 9],
                 "flow": [0, 1, 2],
+                "pump_flow": [0, 1, 2],
                 "target_flow": [0, 1, 2],
                 "weight": [0, 0, 0],
                 "dose_in_g": 18.0,
@@ -262,6 +275,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                     "pressure": [0, 4, 9],
                     "target_pressure": [0, 4, 9],
                     "flow": [0, 1, 2],
+                    "pump_flow": [0, 1, 2],
                     "target_flow": [0, 1, 2],
                     "weight": [0, 8, 36],
                     "dose_in_g": 18.0,
@@ -552,6 +566,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                     "pressure": [0.0, 4.0, 8.5, 9.0],
                     "target_pressure": [0.0, 4.0, 8.5, 9.0],
                     "flow": [0.0, 1.0, 2.0, 2.1],
+                    "pump_flow": [0.0, 1.2, 2.2, 2.3],
                     "target_flow": [0.0, 1.0, 2.0, 2.0],
                     "weight": [0.0, 8.0, 22.0, 36.0],
                     "microns_per_step": 12.5,

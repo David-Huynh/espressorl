@@ -309,6 +309,8 @@ def shot_payload(
         "target_yield_g": target_yield,
         "target_ratio": ratio,
         "shot_time_s": shot_time_s,
+        "profile_temperature_c": 93.0,
+        "final_phase_temperature_c": 92.5,
         "human_rating": rating,
         "taste_tags": ["balanced"],
         "reward": reward if reward is not None else (rating - 1.0) / 4.0,

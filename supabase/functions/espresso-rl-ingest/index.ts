@@ -34,7 +34,8 @@ const allowedShotFields = new Set([
   'profile_type', 'profile_phase_count', 'final_phase_index', 'final_phase_name',
   'final_phase_type', 'final_phase_elapsed_s', 'final_pump_target', 'final_target_pressure',
   'final_target_flow', 'final_valve_open', 'profile_temperature_c',
-  'final_phase_temperature_c', 'shot_end_state', 'created_at', 'updated_at',
+  'final_phase_temperature_c', 'beverage_flow_profile', 'temperature_profile', 'target_temperature_profile',
+  'pump_target_mode_profile', 'shot_end_state', 'created_at', 'updated_at',
 ]);
 
 const allowedRecommendationFields = new Set([
@@ -315,8 +316,12 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalNumberRange(payload, 'final_target_pressure', 0, 15, errors);
   optionalNumberRange(payload, 'final_target_flow', 0, 25, errors);
   optionalBoolean(payload, 'final_valve_open', errors);
-  optionalNumberRange(payload, 'profile_temperature_c', 0, 160, errors);
-  optionalNumberRange(payload, 'final_phase_temperature_c', 0, 160, errors);
+  requireNumberRange(payload, 'profile_temperature_c', 0, 160, errors);
+  requireNumberRange(payload, 'final_phase_temperature_c', 0, 160, errors);
+  optionalNumericProfileVector(payload, 'beverage_flow_profile', 0, 20, errors);
+  optionalNumericProfileVector(payload, 'temperature_profile', 0, 160, errors);
+  optionalNumericProfileVector(payload, 'target_temperature_profile', 0, 160, errors);
+  optionalPumpTargetModeProfile(payload, 'pump_target_mode_profile', errors);
   optionalEnum(payload, 'shot_end_state', ['finished', 'manual_or_interrupted', 'unknown'], errors);
   optionalNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalNumberRange(payload, 'updated_at', 0, Number.MAX_SAFE_INTEGER, errors);
@@ -534,7 +539,7 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
   const ranges: Array<[number, number, string]> = [
     [0, 15, 'pressure'],
     [0, 15, 'target_pressure'],
-    [0, 20, 'flow'],
+    [0, 20, 'pump_flow'],
     [0, 20, 'target_flow'],
     [-1, 120, 'weight'],
   ];
@@ -550,7 +555,7 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
       continue;
     }
     if (!channelInRange(channel, min, max)) {
-      if (label === 'flow' || label === 'target_flow') {
+      if (label === 'pump_flow' || label === 'target_flow') {
         continue;
       }
       errors.push(`profile_resampled ${label} out of range`);
@@ -564,6 +569,38 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
         errors.push('final profile weight does not match beverage_out_g');
       }
     }
+  }
+}
+
+function optionalNumericProfileVector(payload: JsonRecord, key: string, min: number, max: number, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  const channel = payload[key];
+  if (!Array.isArray(channel) || channel.length !== 100) {
+    errors.push(`${key} must have exactly 100 samples`);
+    return;
+  }
+  if (!channelNumericFinite(channel)) {
+    errors.push(`${key} contains non-finite or nonnumeric values`);
+    return;
+  }
+  if (!channelInRange(channel, min, max)) {
+    errors.push(`${key} out of range`);
+  }
+}
+
+function optionalPumpTargetModeProfile(payload: JsonRecord, key: string, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  const channel = payload[key];
+  if (!Array.isArray(channel) || channel.length !== 100) {
+    errors.push(`${key} must have exactly 100 samples`);
+    return;
+  }
+  if (channel.some(value => typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 2)) {
+    errors.push(`${key} contains invalid pump target mode values`);
   }
 }
 

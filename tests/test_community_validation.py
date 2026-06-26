@@ -298,6 +298,8 @@ def shot_payload() -> dict[str, Any]:
         "target_yield_g": 38.0,
         "target_ratio": 2.111,
         "shot_time_s": 30.0,
+        "profile_temperature_c": 93.0,
+        "final_phase_temperature_c": 92.5,
         "human_rating": 4,
         "taste_tags": ["balanced"],
         "reward_confidence": 1.0,

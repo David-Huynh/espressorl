@@ -10,6 +10,27 @@ import numpy as np
 
 PROFILE_SHAPE = (5, 100)
 PROFILE_DTYPE = np.float32
+AUX_PROFILE_SHAPE = (PROFILE_SHAPE[1],)
+PUMP_TARGET_MODE_DTYPE = np.uint8
+PUMP_TARGET_MODE_VALUES = {0, 1, 2}
+
+
+def _optional_profile_vector(value: np.ndarray | list[float] | None, field_name: str) -> np.ndarray | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=PROFILE_DTYPE)
+    if array.shape != AUX_PROFILE_SHAPE or not np.all(np.isfinite(array)):
+        raise ValueError(f"{field_name} must have shape {AUX_PROFILE_SHAPE}")
+    return array
+
+
+def _optional_pump_target_mode_vector(value: np.ndarray | list[int] | None) -> np.ndarray | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=PUMP_TARGET_MODE_DTYPE)
+    if array.shape != AUX_PROFILE_SHAPE or any(int(mode) not in PUMP_TARGET_MODE_VALUES for mode in array):
+        raise ValueError(f"pump_target_mode_profile must have shape {AUX_PROFILE_SHAPE}")
+    return array
 
 
 class RecommendationMode(str, Enum):
@@ -344,6 +365,10 @@ class ShotRecord:
     final_valve_open: bool | None = None
     profile_temperature_c: float | None = None
     final_phase_temperature_c: float | None = None
+    beverage_flow_profile: np.ndarray | None = None
+    temperature_profile: np.ndarray | None = None
+    target_temperature_profile: np.ndarray | None = None
+    pump_target_mode_profile: np.ndarray | None = None
     shot_end_state: str | None = None
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
@@ -369,6 +394,16 @@ class ShotRecord:
         self.profile = np.asarray(self.profile, dtype=PROFILE_DTYPE)
         if self.profile.shape != PROFILE_SHAPE:
             raise ValueError(f"profile must have shape {PROFILE_SHAPE}")
+        self.beverage_flow_profile = _optional_profile_vector(
+            self.beverage_flow_profile,
+            "beverage_flow_profile",
+        )
+        self.temperature_profile = _optional_profile_vector(self.temperature_profile, "temperature_profile")
+        self.target_temperature_profile = _optional_profile_vector(
+            self.target_temperature_profile,
+            "target_temperature_profile",
+        )
+        self.pump_target_mode_profile = _optional_pump_target_mode_vector(self.pump_target_mode_profile)
         self.shot_type = ShotType(self.shot_type)
         self.recommendation_decision = RecommendationDecision(self.recommendation_decision)
         self.recommendation_followed = FollowThroughState(self.recommendation_followed)

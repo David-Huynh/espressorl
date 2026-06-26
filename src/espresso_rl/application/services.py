@@ -30,7 +30,7 @@ from espresso_rl.domain.models import (
     now_ts,
 )
 from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
-from espresso_rl.domain.profile import profile_hash, profile_mse, profile_score, resample_profile_with_quality
+from espresso_rl.domain.profile import profile_hash, profile_mse, profile_score, resample_profile_with_quality, resample_shot_metadata
 from espresso_rl.domain.reward import compute_reward
 from espresso_rl.domain.staleness import check_recommendation_staleness
 from espresso_rl.domain.utility import classify_shot_profile_event
@@ -255,6 +255,7 @@ class EspressoRLService:
             return IngestResult(shot=None, recommendation=None, dropped_reason=reason)
         recommendation = self._recommendation_for_event(event, now)
         profile_quality = resample_profile_with_quality(event)
+        shot_metadata = resample_shot_metadata(event)
         profile = profile_quality.profile
         mse = profile_mse(profile)
         score = profile_score(profile)
@@ -312,6 +313,10 @@ class EspressoRLService:
             final_valve_open=event.final_valve_open,
             profile_temperature_c=event.profile_temperature_c,
             final_phase_temperature_c=event.final_phase_temperature_c,
+            beverage_flow_profile=shot_metadata.beverage_flow_profile,
+            temperature_profile=shot_metadata.temperature_profile,
+            target_temperature_profile=shot_metadata.target_temperature_profile,
+            pump_target_mode_profile=shot_metadata.pump_target_mode_profile,
             shot_end_state=event.shot_end_state,
             created_at=now,
             updated_at=now,

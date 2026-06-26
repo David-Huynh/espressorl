@@ -93,6 +93,10 @@ SHOT_RECORD_FIELDS = frozenset(
         "final_valve_open",
         "profile_temperature_c",
         "final_phase_temperature_c",
+        "beverage_flow_profile",
+        "temperature_profile",
+        "target_temperature_profile",
+        "pump_target_mode_profile",
         "shot_end_state",
         "created_at",
         "updated_at",
@@ -255,7 +259,7 @@ def mask_untrusted_profile_channels(payload: dict[str, Any]) -> dict[str, Any]:
     channels = [list(channel) if isinstance(channel, list) else channel for channel in profile]
     target_flow = channels[3]
     flow = channels[2]
-    flow_valid = _channel_in_range(flow, 0, 20)
+    flow_valid = payload.get("pump_flow_calibration_required") is not True and _channel_in_range(flow, 0, 20)
     target_flow_valid = _channel_in_range(target_flow, 0, 20)
     copied["profile_flow_valid"] = flow_valid
     copied["profile_flow_masked"] = False
@@ -343,8 +347,12 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_number_range(payload, "final_target_pressure", 0, 15, errors)
     _optional_number_range(payload, "final_target_flow", 0, 25, errors)
     _optional_bool(payload, "final_valve_open", errors)
-    _optional_number_range(payload, "profile_temperature_c", 0, 160, errors)
-    _optional_number_range(payload, "final_phase_temperature_c", 0, 160, errors)
+    _require_number_range(payload, "profile_temperature_c", 0, 160, errors)
+    _require_number_range(payload, "final_phase_temperature_c", 0, 160, errors)
+    _optional_numeric_profile_vector(payload, "beverage_flow_profile", 0, 20, errors)
+    _optional_numeric_profile_vector(payload, "temperature_profile", 0, 160, errors)
+    _optional_numeric_profile_vector(payload, "target_temperature_profile", 0, 160, errors)
+    _optional_pump_target_mode_profile(payload, "pump_target_mode_profile", errors)
     _optional_enum(payload, "shot_end_state", {"finished", "manual_or_interrupted", "unknown"}, errors)
     _optional_string_list_enum(payload, "taste_tags", VALID_TASTE_TAGS, errors)
     _optional_number_range(payload, "created_at", 0, 9_007_199_254_740_991, errors)
@@ -420,7 +428,7 @@ def _validate_profile_resampled(profile: Any, beverage_out_g: Any, errors: list[
     ranges = [
         (0, 15, "pressure"),
         (0, 15, "target_pressure"),
-        (0, 20, "flow"),
+        (0, 20, "pump_flow"),
         (0, 20, "target_flow"),
         (-1, 120, "weight"),
     ]
@@ -436,7 +444,7 @@ def _validate_profile_resampled(profile: Any, beverage_out_g: Any, errors: list[
             errors.append(f"profile_resampled {label} contains non-finite or nonnumeric values")
             continue
         if not _channel_in_range(channel, minimum, maximum):
-            if label in {"flow", "target_flow"}:
+            if label in {"pump_flow", "target_flow"}:
                 continue
             errors.append(f"profile_resampled {label} out of range")
     weight = profile[4]
@@ -444,6 +452,37 @@ def _validate_profile_resampled(profile: Any, beverage_out_g: Any, errors: list[
         final_weight = weight[-1]
         if isinstance(final_weight, (int, float)) and abs(float(final_weight) - float(beverage_out_g)) > 5:
             errors.append("final profile weight does not match beverage_out_g")
+
+
+def _optional_numeric_profile_vector(
+    payload: dict[str, Any],
+    key: str,
+    minimum: float,
+    maximum: float,
+    errors: list[str],
+) -> None:
+    values = payload.get(key)
+    if values is None:
+        return
+    if not isinstance(values, list) or len(values) != 100:
+        errors.append(f"{key} must have exactly 100 samples")
+        return
+    if not _channel_numeric_finite(values):
+        errors.append(f"{key} contains non-finite or nonnumeric values")
+        return
+    if not all(minimum <= float(value) <= maximum for value in values):
+        errors.append(f"{key} out of range")
+
+
+def _optional_pump_target_mode_profile(payload: dict[str, Any], key: str, errors: list[str]) -> None:
+    values = payload.get(key)
+    if values is None:
+        return
+    if not isinstance(values, list) or len(values) != 100:
+        errors.append(f"{key} must have exactly 100 samples")
+        return
+    if not all(isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2 for value in values):
+        errors.append(f"{key} contains invalid pump target mode values")
 
 
 def _require_string(payload: dict[str, Any], key: str, errors: list[str], max_len: int = 160) -> None:

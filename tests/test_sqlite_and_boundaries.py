@@ -41,8 +41,9 @@ def shot_event(**overrides) -> ShotProfileEvent:
         "time_ms": [0, 500, 1000],
         "pressure": [0.0, 8.0, 9.0],
         "target_pressure": [0.0, 8.0, 9.0],
-        "flow": [0.0, 2.0, 2.0],
+        "pump_flow": [0.0, 2.0, 2.0],
         "target_flow": [0.0, 2.0, 2.0],
+        "beverage_flow": [0.0, 1.8, 2.0],
         "weight": [0.0, 10.0, 36.0],
         "microns_per_step": 12.5,
         "relative_grind_steps_from_reference": 42,
@@ -134,6 +135,8 @@ def valid_upload_payload(shot_id: str = "shot_1") -> str:
             "target_ratio": 2.0,
             "beverage_out_g": 36.0,
             "shot_time_s": 30.0,
+            "profile_temperature_c": 93.0,
+            "final_phase_temperature_c": 92.5,
         },
         sort_keys=True,
     )
@@ -148,8 +151,18 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
                 result = service.ingest_shot_profile(
-                    shot_event(bean_context_id="bean_lavazza_100_001", bean_context_name="Lavazza")
+                    shot_event(
+                        bean_context_id="bean_lavazza_100_001",
+                        bean_context_name="Lavazza",
+                        temperature=[86.0, 86.5, 87.0],
+                        target_temperature=[86.5, 86.5, 87.0],
+                        pump_target_mode=[1, 1, 2],
+                    )
                 )
+                self.assertIsNotNone(result.shot.temperature_profile)
+                self.assertIsNotNone(result.shot.target_temperature_profile)
+                self.assertIsNotNone(result.shot.pump_target_mode_profile)
+                self.assertIsNotNone(result.shot.beverage_flow_profile)
                 feedback = service.record_feedback(
                     ShotFeedbackEvent(
                         shot_id="shot_1",
@@ -179,6 +192,11 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertEqual(stored_shot.final_phase_name, "ramp")  # type: ignore[union-attr]
                 self.assertTrue(stored_shot.final_valve_open)  # type: ignore[union-attr]
                 self.assertEqual(stored_shot.shot_end_state, "manual_or_interrupted")  # type: ignore[union-attr]
+                self.assertIsNotNone(stored_shot.temperature_profile)  # type: ignore[union-attr]
+                self.assertIsNotNone(stored_shot.target_temperature_profile)  # type: ignore[union-attr]
+                self.assertIsNotNone(stored_shot.pump_target_mode_profile)  # type: ignore[union-attr]
+                self.assertIsNotNone(stored_shot.beverage_flow_profile)  # type: ignore[union-attr]
+                self.assertEqual(stored_shot.pump_target_mode_profile[-1].item(), 2)  # type: ignore[union-attr]
                 self.assertTrue(stored_shot.feedback_recorded)  # type: ignore[union-attr]
                 self.assertEqual(stored_rec.reason, feedback.recommendation.reason)  # type: ignore[union-attr]
                 self.assertEqual(stored_rec.apply_status, RecommendationApplyStatus.MANUAL_REQUIRED)  # type: ignore[union-attr]

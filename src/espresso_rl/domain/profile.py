@@ -8,9 +8,13 @@ import numpy as np
 from .events import ShotProfileEvent
 from .models import PROFILE_DTYPE, PROFILE_SHAPE
 
-CHANNEL_NAMES = ("pressure", "target_pressure", "flow", "target_flow", "weight")
+CHANNEL_NAMES = ("pressure", "target_pressure", "pump_flow", "target_flow", "weight")
+PUMP_TARGET_MODE_SIMPLE = 0
+PUMP_TARGET_MODE_PRESSURE = 1
+PUMP_TARGET_MODE_FLOW = 2
 PRESSURE_RANGE = (0.0, 15.0)
 FLOW_RANGE = (0.0, 20.0)
+TEMPERATURE_RANGE = (0.0, 160.0)
 TARGET_ACTIVE_EPSILON = 1e-6
 
 
@@ -19,6 +23,14 @@ class ProfileQuality:
     profile: np.ndarray
     flow_valid: bool
     flow_masked: bool
+
+
+@dataclass(frozen=True)
+class ResampledShotMetadata:
+    beverage_flow_profile: np.ndarray | None
+    temperature_profile: np.ndarray | None
+    target_temperature_profile: np.ndarray | None
+    pump_target_mode_profile: np.ndarray | None
 
 
 def resample_profile(event: ShotProfileEvent, n_points: int = PROFILE_SHAPE[1]) -> np.ndarray:
@@ -37,18 +49,47 @@ def resample_profile(event: ShotProfileEvent, n_points: int = PROFILE_SHAPE[1]) 
     return np.stack(channels)
 
 
-def sanitize_profile(profile: np.ndarray) -> ProfileQuality:
-    """Mask untrusted flow channels before local storage/model input.
+def resample_shot_metadata(event: ShotProfileEvent, n_points: int = PROFILE_SHAPE[1]) -> ResampledShotMetadata:
+    time_ms = np.asarray(event.time_ms, dtype=np.float64)
+    beverage_flow_profile = _resample_optional_numeric_channel(
+        time_ms,
+        event.beverage_flow,
+        n_points,
+        allowed_range=FLOW_RANGE,
+    )
+    temperature_profile = _resample_optional_numeric_channel(
+        time_ms,
+        event.temperature,
+        n_points,
+        allowed_range=TEMPERATURE_RANGE,
+    )
+    target_temperature_profile = _resample_optional_numeric_channel(
+        time_ms,
+        event.target_temperature,
+        n_points,
+        allowed_range=TEMPERATURE_RANGE,
+    )
+    pump_target_mode_profile = _resample_optional_step_channel(time_ms, event.pump_target_mode, n_points)
+    return ResampledShotMetadata(
+        beverage_flow_profile=beverage_flow_profile,
+        temperature_profile=temperature_profile,
+        target_temperature_profile=target_temperature_profile,
+        pump_target_mode_profile=pump_target_mode_profile,
+    )
 
-    Gaggimate may publish pump-derived flow telemetry that is not the same unit
-    as beverage flow. Keep pressure/weight usable while preventing a corrupt
-    flow pair from poisoning profile scoring or model input.
+
+def sanitize_profile(profile: np.ndarray, *, force_flow_mask: bool = False) -> ProfileQuality:
+    """Mask untrusted pump-flow channels before storage/model input.
+
+    The fixed profile stores pump flow in ml/s so it can be compared with the
+    pump-flow target. Beverage mass flow is retained separately and is never
+    compared with the pump target.
     """
     sanitized = np.asarray(profile, dtype=PROFILE_DTYPE).copy()
     if sanitized.shape != PROFILE_SHAPE:
         raise ValueError(f"profile must have shape {PROFILE_SHAPE}")
 
-    flow_valid = _channel_values_valid(sanitized[2], *FLOW_RANGE)
+    flow_valid = not force_flow_mask and _channel_values_valid(sanitized[2], *FLOW_RANGE)
     target_flow_valid = _channel_values_valid(sanitized[3], *FLOW_RANGE)
     flow_masked = not (flow_valid and target_flow_valid)
     if flow_masked:
@@ -66,7 +107,10 @@ def resample_profile_with_quality(
     event: ShotProfileEvent,
     n_points: int = PROFILE_SHAPE[1],
 ) -> ProfileQuality:
-    return sanitize_profile(resample_profile(event, n_points=n_points))
+    return sanitize_profile(
+        resample_profile(event, n_points=n_points),
+        force_flow_mask=event.pump_flow_calibration_required,
+    )
 
 
 def profile_mse(profile: np.ndarray) -> float:
@@ -107,3 +151,38 @@ def _channel_pair_usable(
 
 def _channel_values_valid(channel: np.ndarray, minimum: float, maximum: float) -> bool:
     return bool(np.all(np.isfinite(channel)) and np.all(channel >= minimum) and np.all(channel <= maximum))
+
+
+def _resample_optional_numeric_channel(
+    time_ms: np.ndarray,
+    values: list[float] | None,
+    n_points: int,
+    *,
+    allowed_range: tuple[float, float],
+) -> np.ndarray | None:
+    if values is None or len(time_ms) < 2:
+        return None
+    raw = np.asarray(values, dtype=np.float64)
+    if len(raw) != len(time_ms) or np.any(np.diff(time_ms) <= 0):
+        return None
+    t_uniform = np.linspace(time_ms[0], time_ms[-1], n_points)
+    resampled = np.interp(t_uniform, time_ms, raw).astype(PROFILE_DTYPE)
+    if not _channel_values_valid(resampled, *allowed_range):
+        return None
+    return resampled
+
+
+def _resample_optional_step_channel(
+    time_ms: np.ndarray,
+    values: list[int] | None,
+    n_points: int,
+) -> np.ndarray | None:
+    if values is None or len(time_ms) < 2:
+        return None
+    raw = np.asarray(values, dtype=np.uint8)
+    if len(raw) != len(time_ms) or np.any(np.diff(time_ms) <= 0):
+        return None
+    t_uniform = np.linspace(time_ms[0], time_ms[-1], n_points)
+    indexes = np.searchsorted(time_ms, t_uniform, side="right") - 1
+    indexes = np.clip(indexes, 0, len(raw) - 1)
+    return raw[indexes].astype(np.uint8)

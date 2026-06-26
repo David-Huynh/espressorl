@@ -185,8 +185,12 @@ class GaggimateMQTTClient:
         n = len(time_ms)
         pressure = _channel(payload, "pressure", n)
         target_pressure = _channel(payload, "target_pressure", n)
-        flow = _channel(payload, "flow", n)
+        beverage_flow = _channel(payload, "flow", n)
+        pump_flow = _channel(payload, "pump_flow", n)
         target_flow = _channel(payload, "target_flow", n)
+        temperature = _optional_channel(payload, "temperature", n)
+        target_temperature = _optional_channel(payload, "target_temperature", n)
+        pump_target_mode = _optional_int_channel(payload, "pump_target_mode", n)
         weight = _channel({"weight": weight}, "weight", n)
         target_yield_g = float(payload.get("target_yield_g", self._config.initial_target_yield_g))
         beverage_out_g = payload.get("beverage_out_g")
@@ -205,8 +209,12 @@ class GaggimateMQTTClient:
             time_ms=list(time_ms),
             pressure=pressure,
             target_pressure=target_pressure,
-            flow=flow,
+            pump_flow=pump_flow,
             target_flow=target_flow,
+            beverage_flow=beverage_flow,
+            temperature=temperature,
+            target_temperature=target_temperature,
+            pump_target_mode=pump_target_mode,
             weight=weight,
             microns_per_step=float(payload.get("microns_per_step", self._config.microns_per_step)),
             relative_grind_steps_from_reference=_relative_grind_steps_from_payload(
@@ -434,3 +442,23 @@ def _channel(payload: dict[str, Any], key: str, n: int) -> list[float]:
     if len(result) != n:
         return [0.0] * n
     return result
+
+
+def _optional_channel(payload: dict[str, Any], key: str, n: int) -> list[float] | None:
+    values = payload.get(key)
+    if values is None:
+        return None
+    result = list(values)
+    if len(result) != n:
+        return None
+    return result
+
+
+def _optional_int_channel(payload: dict[str, Any], key: str, n: int) -> list[int] | None:
+    values = payload.get(key)
+    if values is None:
+        return None
+    result = list(values)
+    if len(result) != n:
+        return None
+    return [_optional_int(value) or 0 for value in result]

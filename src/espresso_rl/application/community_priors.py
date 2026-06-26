@@ -444,11 +444,11 @@ def _profile_shape_bucket(payload: dict[str, Any]) -> str:
         return f"noprof:t{shot_time:.0f}"
 
     pressure_peak = _channel_peak(profile[0])
-    flow_peak = _channel_peak(profile[2])
+    pump_flow_peak = _channel_peak(profile[2])
     final_weight = _channel_last(profile[4])
     return (
         f"p{_bucket(pressure_peak, 1.0):.0f}:"
-        f"f{_bucket(flow_peak, 1.0):.0f}:"
+        f"pf{_bucket(pump_flow_peak, 1.0):.0f}:"
         f"w{_bucket(final_weight, 5.0):.0f}:"
         f"t{shot_time:.0f}"
     )

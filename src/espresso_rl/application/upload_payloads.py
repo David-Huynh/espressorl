@@ -102,6 +102,10 @@ def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
         "final_valve_open": shot.final_valve_open,
         "profile_temperature_c": shot.profile_temperature_c,
         "final_phase_temperature_c": shot.final_phase_temperature_c,
+        "beverage_flow_profile": _optional_array(shot.beverage_flow_profile, ndigits=3),
+        "temperature_profile": _optional_array(shot.temperature_profile, ndigits=3),
+        "target_temperature_profile": _optional_array(shot.target_temperature_profile, ndigits=3),
+        "pump_target_mode_profile": _optional_int_array(shot.pump_target_mode_profile),
         "shot_end_state": shot.shot_end_state,
         "created_at": shot.created_at,
         "updated_at": shot.updated_at,
@@ -167,6 +171,18 @@ def canonical_payload_json(payload: dict[str, Any]) -> str:
 
 def payload_hash(payload_json: str) -> str:
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+
+
+def _optional_array(value: Any, *, ndigits: int) -> list[float] | None:
+    if value is None:
+        return None
+    return [round(float(item), ndigits) for item in value]
+
+
+def _optional_int_array(value: Any) -> list[int] | None:
+    if value is None:
+        return None
+    return [int(item) for item in value]
 
 
 def _make_item(

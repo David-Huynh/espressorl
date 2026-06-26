@@ -42,6 +42,10 @@ CSV_COLUMNS = [
     "bean_context_id",
     "grinder_context_id",
     "profile_resampled_sha256",
+    "temperature_profile_sha256",
+    "target_temperature_profile_sha256",
+    "pump_target_mode_profile_sha256",
+    "beverage_flow_profile_sha256",
     "raw_profile_hash",
     "dose_g",
     "target_yield_g",
@@ -70,6 +74,11 @@ CSV_COLUMNS = [
     "recommended_target_ratio",
     "profile_flow_valid",
     "profile_flow_masked",
+    "final_pump_target",
+    "final_target_pressure",
+    "final_target_flow",
+    "profile_temperature_c",
+    "final_phase_temperature_c",
 ]
 
 
@@ -266,6 +275,15 @@ def _training_transition_from_payload(
             "profile_id": payload.get("profile_id"),
             "profile_type": payload.get("profile_type"),
             "profile_phase_count": payload.get("profile_phase_count"),
+            "final_pump_target": payload.get("final_pump_target"),
+            "final_target_pressure": _rounded(payload.get("final_target_pressure"), 4),
+            "final_target_flow": _rounded(payload.get("final_target_flow"), 4),
+            "profile_temperature_c": _rounded(payload.get("profile_temperature_c"), 4),
+            "final_phase_temperature_c": _rounded(payload.get("final_phase_temperature_c"), 4),
+            "beverage_flow_profile": payload.get("beverage_flow_profile"),
+            "temperature_profile": payload.get("temperature_profile"),
+            "target_temperature_profile": payload.get("target_temperature_profile"),
+            "pump_target_mode_profile": payload.get("pump_target_mode_profile"),
             "shot_end_state": payload.get("shot_end_state"),
         },
         "reward": {
@@ -385,6 +403,10 @@ def _csv_row(row: dict[str, Any]) -> dict[str, Any]:
         "bean_context_id": _safe_csv_cell(context.get("bean_context_id")),
         "grinder_context_id": _safe_csv_cell(context.get("grinder_context_id")),
         "profile_resampled_sha256": _value_sha256(observation.get("profile_resampled")),
+        "temperature_profile_sha256": _value_sha256(observation.get("temperature_profile")),
+        "target_temperature_profile_sha256": _value_sha256(observation.get("target_temperature_profile")),
+        "pump_target_mode_profile_sha256": _value_sha256(observation.get("pump_target_mode_profile")),
+        "beverage_flow_profile_sha256": _value_sha256(observation.get("beverage_flow_profile")),
         "raw_profile_hash": observation.get("raw_profile_hash") or "",
         "dose_g": action.get("dose_g"),
         "target_yield_g": action.get("target_yield_g"),
@@ -416,6 +438,11 @@ def _csv_row(row: dict[str, Any]) -> dict[str, Any]:
         "recommended_target_ratio": recommendation.get("target_ratio", ""),
         "profile_flow_valid": observation.get("profile_flow_valid"),
         "profile_flow_masked": observation.get("profile_flow_masked"),
+        "final_pump_target": observation.get("final_pump_target") or "",
+        "final_target_pressure": observation.get("final_target_pressure", ""),
+        "final_target_flow": observation.get("final_target_flow", ""),
+        "profile_temperature_c": observation.get("profile_temperature_c", ""),
+        "final_phase_temperature_c": observation.get("final_phase_temperature_c", ""),
     }
 
 

@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS shots (
     final_valve_open BOOLEAN,
     profile_temperature_c DOUBLE PRECISION,
     final_phase_temperature_c DOUBLE PRECISION,
+    beverage_flow_profile_blob BYTEA,
+    temperature_profile_blob BYTEA,
+    target_temperature_profile_blob BYTEA,
+    pump_target_mode_profile_blob BYTEA,
     shot_end_state TEXT,
     grinder_calibration_mode TEXT NOT NULL DEFAULT 'relative_calibrated',
     grinder_step_direction TEXT NOT NULL DEFAULT 'higher_is_finer',
@@ -83,6 +87,18 @@ CREATE INDEX IF NOT EXISTS idx_shots_context_time
 
 ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS grinder_context_id TEXT;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS beverage_flow_profile_blob BYTEA;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS temperature_profile_blob BYTEA;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS target_temperature_profile_blob BYTEA;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS pump_target_mode_profile_blob BYTEA;
 
 CREATE INDEX IF NOT EXISTS idx_shots_context_grinder_time
     ON shots (install_id, machine_id, bean_context_id, grinder_context_id, timestamp DESC);

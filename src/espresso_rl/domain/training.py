@@ -88,6 +88,15 @@ _OBSERVATION_FIELDS = frozenset(
         "profile_id",
         "profile_type",
         "profile_phase_count",
+        "final_pump_target",
+        "final_target_pressure",
+        "final_target_flow",
+        "profile_temperature_c",
+        "final_phase_temperature_c",
+        "beverage_flow_profile",
+        "temperature_profile",
+        "target_temperature_profile",
+        "pump_target_mode_profile",
         "shot_end_state",
     }
 )
@@ -226,6 +235,31 @@ def validate_training_transition(row: dict[str, Any]) -> list[str]:
         _optional_string(observation.get("profile_id"), "observation.profile_id", errors)
         _optional_string(observation.get("profile_type"), "observation.profile_type", errors)
         _optional_int(observation.get("profile_phase_count"), "observation.profile_phase_count", errors)
+        _optional_enum(observation.get("final_pump_target"), "observation.final_pump_target", {"simple", "pressure", "flow"}, errors)
+        _optional_number_range(observation.get("final_target_pressure"), "observation.final_target_pressure", 0.0, 15.0, errors)
+        _optional_number_range(observation.get("final_target_flow"), "observation.final_target_flow", 0.0, 25.0, errors)
+        _require_number_range(observation.get("profile_temperature_c"), "observation.profile_temperature_c", 0.0, 160.0, errors)
+        _require_number_range(observation.get("final_phase_temperature_c"), "observation.final_phase_temperature_c", 0.0, 160.0, errors)
+        _optional_profile_vector(
+            observation.get("beverage_flow_profile"),
+            "observation.beverage_flow_profile",
+            0.0,
+            20.0,
+            errors,
+        )
+        _optional_profile_vector(observation.get("temperature_profile"), "observation.temperature_profile", 0.0, 160.0, errors)
+        _optional_profile_vector(
+            observation.get("target_temperature_profile"),
+            "observation.target_temperature_profile",
+            0.0,
+            160.0,
+            errors,
+        )
+        _optional_pump_target_mode_profile(
+            observation.get("pump_target_mode_profile"),
+            "observation.pump_target_mode_profile",
+            errors,
+        )
         _optional_string(observation.get("shot_end_state"), "observation.shot_end_state", errors)
         profile = observation.get("profile_resampled")
         if profile is not None:
@@ -357,3 +391,32 @@ def _validate_profile(profile: object, errors: list[str]) -> None:
         if not all(_is_finite_number(value) for value in channel):
             errors.append("observation.profile_resampled contains non-finite values")
             return
+
+
+def _optional_profile_vector(
+    values: object,
+    label: str,
+    minimum: float,
+    maximum: float,
+    errors: list[str],
+) -> None:
+    if values is None:
+        return
+    if not isinstance(values, list) or len(values) != 100:
+        errors.append(f"{label} must have 100 samples")
+        return
+    if not all(_is_finite_number(value) for value in values):
+        errors.append(f"{label} contains non-finite values")
+        return
+    if not all(minimum <= float(value) <= maximum for value in values):
+        errors.append(f"{label} out of range")
+
+
+def _optional_pump_target_mode_profile(values: object, label: str, errors: list[str]) -> None:
+    if values is None:
+        return
+    if not isinstance(values, list) or len(values) != 100:
+        errors.append(f"{label} must have 100 samples")
+        return
+    if not all(isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2 for value in values):
+        errors.append(f"{label} contains invalid pump target mode values")

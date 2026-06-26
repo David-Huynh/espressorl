@@ -19,6 +19,7 @@ from espresso_rl.domain.profile import (
     profile_score,
     resample_profile,
     resample_profile_with_quality,
+    resample_shot_metadata,
 )
 from espresso_rl.domain.reward import compute_reward
 from espresso_rl.domain.staleness import check_recommendation_staleness
@@ -34,8 +35,9 @@ def event(**overrides) -> ShotProfileEvent:
         "time_ms": [0, 500, 1000],
         "pressure": [0.0, 8.0, 9.0],
         "target_pressure": [0.0, 8.0, 9.0],
-        "flow": [0.0, 2.0, 2.0],
+        "pump_flow": [0.0, 2.0, 2.0],
         "target_flow": [0.0, 2.0, 2.0],
+        "beverage_flow": [0.0, 1.8, 2.0],
         "weight": [0.0, 10.0, 36.0],
         "microns_per_step": 12.5,
         "relative_grind_steps_from_reference": 42,
@@ -90,11 +92,11 @@ class DomainCoreTests(unittest.TestCase):
 
     def test_canonical_profile_requires_aligned_arrays(self) -> None:
         with self.assertRaises(ValueError):
-            event(flow=[0.0, 1.0])
+            event(pump_flow=[0.0, 1.0])
 
     def test_canonical_profile_rejects_nonfinite_profile_values(self) -> None:
         with self.assertRaises(ValueError):
-            event(flow=[0.0, float("nan"), 2.0])
+            event(pump_flow=[0.0, float("nan"), 2.0])
 
     def test_canonical_profile_rejects_nonfinite_scalar_values(self) -> None:
         with self.assertRaises(ValueError):
@@ -102,7 +104,7 @@ class DomainCoreTests(unittest.TestCase):
 
     def test_canonical_profile_rejects_boolean_numeric_values(self) -> None:
         with self.assertRaises(ValueError):
-            event(flow=[0.0, True, 2.0])
+            event(pump_flow=[0.0, True, 2.0])
 
     def test_canonical_profile_accepts_sanitized_execution_metadata(self) -> None:
         parsed = event(
@@ -140,8 +142,38 @@ class DomainCoreTests(unittest.TestCase):
         self.assertEqual(profile.dtype, np.float32)
         self.assertAlmostEqual(float(profile[4, -1]), 36.0)
 
+    def test_scalar_temperature_metadata_is_not_fabricated_as_live_telemetry(self) -> None:
+        metadata = resample_shot_metadata(
+            event(
+                profile_temperature_c=93.0,
+                final_phase_temperature_c=92.0,
+            )
+        )
+
+        self.assertIsNone(metadata.temperature_profile)
+        self.assertIsNone(metadata.target_temperature_profile)
+        self.assertIsNone(metadata.pump_target_mode_profile)
+        self.assertIsNotNone(metadata.beverage_flow_profile)
+
+    def test_sampled_temperature_and_pump_mode_are_resampled(self) -> None:
+        metadata = resample_shot_metadata(
+            event(
+                temperature=[91.0, 92.0, 93.0],
+                target_temperature=[93.0, 93.0, 92.0],
+                pump_target_mode=[1, 1, 2],
+            )
+        )
+
+        self.assertEqual(metadata.temperature_profile.shape, (100,))  # type: ignore[union-attr]
+        self.assertAlmostEqual(float(metadata.beverage_flow_profile[-1]), 2.0)  # type: ignore[index]
+        self.assertAlmostEqual(float(metadata.temperature_profile[-1]), 93.0)  # type: ignore[index]
+        self.assertAlmostEqual(float(metadata.target_temperature_profile[-1]), 92.0)  # type: ignore[index]
+        self.assertEqual(int(metadata.pump_target_mode_profile[-1]), 2)  # type: ignore[index]
+
     def test_profile_mse_ignores_inactive_zero_flow_target(self) -> None:
-        profile = resample_profile(event(flow=[100_000.0, 100_000.0, 100_000.0], target_flow=[0.0, 0.0, 0.0]))
+        profile = resample_profile(
+            event(pump_flow=[100_000.0, 100_000.0, 100_000.0], target_flow=[0.0, 0.0, 0.0])
+        )
 
         self.assertEqual(profile_mse(profile), 0.0)
         self.assertEqual(profile_score(profile), 1.0)
@@ -151,7 +183,7 @@ class DomainCoreTests(unittest.TestCase):
             event(
                 pressure=[3.0, 3.0, 3.0],
                 target_pressure=[0.0, 0.0, 0.0],
-                flow=[1.0, 2.0, 3.0],
+                pump_flow=[1.0, 2.0, 3.0],
                 target_flow=[1.0, 2.0, 3.0],
             )
         )
@@ -160,7 +192,7 @@ class DomainCoreTests(unittest.TestCase):
 
     def test_sanitized_profile_masks_invalid_active_flow_pair(self) -> None:
         quality = resample_profile_with_quality(
-            event(flow=[100_000.0, 100_000.0, 100_000.0], target_flow=[2.0, 2.0, 2.0])
+            event(pump_flow=[100_000.0, 100_000.0, 100_000.0], target_flow=[2.0, 2.0, 2.0])
         )
 
         self.assertFalse(quality.flow_valid)
@@ -171,13 +203,24 @@ class DomainCoreTests(unittest.TestCase):
 
     def test_sanitized_profile_masks_invalid_target_flow(self) -> None:
         quality = resample_profile_with_quality(
-            event(flow=[1.0, 2.0, 2.0], target_flow=[100_000.0, 100_000.0, 100_000.0])
+            event(pump_flow=[1.0, 2.0, 2.0], target_flow=[100_000.0, 100_000.0, 100_000.0])
         )
 
         self.assertTrue(quality.flow_valid)
         self.assertTrue(quality.flow_masked)
         self.assertEqual(float(quality.profile[2].max()), 0.0)
         self.assertEqual(float(quality.profile[3].max()), 0.0)
+
+    def test_uncalibrated_pump_flow_is_masked_without_discarding_beverage_flow(self) -> None:
+        source = event(pump_flow_calibration_required=True)
+        quality = resample_profile_with_quality(source)
+        metadata = resample_shot_metadata(source)
+
+        self.assertFalse(quality.flow_valid)
+        self.assertTrue(quality.flow_masked)
+        self.assertEqual(float(quality.profile[2].max()), 0.0)
+        self.assertEqual(float(quality.profile[3].max()), 0.0)
+        self.assertAlmostEqual(float(metadata.beverage_flow_profile[-1]), 2.0)  # type: ignore[index]
 
     def test_ignored_recommendation_is_not_followed(self) -> None:
         rec = Recommendation(

@@ -11,10 +11,10 @@ DREAMER_EPISODE_SCHEMA_VERSION = 1
 
 DREAMER_PROFILE_CHANNELS = (
     "pressure_bar",
-    "target_pressure_bar",
-    "flow_ml_s",
-    "target_flow_ml_s",
+    "pump_flow_ml_s",
+    "beverage_flow_g_s",
     "weight_g",
+    "temperature_c",
 )
 
 _ROOT_FIELDS = frozenset(
@@ -75,7 +75,16 @@ _TASTE_OBJECTIVE_FIELDS = frozenset(
 _TASTE_OBJECTIVE_LEVELS = frozenset({"none", "low", "medium", "high"})
 _STEP_FIELDS = frozenset({"step_index", "elapsed_fraction", "observation", "observed_profile_target", "dynamic_action", "constraints"})
 _STEP_OBSERVATION_FIELDS = frozenset(DREAMER_PROFILE_CHANNELS)
-_OBSERVED_PROFILE_TARGET_FIELDS = frozenset({"pressure_target_bar", "flow_target_ml_s"})
+_OBSERVED_PROFILE_TARGET_FIELDS = frozenset(
+    {
+        "pressure_target_bar",
+        "pressure_target_active",
+        "flow_target_ml_s",
+        "flow_target_active",
+        "temperature_target_c",
+        "temperature_target_active",
+    }
+)
 _DYNAMIC_ACTION_FIELDS = frozenset(
     {
         "pressure_target_bar",
@@ -127,6 +136,11 @@ _TERMINAL_FIELDS = frozenset(
         "profile_mse",
         "profile_flow_valid",
         "profile_flow_masked",
+        "final_pump_target",
+        "final_target_pressure",
+        "final_target_flow",
+        "profile_temperature_c",
+        "final_phase_temperature_c",
         "shot_end_state",
     }
 )
@@ -303,11 +317,33 @@ def _validate_step(step: object, expected_index: int, errors: list[str]) -> None
             15.0,
             errors,
         )
+        _require_bool(
+            observed_profile_target.get("pressure_target_active"),
+            f"episode.steps[{expected_index}].observed_profile_target.pressure_target_active",
+            errors,
+        )
         _require_number_range(
             observed_profile_target.get("flow_target_ml_s"),
             f"episode.steps[{expected_index}].observed_profile_target.flow_target_ml_s",
             0.0,
             20.0,
+            errors,
+        )
+        _require_bool(
+            observed_profile_target.get("flow_target_active"),
+            f"episode.steps[{expected_index}].observed_profile_target.flow_target_active",
+            errors,
+        )
+        _require_number_range(
+            observed_profile_target.get("temperature_target_c"),
+            f"episode.steps[{expected_index}].observed_profile_target.temperature_target_c",
+            0.0,
+            160.0,
+            errors,
+        )
+        _require_bool(
+            observed_profile_target.get("temperature_target_active"),
+            f"episode.steps[{expected_index}].observed_profile_target.temperature_target_active",
             errors,
         )
 
@@ -327,21 +363,21 @@ def _validate_step_observation(observation: dict[str, Any], step_index: int, err
     _reject_unknown_fields(observation, _STEP_OBSERVATION_FIELDS, errors, path=f"episode.steps[{step_index}].observation")
     _require_number_range(observation.get("pressure_bar"), f"episode.steps[{step_index}].observation.pressure_bar", 0.0, 15.0, errors)
     _require_number_range(
-        observation.get("target_pressure_bar"),
-        f"episode.steps[{step_index}].observation.target_pressure_bar",
+        observation.get("pump_flow_ml_s"),
+        f"episode.steps[{step_index}].observation.pump_flow_ml_s",
         0.0,
-        15.0,
+        20.0,
         errors,
     )
-    _require_number_range(observation.get("flow_ml_s"), f"episode.steps[{step_index}].observation.flow_ml_s", 0.0, 20.0, errors)
     _require_number_range(
-        observation.get("target_flow_ml_s"),
-        f"episode.steps[{step_index}].observation.target_flow_ml_s",
+        observation.get("beverage_flow_g_s"),
+        f"episode.steps[{step_index}].observation.beverage_flow_g_s",
         0.0,
         20.0,
         errors,
     )
     _require_number_range(observation.get("weight_g"), f"episode.steps[{step_index}].observation.weight_g", -1.0, 120.0, errors)
+    _require_number_range(observation.get("temperature_c"), f"episode.steps[{step_index}].observation.temperature_c", 0.0, 160.0, errors)
 
 
 def _validate_dynamic_action(dynamic_action: dict[str, Any], step_index: int, errors: list[str]) -> None:
@@ -380,6 +416,11 @@ def _validate_terminal(terminal: dict[str, Any], errors: list[str]) -> None:
     _optional_number_range(terminal.get("profile_mse"), "episode.terminal.profile_mse", 0.0, 1_000_000.0, errors)
     _optional_bool(terminal.get("profile_flow_valid"), "episode.terminal.profile_flow_valid", errors)
     _optional_bool(terminal.get("profile_flow_masked"), "episode.terminal.profile_flow_masked", errors)
+    _optional_enum(terminal.get("final_pump_target"), "episode.terminal.final_pump_target", {"simple", "pressure", "flow"}, errors)
+    _optional_number_range(terminal.get("final_target_pressure"), "episode.terminal.final_target_pressure", 0.0, 15.0, errors)
+    _optional_number_range(terminal.get("final_target_flow"), "episode.terminal.final_target_flow", 0.0, 25.0, errors)
+    _require_number_range(terminal.get("profile_temperature_c"), "episode.terminal.profile_temperature_c", 0.0, 160.0, errors)
+    _require_number_range(terminal.get("final_phase_temperature_c"), "episode.terminal.final_phase_temperature_c", 0.0, 160.0, errors)
     _optional_string(terminal.get("shot_end_state"), "episode.terminal.shot_end_state", errors)
     taste_tags = terminal.get("taste_tags")
     if taste_tags is not None:

@@ -486,17 +486,30 @@ should group rows by `install_id`, `machine_id`, `bean_context_id`, and
 The Dreamer helper `espresso_rl.dreamer.dataset.load_dreamer_episodes_from_jsonl`
 converts those canonical rows into `espresso_rl_dreamer_episode_v1` shot
 episodes for recurrent training. Each resampled profile sample becomes one
-per-step observation; relative grind, dose, the initial planned yield target,
-grinder calibration, and the default taste objective stay in `static_context`.
-Historical profile targets are stored as observed profile targets, while
-`dynamic_action` remains null unless a future capability-gated control path
-supplies safe per-step actions such as `yield_stop_target_g` or `stop`.
+per-step sensor observation with pressure, pump flow in `ml/s`, beverage mass
+flow in `g/s`, weight, and boiler temperature. The fixed 5x100 profile stores
+pressure, target pressure, pump flow, target pump flow, and weight; beverage
+flow is a separate sampled vector. Gaggimate MQTT `flow` is therefore never
+compared directly with its `target_flow`.
+Relative grind, dose, the initial planned yield target, grinder calibration,
+and the default taste objective stay in `static_context`. Historical
+pressure/pump-flow/temperature setpoints are stored separately as observed profile
+targets with a matching active mask, while `dynamic_action` remains null unless
+a future capability-gated control path supplies safe per-step actions such as
+`yield_stop_target_g` or `stop`. Pressure and flow targets are represented as
+profile targets/control modes, not as proof that pressure and flow are
+independently writable on a given machine. Dreamer episode construction requires
+sampled actual temperature, sampled resolved target temperature, and explicit
+per-step pump target mode. It also requires sampled beverage flow separately
+from pump flow. Scalar profile/final temperatures remain metadata and are never
+expanded into fabricated live telemetry.
 `espresso_rl.dreamer.dataset.build_dreamer_episode_batch` then turns validated
 episodes into deterministic tensors for offline training: observations,
-observed profile targets, nullable dynamic actions plus presence masks,
-constraints, static context, terminal features, rewards, continuations, and
-padding masks. The batch includes feature-name metadata so external trainers can
-audit the numeric layout instead of relying on implicit column order.
+observed profile targets plus active masks, dynamic action tensors plus
+presence masks, constraints, static context, terminal features, rewards,
+continuations, and step padding masks. The batch includes feature-name metadata
+so external trainers can audit the numeric layout instead of relying on
+implicit column order.
 
 No export artifact uses pickle, model binaries, SQLite dumps, parquet, macros,
 absolute grinder settings, or another executable/opaque format. Trainers should

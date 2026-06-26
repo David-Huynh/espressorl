@@ -32,8 +32,9 @@ class ProfileResampler:
             time_ms=list(payload.get("time_ms", [])),
             pressure=list(payload.get("pressure", [])),
             target_pressure=list(payload.get("target_pressure", [])),
-            flow=list(payload.get("flow", [])),
+            pump_flow=list(payload.get("pump_flow", [])),
             target_flow=list(payload.get("target_flow", [])),
+            beverage_flow=list(payload.get("beverage_flow", payload.get("flow", []))),
             weight=list(payload.get("weight", [])),
             microns_per_step=float(payload.get("microns_per_step", 10.0)),
             dose_in_g=float(payload.get("dose_in_g", 18.0)),
@@ -43,4 +44,3 @@ class ProfileResampler:
 
     def compute_profile_mse(self, profile: np.ndarray) -> float:
         return profile_mse(profile)
-

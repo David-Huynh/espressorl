@@ -31,6 +31,8 @@ SEQ_LEN = 8
 MIN_SHOTS = 4
 
 _PROFILE_SAMPLE_COUNT = 100
+_PUMP_TARGET_MODE_PRESSURE = 1
+_PUMP_TARGET_MODE_FLOW = 2
 _DEFAULT_CONSTRAINTS = {
     "dynamic_control_enabled": False,
     "pressure_control_allowed": False,
@@ -41,7 +43,7 @@ _DEFAULT_CONSTRAINTS = {
     "stop_control_allowed": False,
 }
 DREAMER_OBSERVATION_FEATURES = DREAMER_PROFILE_CHANNELS
-DREAMER_OBSERVED_TARGET_FEATURES = ("pressure_target_bar", "flow_target_ml_s")
+DREAMER_OBSERVED_TARGET_FEATURES = ("pressure_target_bar", "flow_target_ml_s", "temperature_target_c")
 DREAMER_DYNAMIC_ACTION_FEATURES = (
     "pressure_target_bar",
     "flow_target_ml_s",
@@ -84,6 +86,12 @@ DREAMER_TERMINAL_FEATURES = (
     "profile_mse",
     "profile_flow_valid",
     "profile_flow_masked",
+    "final_pump_target_pressure",
+    "final_pump_target_flow",
+    "final_target_pressure",
+    "final_target_flow",
+    "profile_temperature_c",
+    "final_phase_temperature_c",
 )
 _TASTE_LEVEL_VALUES = {
     None: 0.0,
@@ -196,6 +204,7 @@ def build_dreamer_episodes_from_training_rows(
             if require_profile:
                 raise DreamerEpisodeDatasetError(f"training row {row_id} is missing observation.profile_resampled")
             continue
+        _require_dreamer_profile_inputs(row["observation"], row_id)
 
         episode = _episode_from_training_row(row)
         episode_errors = validate_dreamer_episode(episode)
@@ -225,6 +234,7 @@ def build_dreamer_episode_batch(
     batch_size = len(sorted_episodes)
     observations = np.zeros((batch_size, max_steps, len(DREAMER_OBSERVATION_FEATURES)), dtype=np.float32)
     observed_targets = np.zeros((batch_size, max_steps, len(DREAMER_OBSERVED_TARGET_FEATURES)), dtype=np.float32)
+    observed_target_mask = np.zeros_like(observed_targets)
     dynamic_actions = np.zeros((batch_size, max_steps, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=np.float32)
     dynamic_action_mask = np.zeros_like(dynamic_actions)
     constraints = np.zeros((batch_size, max_steps, len(DREAMER_CONSTRAINT_FEATURES)), dtype=np.float32)
@@ -257,6 +267,7 @@ def build_dreamer_episode_batch(
                 step["observed_profile_target"],
                 DREAMER_OBSERVED_TARGET_FEATURES,
             )
+            observed_target_mask[batch_index, step_index] = _encode_observed_target_mask(step["observed_profile_target"])
             action_values, action_mask = _encode_dynamic_action(step.get("dynamic_action"))
             dynamic_actions[batch_index, step_index] = action_values
             dynamic_action_mask[batch_index, step_index] = action_mask
@@ -273,6 +284,7 @@ def build_dreamer_episode_batch(
     return {
         "observations": torch.tensor(observations, dtype=torch.float32, device=target_device),
         "observed_profile_targets": torch.tensor(observed_targets, dtype=torch.float32, device=target_device),
+        "observed_profile_target_mask": torch.tensor(observed_target_mask, dtype=torch.float32, device=target_device),
         "dynamic_actions": torch.tensor(dynamic_actions, dtype=torch.float32, device=target_device),
         "dynamic_action_mask": torch.tensor(dynamic_action_mask, dtype=torch.float32, device=target_device),
         "constraints": torch.tensor(constraints, dtype=torch.float32, device=target_device),
@@ -288,6 +300,7 @@ def build_dreamer_episode_batch(
         "feature_names": {
             "observations": DREAMER_OBSERVATION_FEATURES,
             "observed_profile_targets": DREAMER_OBSERVED_TARGET_FEATURES,
+            "observed_profile_target_mask": DREAMER_OBSERVED_TARGET_FEATURES,
             "dynamic_actions": DREAMER_DYNAMIC_ACTION_FEATURES,
             "constraints": DREAMER_CONSTRAINT_FEATURES,
             "static_context": DREAMER_STATIC_CONTEXT_FEATURES,
@@ -353,6 +366,12 @@ def _encode_static_context(static_context: dict[str, Any]) -> np.ndarray:
 def _encode_terminal(terminal: dict[str, Any]) -> np.ndarray:
     encoded = np.zeros(len(DREAMER_TERMINAL_FEATURES), dtype=np.float32)
     for feature in DREAMER_TERMINAL_FEATURES:
+        if feature == "final_pump_target_pressure":
+            encoded[_feature_index(DREAMER_TERMINAL_FEATURES, feature)] = 1.0 if terminal.get("final_pump_target") == "pressure" else 0.0
+            continue
+        if feature == "final_pump_target_flow":
+            encoded[_feature_index(DREAMER_TERMINAL_FEATURES, feature)] = 1.0 if terminal.get("final_pump_target") == "flow" else 0.0
+            continue
         value = terminal.get(feature)
         encoded[_feature_index(DREAMER_TERMINAL_FEATURES, feature)] = _bool_or_number(value)
     return encoded
@@ -370,6 +389,17 @@ def _encode_bool_object(value: dict[str, Any], features: tuple[str, ...]) -> np.
     for feature_index, feature in enumerate(features):
         encoded[feature_index] = 1.0 if value.get(feature) is True else 0.0
     return encoded
+
+
+def _encode_observed_target_mask(observed_profile_target: dict[str, Any]) -> np.ndarray:
+    return np.asarray(
+        [
+            1.0 if observed_profile_target.get("pressure_target_active") is True else 0.0,
+            1.0 if observed_profile_target.get("flow_target_active") is True else 0.0,
+            1.0 if observed_profile_target.get("temperature_target_active") is True else 0.0,
+        ],
+        dtype=np.float32,
+    )
 
 
 def _encode_dynamic_action(action: dict[str, Any] | None) -> tuple[np.ndarray, np.ndarray]:
@@ -435,7 +465,7 @@ def _episode_from_training_row(row: dict[str, Any]) -> dict[str, Any]:
         "source": dict(source),
         "context": dict(context),
         "static_context": _static_context(action, context, observation),
-        "steps": _profile_steps(profile),
+        "steps": _profile_steps(profile, observation),
         "terminal": _terminal(observation, reward),
     }
     recommendation = row.get("recommendation")
@@ -466,30 +496,70 @@ def _static_context(
     )
 
 
-def _profile_steps(profile: list[list[float]]) -> list[dict[str, Any]]:
+def _profile_steps(profile: list[list[float]], observation: dict[str, Any]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     last_index = _PROFILE_SAMPLE_COUNT - 1
+    beverage_flow_profile = _required_profile_vector(observation["beverage_flow_profile"])
+    temperature_profile = _required_profile_vector(observation["temperature_profile"])
+    target_temperature_profile = _required_profile_vector(observation["target_temperature_profile"])
+    pump_target_mode_profile = _required_mode_profile(observation["pump_target_mode_profile"])
+    flow_targets_masked = observation.get("profile_flow_masked") is True
     for index in range(_PROFILE_SAMPLE_COUNT):
+        pressure_target = profile[1][index]
+        flow_target = profile[3][index]
+        pump_target_mode = pump_target_mode_profile[index]
+        pressure_target_active = pump_target_mode == _PUMP_TARGET_MODE_PRESSURE
+        flow_target_active = pump_target_mode == _PUMP_TARGET_MODE_FLOW
+        if flow_targets_masked:
+            flow_target_active = False
+        step_observation = {
+            "pressure_bar": profile[0][index],
+            "pump_flow_ml_s": profile[2][index],
+            "beverage_flow_g_s": beverage_flow_profile[index],
+            "weight_g": profile[4][index],
+            "temperature_c": temperature_profile[index],
+        }
+        observed_profile_target = {
+            "pressure_target_bar": pressure_target,
+            "pressure_target_active": pressure_target_active,
+            "flow_target_ml_s": flow_target,
+            "flow_target_active": flow_target_active,
+            "temperature_target_c": target_temperature_profile[index],
+            "temperature_target_active": target_temperature_profile[index] > 0.0,
+        }
         steps.append(
             {
                 "step_index": index,
                 "elapsed_fraction": round(index / last_index, 6),
-                "observation": {
-                    "pressure_bar": profile[0][index],
-                    "target_pressure_bar": profile[1][index],
-                    "flow_ml_s": profile[2][index],
-                    "target_flow_ml_s": profile[3][index],
-                    "weight_g": profile[4][index],
-                },
-                "observed_profile_target": {
-                    "pressure_target_bar": profile[1][index],
-                    "flow_target_ml_s": profile[3][index],
-                },
+                "observation": step_observation,
+                "observed_profile_target": observed_profile_target,
                 "dynamic_action": None,
                 "constraints": dict(_DEFAULT_CONSTRAINTS),
             }
         )
     return steps
+
+
+def _require_dreamer_profile_inputs(observation: dict[str, Any], row_id: object) -> None:
+    for key in (
+        "beverage_flow_profile",
+        "temperature_profile",
+        "target_temperature_profile",
+        "pump_target_mode_profile",
+    ):
+        value = observation.get(key)
+        if not isinstance(value, list) or len(value) != _PROFILE_SAMPLE_COUNT:
+            raise DreamerEpisodeDatasetError(
+                f"training row {row_id} is missing required observation.{key}"
+            )
+
+
+def _required_profile_vector(value: object) -> list[float]:
+    return [_finite_or_zero(item) for item in value]  # type: ignore[union-attr]
+
+
+def _required_mode_profile(value: object) -> list[int]:
+    return [int(item) for item in value]  # type: ignore[union-attr]
 
 
 def _terminal(observation: dict[str, Any], reward: dict[str, Any]) -> dict[str, Any]:
@@ -510,6 +580,11 @@ def _terminal(observation: dict[str, Any], reward: dict[str, Any]) -> dict[str, 
             "profile_mse": observation.get("profile_mse"),
             "profile_flow_valid": observation.get("profile_flow_valid"),
             "profile_flow_masked": observation.get("profile_flow_masked"),
+            "final_pump_target": observation.get("final_pump_target"),
+            "final_target_pressure": observation.get("final_target_pressure"),
+            "final_target_flow": observation.get("final_target_flow"),
+            "profile_temperature_c": observation.get("profile_temperature_c"),
+            "final_phase_temperature_c": observation.get("final_phase_temperature_c"),
             "shot_end_state": observation.get("shot_end_state"),
         }
     )
