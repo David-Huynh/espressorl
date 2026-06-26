@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
+from espresso_rl.domain.model_manifest import ModelManifestValidation, validate_model_manifest
 from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
@@ -19,6 +21,7 @@ _DREAMER_SHADOW_FALLBACK_REASON = (
     "DreamerV3 shadow mode is not active inference; Bayesian Optimization is serving recommendations."
 )
 _HASH_CHUNK_BYTES = 1024 * 1024
+_MANIFEST_MAX_BYTES = 256 * 1024
 _HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
@@ -33,6 +36,24 @@ class ModelArtifactStatus:
 
 
 @dataclass(frozen=True)
+class ModelManifestStatus:
+    path: str | None
+    actual_sha256: str | None = None
+    size_bytes: int | None = None
+    verified: bool = False
+    unavailable_reason: str | None = None
+    model_family: str | None = None
+    model_artifact_sha256: str | None = None
+    dataset_sha256: str | None = None
+    dataset_manifest_sha256: str | None = None
+    trainer_git_sha: str | None = None
+    training_config_sha256: str | None = None
+    state_schema_version: int | None = None
+    action_schema_version: int | None = None
+    reward_schema_version: int | None = None
+
+
+@dataclass(frozen=True)
 class RuntimeOptimizerStatus:
     configured_mode: str
     effective_mode: str
@@ -42,6 +63,19 @@ class RuntimeOptimizerStatus:
     model_artifact_size_bytes: int | None = None
     model_artifact_verified: bool = False
     model_artifact_unavailable_reason: str | None = None
+    model_manifest_path: str | None = None
+    model_manifest_sha256: str | None = None
+    model_manifest_size_bytes: int | None = None
+    model_manifest_verified: bool = False
+    model_manifest_unavailable_reason: str | None = None
+    model_manifest_model_family: str | None = None
+    model_manifest_dataset_sha256: str | None = None
+    model_manifest_dataset_manifest_sha256: str | None = None
+    model_manifest_trainer_git_sha: str | None = None
+    model_manifest_training_config_sha256: str | None = None
+    model_manifest_state_schema_version: int | None = None
+    model_manifest_action_schema_version: int | None = None
+    model_manifest_reward_schema_version: int | None = None
     dreamer_v3_available: bool = False
     available_modes: tuple[str, ...] = (DEFAULT_OPTIMIZER_MODE,)
     unavailable_modes: dict[str, str] | None = None
@@ -57,6 +91,19 @@ class RuntimeOptimizerStatus:
             "model_artifact_size_bytes": self.model_artifact_size_bytes,
             "model_artifact_verified": self.model_artifact_verified,
             "model_artifact_unavailable_reason": self.model_artifact_unavailable_reason,
+            "model_manifest_path": self.model_manifest_path,
+            "model_manifest_sha256": self.model_manifest_sha256,
+            "model_manifest_size_bytes": self.model_manifest_size_bytes,
+            "model_manifest_verified": self.model_manifest_verified,
+            "model_manifest_unavailable_reason": self.model_manifest_unavailable_reason,
+            "model_manifest_model_family": self.model_manifest_model_family,
+            "model_manifest_dataset_sha256": self.model_manifest_dataset_sha256,
+            "model_manifest_dataset_manifest_sha256": self.model_manifest_dataset_manifest_sha256,
+            "model_manifest_trainer_git_sha": self.model_manifest_trainer_git_sha,
+            "model_manifest_training_config_sha256": self.model_manifest_training_config_sha256,
+            "model_manifest_state_schema_version": self.model_manifest_state_schema_version,
+            "model_manifest_action_schema_version": self.model_manifest_action_schema_version,
+            "model_manifest_reward_schema_version": self.model_manifest_reward_schema_version,
             "dreamer_v3_available": self.dreamer_v3_available,
             "available_modes": list(self.available_modes),
             "unavailable_modes": dict(self.unavailable_modes or {}),
@@ -73,6 +120,7 @@ class RuntimeOptimizer:
         *,
         model_artifact_path: str | None = None,
         model_artifact_sha256: str | None = None,
+        model_manifest_path: str | None = None,
         model_artifact_max_bytes: int = 512 * 1024 * 1024,
         bo_optimizer: Optimizer | None = None,
     ) -> None:
@@ -85,6 +133,7 @@ class RuntimeOptimizer:
             optimizer_mode=optimizer_mode,
             model_artifact_path=model_artifact_path,
             model_artifact_sha256=model_artifact_sha256,
+            model_manifest_path=model_manifest_path,
         )
 
     def configure(
@@ -93,6 +142,7 @@ class RuntimeOptimizer:
         optimizer_mode: str,
         model_artifact_path: str | None = None,
         model_artifact_sha256: str | None = None,
+        model_manifest_path: str | None = None,
         model_artifact_max_bytes: int | None = None,
     ) -> RuntimeOptimizerStatus:
         with self._lock:
@@ -104,17 +154,23 @@ class RuntimeOptimizer:
             max_bytes = self._model_artifact_max_bytes
         artifact_path = _clean_optional_text(model_artifact_path)
         artifact_sha256 = _clean_optional_sha256(model_artifact_sha256)
+        manifest_path = _clean_optional_text(model_manifest_path)
         if previous_status is not None:
             artifact_path = artifact_path or previous_status.model_artifact_path
             artifact_sha256 = artifact_sha256 or previous_status.model_artifact_sha256
+            manifest_path = manifest_path or previous_status.model_manifest_path
 
         requested_mode = normalize_optimizer_mode(optimizer_mode)
+        manifest_status = verify_model_manifest_file(
+            manifest_path,
+            expected_model_sha256=artifact_sha256,
+        )
         artifact_status = verify_model_artifact(
             artifact_path,
-            artifact_sha256,
+            artifact_sha256 or manifest_status.model_artifact_sha256,
             max_bytes=max_bytes,
         )
-        dreamer_v3_available = artifact_status.verified
+        dreamer_v3_available = artifact_status.verified and manifest_status.verified
         available_modes = (
             (DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
             if dreamer_v3_available
@@ -124,7 +180,8 @@ class RuntimeOptimizer:
             {}
             if dreamer_v3_available
             else {
-                OPTIMIZER_MODE_DREAMER_V3_SHADOW: artifact_status.unavailable_reason
+                OPTIMIZER_MODE_DREAMER_V3_SHADOW: manifest_status.unavailable_reason
+                or artifact_status.unavailable_reason
                 or "DreamerV3 model artifact is not verified."
             }
         )
@@ -145,6 +202,19 @@ class RuntimeOptimizer:
             model_artifact_size_bytes=artifact_status.size_bytes,
             model_artifact_verified=artifact_status.verified,
             model_artifact_unavailable_reason=artifact_status.unavailable_reason,
+            model_manifest_path=manifest_status.path,
+            model_manifest_sha256=manifest_status.actual_sha256,
+            model_manifest_size_bytes=manifest_status.size_bytes,
+            model_manifest_verified=manifest_status.verified,
+            model_manifest_unavailable_reason=manifest_status.unavailable_reason,
+            model_manifest_model_family=manifest_status.model_family,
+            model_manifest_dataset_sha256=manifest_status.dataset_sha256,
+            model_manifest_dataset_manifest_sha256=manifest_status.dataset_manifest_sha256,
+            model_manifest_trainer_git_sha=manifest_status.trainer_git_sha,
+            model_manifest_training_config_sha256=manifest_status.training_config_sha256,
+            model_manifest_state_schema_version=manifest_status.state_schema_version,
+            model_manifest_action_schema_version=manifest_status.action_schema_version,
+            model_manifest_reward_schema_version=manifest_status.reward_schema_version,
             dreamer_v3_available=dreamer_v3_available,
             available_modes=available_modes,
             unavailable_modes=unavailable_modes,
@@ -263,4 +333,99 @@ def verify_model_artifact(
         actual_sha256=actual_digest,
         size_bytes=stat.st_size,
         verified=True,
+    )
+
+
+def verify_model_manifest_file(
+    model_manifest_path: str | None,
+    *,
+    expected_model_sha256: str | None = None,
+) -> ModelManifestStatus:
+    path_text = _clean_optional_text(model_manifest_path)
+    expected_digest = _clean_optional_sha256(expected_model_sha256)
+    if not path_text:
+        return ModelManifestStatus(
+            path=None,
+            unavailable_reason="DreamerV3 model manifest path is not configured.",
+        )
+
+    path = Path(path_text)
+    try:
+        stat = path.stat()
+    except OSError:
+        return ModelManifestStatus(
+            path=path_text,
+            unavailable_reason="DreamerV3 model manifest file does not exist or is unreadable.",
+        )
+    if not path.is_file():
+        return ModelManifestStatus(
+            path=path_text,
+            unavailable_reason="DreamerV3 model manifest path is not a file.",
+        )
+    if stat.st_size <= 0:
+        return ModelManifestStatus(
+            path=path_text,
+            size_bytes=stat.st_size,
+            unavailable_reason="DreamerV3 model manifest file is empty.",
+        )
+    if stat.st_size > _MANIFEST_MAX_BYTES:
+        return ModelManifestStatus(
+            path=path_text,
+            size_bytes=stat.st_size,
+            unavailable_reason="DreamerV3 model manifest file is larger than the configured limit.",
+        )
+
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return ModelManifestStatus(
+            path=path_text,
+            size_bytes=stat.st_size,
+            unavailable_reason="DreamerV3 model manifest file could not be read.",
+        )
+    actual_digest = hashlib.sha256(payload).hexdigest()
+    try:
+        manifest = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ModelManifestStatus(
+            path=path_text,
+            actual_sha256=actual_digest,
+            size_bytes=stat.st_size,
+            unavailable_reason="DreamerV3 model manifest is not valid UTF-8 JSON.",
+        )
+
+    validation = validate_model_manifest(
+        manifest,
+        expected_model_sha256=expected_digest,
+    )
+    return _manifest_status_from_validation(
+        path=path_text,
+        actual_sha256=actual_digest,
+        size_bytes=stat.st_size,
+        validation=validation,
+    )
+
+
+def _manifest_status_from_validation(
+    *,
+    path: str,
+    actual_sha256: str,
+    size_bytes: int,
+    validation: ModelManifestValidation,
+) -> ModelManifestStatus:
+    return ModelManifestStatus(
+        path=path,
+        actual_sha256=actual_sha256,
+        size_bytes=size_bytes,
+        verified=validation.verified,
+        unavailable_reason=validation.unavailable_reason,
+        model_family=validation.model_family,
+        model_artifact_sha256=validation.model_artifact_sha256,
+        dataset_sha256=validation.dataset_sha256,
+        dataset_manifest_sha256=validation.dataset_manifest_sha256,
+        trainer_git_sha=validation.trainer_git_sha,
+        training_config_sha256=validation.training_config_sha256,
+        state_schema_version=validation.state_schema_version,
+        action_schema_version=validation.action_schema_version,
+        reward_schema_version=validation.reward_schema_version,
     )

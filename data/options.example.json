@@ -19,6 +19,7 @@
   "optimizer_mode": "bayesian_optimization",
   "optimizer_model_artifact_path": "",
   "optimizer_model_artifact_sha256": "",
+  "optimizer_model_manifest_path": "",
   "default_optimizer_model_artifact_sha256": "",
   "optimizer_model_artifact_max_bytes": 536870912,
   "storage_backend": "postgres",

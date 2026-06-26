@@ -9,6 +9,7 @@ from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, normalize_op
 _OPTIONS_PATH = Path("/data/options.json")
 _DATA_DIR = Path("/data/espresso_rl")
 _DEFAULT_DREAMER_V3_MODEL_ARTIFACT_PATH = _DATA_DIR / "models" / "dreamer_v3.pt"
+_DEFAULT_DREAMER_V3_MODEL_MANIFEST_PATH = _DATA_DIR / "models" / "dreamer_v3_manifest.json"
 _DEFAULT_MODEL_ARTIFACT_MAX_BYTES = 512 * 1024 * 1024
 _DEFAULT_TRAINING_EXPORT_DIR = _DATA_DIR / "exports"
 _RELEASE_DEFAULT_MODEL_ARTIFACT_SHA256 = os.getenv(
@@ -43,6 +44,7 @@ class Config:
     optimizer_mode: str = DEFAULT_OPTIMIZER_MODE
     optimizer_model_artifact_path: str = ""
     optimizer_model_artifact_sha256: str = ""
+    optimizer_model_manifest_path: str = ""
     default_optimizer_model_artifact_sha256: str = ""
     optimizer_model_artifact_max_bytes: int = _DEFAULT_MODEL_ARTIFACT_MAX_BYTES
     # When True: run DreamerV3 training thread locally (central-server install only).
@@ -154,6 +156,7 @@ class Config:
             ),
             optimizer_model_artifact_path=_model_artifact_path(opts),
             optimizer_model_artifact_sha256=_model_artifact_sha256(opts),
+            optimizer_model_manifest_path=_model_manifest_path(opts),
             default_optimizer_model_artifact_sha256=_option_string_or_env(
                 opts,
                 "default_optimizer_model_artifact_sha256",
@@ -328,6 +331,20 @@ def _model_artifact_path(opts: dict) -> str:
         opts,
         "optimizer_model_artifact_path",
         "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_PATH",
+        default_path,
+    )
+
+
+def _model_manifest_path(opts: dict) -> str:
+    default_path = (
+        str(_DEFAULT_DREAMER_V3_MODEL_MANIFEST_PATH)
+        if _model_artifact_sha256(opts)
+        else ""
+    )
+    return _option_string_or_env(
+        opts,
+        "optimizer_model_manifest_path",
+        "ESPRESSORL_OPTIMIZER_MODEL_MANIFEST_PATH",
         default_path,
     )
 

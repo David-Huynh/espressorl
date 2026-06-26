@@ -65,7 +65,7 @@ from espresso_rl.domain.events import (
 )
 from espresso_rl.domain.models import Recipe, SafetyBounds, UploadQueueStatus
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW
-from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact
+from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import LocalDataRepository, RecommendationRepository, ShotRepository, UploadQueueRepository
 
@@ -99,6 +99,7 @@ def main() -> None:
         optimizer_mode=config.optimizer_mode,
         model_artifact_path=config.optimizer_model_artifact_path,
         model_artifact_sha256=config.optimizer_model_artifact_sha256,
+        model_manifest_path=config.optimizer_model_manifest_path,
         model_artifact_max_bytes=config.optimizer_model_artifact_max_bytes,
     )
     service = EspressoRLService(
@@ -589,7 +590,17 @@ def build_status_payload(
         config.optimizer_model_artifact_sha256,
         max_bytes=config.optimizer_model_artifact_max_bytes,
     )
-    config_dreamer_v3_available = model_artifact_status.verified
+    model_manifest_status = verify_model_manifest_file(
+        config.optimizer_model_manifest_path,
+        expected_model_sha256=config.optimizer_model_artifact_sha256,
+    )
+    if model_manifest_status.model_artifact_sha256 and not model_artifact_status.verified:
+        model_artifact_status = verify_model_artifact(
+            config.optimizer_model_artifact_path,
+            model_manifest_status.model_artifact_sha256,
+            max_bytes=config.optimizer_model_artifact_max_bytes,
+        )
+    config_dreamer_v3_available = model_artifact_status.verified and model_manifest_status.verified
     config_optimizer_mode = (
         config.optimizer_mode
         if config.optimizer_mode == DEFAULT_OPTIMIZER_MODE or config_dreamer_v3_available
@@ -604,13 +615,27 @@ def build_status_payload(
         "model_artifact_size_bytes": model_artifact_status.size_bytes,
         "model_artifact_verified": model_artifact_status.verified,
         "model_artifact_unavailable_reason": model_artifact_status.unavailable_reason,
+        "model_manifest_path": model_manifest_status.path,
+        "model_manifest_sha256": model_manifest_status.actual_sha256,
+        "model_manifest_size_bytes": model_manifest_status.size_bytes,
+        "model_manifest_verified": model_manifest_status.verified,
+        "model_manifest_unavailable_reason": model_manifest_status.unavailable_reason,
+        "model_manifest_model_family": model_manifest_status.model_family,
+        "model_manifest_dataset_sha256": model_manifest_status.dataset_sha256,
+        "model_manifest_dataset_manifest_sha256": model_manifest_status.dataset_manifest_sha256,
+        "model_manifest_trainer_git_sha": model_manifest_status.trainer_git_sha,
+        "model_manifest_training_config_sha256": model_manifest_status.training_config_sha256,
+        "model_manifest_state_schema_version": model_manifest_status.state_schema_version,
+        "model_manifest_action_schema_version": model_manifest_status.action_schema_version,
+        "model_manifest_reward_schema_version": model_manifest_status.reward_schema_version,
         "dreamer_v3_available": config_dreamer_v3_available,
         "available_modes": [DEFAULT_OPTIMIZER_MODE]
         + ([OPTIMIZER_MODE_DREAMER_V3_SHADOW] if config_dreamer_v3_available else []),
         "unavailable_modes": {}
         if config_dreamer_v3_available
         else {
-            OPTIMIZER_MODE_DREAMER_V3_SHADOW: model_artifact_status.unavailable_reason
+            OPTIMIZER_MODE_DREAMER_V3_SHADOW: model_manifest_status.unavailable_reason
+            or model_artifact_status.unavailable_reason
             or "DreamerV3 model artifact is not verified."
         },
         "fallback_reason": None
@@ -644,6 +669,19 @@ def build_status_payload(
         "optimizer_model_artifact_size_bytes": optimizer_status.get("model_artifact_size_bytes"),
         "optimizer_model_artifact_verified": bool(optimizer_status.get("model_artifact_verified")),
         "optimizer_model_artifact_unavailable_reason": optimizer_status.get("model_artifact_unavailable_reason"),
+        "optimizer_model_manifest_path": optimizer_status.get("model_manifest_path"),
+        "optimizer_model_manifest_sha256": optimizer_status.get("model_manifest_sha256"),
+        "optimizer_model_manifest_size_bytes": optimizer_status.get("model_manifest_size_bytes"),
+        "optimizer_model_manifest_verified": bool(optimizer_status.get("model_manifest_verified")),
+        "optimizer_model_manifest_unavailable_reason": optimizer_status.get("model_manifest_unavailable_reason"),
+        "optimizer_model_manifest_model_family": optimizer_status.get("model_manifest_model_family"),
+        "optimizer_model_manifest_dataset_sha256": optimizer_status.get("model_manifest_dataset_sha256"),
+        "optimizer_model_manifest_dataset_manifest_sha256": optimizer_status.get("model_manifest_dataset_manifest_sha256"),
+        "optimizer_model_manifest_trainer_git_sha": optimizer_status.get("model_manifest_trainer_git_sha"),
+        "optimizer_model_manifest_training_config_sha256": optimizer_status.get("model_manifest_training_config_sha256"),
+        "optimizer_model_manifest_state_schema_version": optimizer_status.get("model_manifest_state_schema_version"),
+        "optimizer_model_manifest_action_schema_version": optimizer_status.get("model_manifest_action_schema_version"),
+        "optimizer_model_manifest_reward_schema_version": optimizer_status.get("model_manifest_reward_schema_version"),
         "optimizer_dreamer_v3_available": bool(optimizer_status.get("dreamer_v3_available")),
         "optimizer_available_modes": optimizer_status.get("available_modes") or [DEFAULT_OPTIMIZER_MODE],
         "optimizer_unavailable_modes": optimizer_status.get("unavailable_modes") or {},

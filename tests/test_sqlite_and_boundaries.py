@@ -315,6 +315,19 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         "model_artifact_size_bytes": 123,
                         "model_artifact_verified": True,
                         "model_artifact_unavailable_reason": None,
+                        "model_manifest_path": "models/dreamer_manifest.json",
+                        "model_manifest_sha256": "b" * 64,
+                        "model_manifest_size_bytes": 321,
+                        "model_manifest_verified": True,
+                        "model_manifest_unavailable_reason": None,
+                        "model_manifest_model_family": "dreamer_v3",
+                        "model_manifest_dataset_sha256": "c" * 64,
+                        "model_manifest_dataset_manifest_sha256": "d" * 64,
+                        "model_manifest_trainer_git_sha": "trainerabc",
+                        "model_manifest_training_config_sha256": "e" * 64,
+                        "model_manifest_state_schema_version": 1,
+                        "model_manifest_action_schema_version": 1,
+                        "model_manifest_reward_schema_version": 1,
                         "dreamer_v3_available": True,
                         "available_modes": ["bayesian_optimization", "dreamer_v3_shadow"],
                         "unavailable_modes": {},
@@ -329,6 +342,10 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(status["optimizer_model_artifact_actual_sha256"], "a" * 64)
             self.assertTrue(status["optimizer_model_artifact_verified"])
             self.assertEqual(status["optimizer_model_artifact_size_bytes"], 123)
+            self.assertEqual(status["optimizer_model_manifest_path"], "models/dreamer_manifest.json")
+            self.assertTrue(status["optimizer_model_manifest_verified"])
+            self.assertEqual(status["optimizer_model_manifest_dataset_sha256"], "c" * 64)
+            self.assertEqual(status["optimizer_model_manifest_trainer_git_sha"], "trainerabc")
             self.assertIn("dreamer_v3_shadow", status["optimizer_available_modes"])
             self.assertIn("Bayesian Optimization", status["optimizer_fallback_reason"])
 

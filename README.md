@@ -65,6 +65,7 @@ Important fields in `data/options.json`:
   "optimizer_mode": "bayesian_optimization",
   "optimizer_model_artifact_path": "",
   "optimizer_model_artifact_sha256": "",
+  "optimizer_model_manifest_path": "",
   "default_optimizer_model_artifact_sha256": "",
   "optimizer_model_artifact_max_bytes": 536870912,
 
@@ -90,7 +91,8 @@ contexts.
 Gaggimate can override `optimizer_mode` at runtime by publishing a retained
 `gaggimate/<machine>/rl/settings` payload. `bayesian_optimization` is always
 available. DreamerV3 is only advertised to the Gaggimate UI when model artifact
-metadata is configured and the local artifact file matches its SHA-256; until
+metadata is configured, the local artifact file matches its SHA-256, and a
+plain JSON model manifest verifies the dataset/trainer/schema provenance; until
 active Dreamer inference is safety-gated, BO remains the effective
 recommendation path.
 
@@ -98,12 +100,49 @@ Official Docker builds can embed a release-default model SHA with the
 `ESPRESSORL_RELEASE_MODEL_ARTIFACT_SHA256` build arg, normally supplied by the
 GitHub repository variable with the same name. If that default SHA is present
 and no explicit path is configured, EspressoRL looks for
-`/data/espresso_rl/models/dreamer_v3.pt`. A trainer using their own model can
-set `optimizer_model_artifact_path` and `optimizer_model_artifact_sha256` in
-`data/options.json` or via `ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_PATH` and
-`ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_SHA256`; those explicit values override
-the release default. Oversized artifacts are refused by
+`/data/espresso_rl/models/dreamer_v3.pt` and
+`/data/espresso_rl/models/dreamer_v3_manifest.json`. A trainer using their own
+model can set `optimizer_model_artifact_path`,
+`optimizer_model_artifact_sha256`, and `optimizer_model_manifest_path` in
+`data/options.json` or via `ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_PATH`,
+`ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_SHA256`, and
+`ESPRESSORL_OPTIMIZER_MODEL_MANIFEST_PATH`; those explicit values override the
+release default. Oversized artifacts are refused by
 `optimizer_model_artifact_max_bytes`.
+
+The model manifest is regular UTF-8 JSON. It must identify the model family,
+model artifact SHA-256, training dataset SHA-256, training dataset manifest
+SHA-256, trainer git SHA, training config SHA-256, state/action/reward schema
+versions, and EspressoRL runtime schema compatibility. Example:
+
+```json
+{
+  "format": "espresso_rl_model_manifest_v1",
+  "schema_version": 1,
+  "model_family": "dreamer_v3",
+  "model_artifact": {
+    "sha256": "MODEL_FILE_SHA256"
+  },
+  "dataset": {
+    "format": "espresso_rl_training_dataset_v1",
+    "sha256": "TRAINING_ROWS_JSONL_SHA256",
+    "manifest_sha256": "TRAINING_EXPORT_MANIFEST_SHA256"
+  },
+  "trainer": {
+    "git_sha": "TRAINER_REPO_COMMIT",
+    "training_config_sha256": "TRAINING_CONFIG_JSON_SHA256"
+  },
+  "schemas": {
+    "state_schema_version": 1,
+    "action_schema_version": 1,
+    "reward_schema_version": 1
+  },
+  "runtime_compatibility": {
+    "optimizer_mode": "dreamer_v3_shadow",
+    "espresso_rl_runtime_schema_version": 1
+  }
+}
+```
 
 Start the local service and Postgres:
 
