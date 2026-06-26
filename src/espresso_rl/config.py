@@ -10,6 +10,7 @@ _OPTIONS_PATH = Path("/data/options.json")
 _DATA_DIR = Path("/data/espresso_rl")
 _DEFAULT_DREAMER_V3_MODEL_ARTIFACT_PATH = _DATA_DIR / "models" / "dreamer_v3.pt"
 _DEFAULT_MODEL_ARTIFACT_MAX_BYTES = 512 * 1024 * 1024
+_DEFAULT_TRAINING_EXPORT_DIR = _DATA_DIR / "exports"
 _RELEASE_DEFAULT_MODEL_ARTIFACT_SHA256 = os.getenv(
     "ESPRESSORL_RELEASE_MODEL_ARTIFACT_SHA256",
     "",
@@ -64,6 +65,9 @@ class Config:
     admin_collector_lease_seconds: int = 300
     admin_collector_interval_s: float = 30.0
     admin_collector_batch_size: int = 100
+    training_export_dir: Path = field(default_factory=lambda: _DEFAULT_TRAINING_EXPORT_DIR)
+    training_export_max_rows: int = 50_000
+    build_git_sha: str = ""
     admin_dashboard_enabled: bool = False
     admin_dashboard_host: str = "0.0.0.0"
     admin_dashboard_port: int = 8080
@@ -78,6 +82,8 @@ class Config:
         self.optimizer_mode = normalize_optimizer_mode(self.optimizer_mode)
         if self.optimizer_model_artifact_max_bytes <= 0:
             raise ValueError("optimizer_model_artifact_max_bytes must be positive")
+        if self.training_export_max_rows <= 0:
+            raise ValueError("training_export_max_rows must be positive")
 
     def now(self) -> int:
         return int(time.time())
@@ -221,6 +227,21 @@ class Config:
                     os.getenv("ESPRESSORL_ADMIN_COLLECTOR_BATCH_SIZE", 100),
                 )
             ),
+            training_export_dir=Path(
+                _option_string_or_env(
+                    opts,
+                    "training_export_dir",
+                    "ESPRESSORL_TRAINING_EXPORT_DIR",
+                    str(_DEFAULT_TRAINING_EXPORT_DIR),
+                )
+            ),
+            training_export_max_rows=int(
+                opts.get(
+                    "training_export_max_rows",
+                    os.getenv("ESPRESSORL_TRAINING_EXPORT_MAX_ROWS", 50_000),
+                )
+            ),
+            build_git_sha=_option_string_or_env(opts, "build_git_sha", "ESPRESSORL_BUILD_GIT_SHA"),
             admin_dashboard_enabled=bool(
                 opts.get(
                     "admin_dashboard_enabled",

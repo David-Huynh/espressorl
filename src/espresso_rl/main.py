@@ -36,12 +36,14 @@ from espresso_rl.adapters.supabase_credentials import (
     SupabaseCredentialRegistrar,
     SupabaseCredentialRegistrarConfig,
 )
+from espresso_rl.adapters.file_artifacts import LocalTextArtifactWriter
 from espresso_rl.application.admin_pipeline import AdminPipelineService
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.community_priors import CommunityPriorGenerationService
 from espresso_rl.application.community_validation import CommunityValidationService
 from espresso_rl.application.local_data import LocalDataService
+from espresso_rl.application.training_export import TrainingDatasetExportService
 from espresso_rl.application.prior_providers import (
     CommunityPriorProvider,
     CompositePriorProvider,
@@ -1051,6 +1053,13 @@ def build_admin_pipeline_service(config: Config) -> AdminPipelineService:
         mirror=mirror,
         validator=CommunityValidationService(warehouse=warehouse),
         prior_generator=CommunityPriorGenerationService(warehouse=warehouse),
+        training_exporter=TrainingDatasetExportService(
+            warehouse=warehouse,
+            writer=LocalTextArtifactWriter(config.training_export_dir),
+            source_git_sha=config.build_git_sha,
+            max_rows=config.training_export_max_rows,
+            clock=config.now,
+        ),
         clock=config.now,
     )
 

@@ -85,6 +85,14 @@ def create_admin_dashboard_app(service: AdminPipelineService, admin_token: str):
             requested_by="dashboard",
         ).to_dict()
 
+    @app.post("/api/export/run", dependencies=[Depends(require_admin)])
+    def run_export(payload: dict[str, Any] | None = None) -> dict:
+        return service.export_training_dataset_once(
+            limit=_limit(payload, default=50_000, maximum=500_000),
+            dry_run=_dry_run(payload),
+            requested_by="dashboard",
+        ).to_dict()
+
     return app
 
 
@@ -201,6 +209,8 @@ _DASHBOARD_HTML = """
       <button onclick="action('/api/validation/run')">Run validation once</button>
       <button onclick="action('/api/priors/dry-run')">Dry-run priors</button>
       <button onclick="action('/api/priors/run')">Generate priors once</button>
+      <button onclick="action('/api/export/run', true)">Dry-run export</button>
+      <button onclick="action('/api/export/run')">Export training dataset</button>
       <button onclick="action('/api/purge/run', true)">Dry-run purge</button>
       <button onclick="action('/api/purge/run')">Purge retained queue rows</button>
     </section>
@@ -264,7 +274,8 @@ _DASHBOARD_HTML = """
         validated_shots: data.validated_shot_count || 0,
         training_rows: data.training_row_count || 0,
         community_priors: data.community_prior_count || 0,
-        abuse_events: data.abuse_event_count || 0
+        abuse_events: data.abuse_event_count || 0,
+        export_enabled: data.training_export_enabled ? 1 : 0
       };
       document.getElementById('metrics').innerHTML = Object.entries(metrics)
         .map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`)

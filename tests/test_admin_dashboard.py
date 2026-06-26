@@ -64,6 +64,7 @@ class FakeAdminService:
             latest_rejections=[],
             latest_admin_actions=[],
             mirror_enabled=False,
+            training_export_enabled=False,
         )
 
 

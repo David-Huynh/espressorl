@@ -325,6 +325,8 @@ Admin settings:
   "admin_collector_enabled": true,
   "admin_dashboard_enabled": true,
   "admin_dashboard_port": 8080,
+  "training_export_dir": "/data/espresso_rl/exports",
+  "training_export_max_rows": 50000,
   "supabase_rest_url": "https://PROJECT_REF.supabase.co/rest/v1",
   "supabase_service_role_key": "SERVICE_ROLE_KEY",
   "admin_dashboard_token": "AT_LEAST_32_RANDOM_CHARS"
@@ -387,6 +389,23 @@ by the dashboard are category-only, such as `invalid_schema`,
 Local and admin dashboards require bearer tokens, reject oversized request
 bodies, set no-store/security headers, and avoid rendering raw payload JSON,
 profiles, request headers, Supabase keys, upload secrets, or HMAC material.
+
+The admin dashboard can export the validated training dataset for external
+model training. Exports are written under `training_export_dir` and are capped
+by `training_export_max_rows`. The export format is intentionally boring and
+auditable:
+
+- `training_rows.jsonl`: canonical UTF-8 JSON Lines, one revalidated training
+  row per line. This is the authoritative training file.
+- `training_rows.csv`: a spreadsheet-friendly summary for review. It omits the
+  profile arrays and escapes formula-looking string cells.
+- `manifest.json`: row counts, file hashes, dataset SHA-256, schema version,
+  source git SHA, and zero-trust flags.
+- `README.txt`: plain-language format notes.
+
+No export artifact uses pickle, model binaries, SQLite dumps, parquet, macros,
+or another executable/opaque format. Trainers should publish the model file
+SHA-256 separately and configure it with `optimizer_model_artifact_sha256`.
 
 ## Warm-Started BO Priors
 

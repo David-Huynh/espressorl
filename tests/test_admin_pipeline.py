@@ -8,6 +8,8 @@ from espresso_rl.application.admin_pipeline import AdminPipelineService
 from espresso_rl.application.community_mirror import CommunityMirrorResult, CommunityQueuePurgeResult
 from espresso_rl.application.community_priors import CommunityPriorGenerationResult
 from espresso_rl.application.community_validation import CommunityValidationResult
+from espresso_rl.application.training_export import TrainingDatasetExportResult
+from espresso_rl.domain.artifacts import ArtifactInfo
 from espresso_rl.domain.community import AdminActionLogEntry, CommunityRejectionSummary
 
 
@@ -161,6 +163,26 @@ class AdminPipelineTests(unittest.TestCase):
 
         self.assertEqual(summary.validation_errors, ["invalid_schema", "impossible_flow", "payload_too_large"])
 
+    def test_training_export_action_is_locked_and_audited_without_mutating_rows(self) -> None:
+        warehouse = FakeWarehouse()
+        exporter = FakeTrainingExporter()
+        service = AdminPipelineService(
+            warehouse=warehouse,
+            mirror=None,
+            validator=FakeValidator(),
+            prior_generator=FakePriorGenerator(),
+            training_exporter=exporter,
+            clock=FakeClock(),
+        )
+
+        result = service.export_training_dataset_once(limit=25, requested_by="dashboard")
+
+        self.assertEqual(result.training_export.row_count, 2)  # type: ignore[union-attr]
+        self.assertEqual(exporter.limit_seen, 25)
+        self.assertEqual(warehouse.admin_actions[-1].action_type, "export_training_dataset_once")
+        self.assertEqual(warehouse.admin_actions[-1].rows_seen, 2)
+        self.assertEqual(warehouse.admin_actions[-1].rows_changed, 0)
+
 
 class FakeWarehouse:
     def __init__(
@@ -273,6 +295,32 @@ class FakePriorGenerator:
             rejected=2,
             contexts_seen=3,
             priors_written=2,
+        )
+
+
+class FakeTrainingExporter:
+    def __init__(self) -> None:
+        self.limit_seen = 0
+
+    def export_once(self, limit: int = 50_000) -> TrainingDatasetExportResult:
+        self.limit_seen = limit
+        return TrainingDatasetExportResult(
+            export_id="export_1",
+            export_dir="export_1",
+            row_count=2,
+            skipped_row_count=0,
+            dataset_sha256="a" * 64,
+            manifest_sha256="b" * 64,
+            files=[
+                ArtifactInfo(
+                    relative_path="export_1/training_rows.jsonl",
+                    absolute_path="/tmp/export_1/training_rows.jsonl",
+                    content_type="application/x-ndjson; charset=utf-8",
+                    size_bytes=10,
+                    sha256="a" * 64,
+                )
+            ],
+            warnings=[],
         )
 
 
