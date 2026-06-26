@@ -169,7 +169,10 @@ Absolute grinder settings, profile edits, machine topics, and adapter payloads
 are not part of the Dreamer action schema. The action space can use the same
 full safety envelope available to BO, currently up to 5 relative grind steps,
 1.0 g dose change, and 8.0 g target-yield change from the current recipe, while
-still respecting global dose/yield/ratio bounds.
+still respecting global dose/yield/ratio bounds. In this pre-shot recipe schema,
+`target_yield_g` is the initial planned stop target; future dynamic profiling
+should represent in-shot yield changes as bounded per-step controls such as
+`yield_stop_target_g` or `stop`.
 
 Start the local service and Postgres:
 
@@ -479,6 +482,15 @@ remain visible for analysis, but their recommendation attribution weight is
 zero so they are not treated as successful optimizer actions. Sequence trainers
 should group rows by `install_id`, `machine_id`, `bean_context_id`, and
 `grinder_context_id`.
+
+The Dreamer helper `espresso_rl.dreamer.dataset.load_dreamer_episodes_from_jsonl`
+converts those canonical rows into `espresso_rl_dreamer_episode_v1` shot
+episodes for recurrent training. Each resampled profile sample becomes one
+per-step observation; relative grind, dose, the initial planned yield target,
+grinder calibration, and the default taste objective stay in `static_context`.
+Historical profile targets are stored as observed profile targets, while
+`dynamic_action` remains null unless a future capability-gated control path
+supplies safe per-step actions such as `yield_stop_target_g` or `stop`.
 
 No export artifact uses pickle, model binaries, SQLite dumps, parquet, macros,
 absolute grinder settings, or another executable/opaque format. Trainers should
