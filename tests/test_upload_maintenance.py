@@ -54,6 +54,22 @@ def valid_profile() -> list[list[float]]:
     return profile
 
 
+def valid_fixed_cadence_sequence() -> dict:
+    return {
+        "sample_interval_ms": 250,
+        "pressure_bar": [0.0, 2.0, 5.0, 8.0],
+        "pressure_target_bar": [2.0, 4.0, 8.0, 9.0],
+        "pump_flow_ml_s": [0.0, 1.0, 2.0, 2.2],
+        "pump_flow_target_ml_s": [0.0, 0.0, 0.0, 0.0],
+        "beverage_flow_g_s": [0.0, 0.5, 1.5, 2.0],
+        "weight_g": [0.0, 0.1, 0.5, 1.0],
+        "temperature_c": [92.0, 92.1, 92.2, 92.3],
+        "temperature_target_c": [93.0, 93.0, 93.0, 93.0],
+        "pump_target_mode": [1, 1, 1, 1],
+        "valve_open": [True, True, True, True],
+    }
+
+
 def queue_item(
     upload_id: str,
     payload_json: str,
@@ -154,6 +170,25 @@ class UploadMaintenanceTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertIn("beverage_flow_profile out of range", result.errors)
+
+    def test_preflight_accepts_fixed_cadence_sequence(self) -> None:
+        result = validate_upload_payload_json(
+            payload(fixed_cadence_sequence=valid_fixed_cadence_sequence())
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, [])
+
+    def test_preflight_rejects_nonfixed_or_misaligned_sequence(self) -> None:
+        sequence = valid_fixed_cadence_sequence()
+        sequence["sample_interval_ms"] = 200
+        sequence["temperature_c"].pop()
+
+        result = validate_upload_payload_json(payload(fixed_cadence_sequence=sequence))
+
+        self.assertFalse(result.ok)
+        self.assertIn("fixed_cadence_sequence.sample_interval_ms must be 250", result.errors)
+        self.assertIn("fixed_cadence_sequence channels must have matching lengths", result.errors)
 
     def test_preflight_rejects_weight_below_tare_noise_floor(self) -> None:
         profile = valid_profile()
@@ -256,6 +291,19 @@ class UploadMaintenanceTests(unittest.TestCase):
         self.assertEqual(trusted["profile_resampled"][2], [0.0 for _ in range(100)])
         self.assertEqual(trusted["profile_resampled"][3], [0.0 for _ in range(100)])
         self.assertFalse(trusted["profile_flow_valid"])
+        self.assertTrue(trusted["profile_flow_masked"])
+
+    def test_trusted_payload_copy_masks_uncalibrated_fixed_cadence_pump_flow(self) -> None:
+        sequence = valid_fixed_cadence_sequence()
+        raw = payload_dict(
+            fixed_cadence_sequence=sequence,
+            pump_flow_calibration_required=True,
+        )
+
+        trusted = mask_untrusted_profile_channels(raw)
+
+        self.assertEqual(trusted["fixed_cadence_sequence"]["pump_flow_ml_s"], [0.0] * 4)
+        self.assertEqual(trusted["fixed_cadence_sequence"]["pump_flow_target_ml_s"], [0.0] * 4)
         self.assertTrue(trusted["profile_flow_masked"])
 
     def test_requeue_valid_rejected_uploads_leaves_invalid_rows_rejected(self) -> None:

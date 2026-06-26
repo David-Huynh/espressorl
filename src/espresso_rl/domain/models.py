@@ -13,6 +13,8 @@ PROFILE_DTYPE = np.float32
 AUX_PROFILE_SHAPE = (PROFILE_SHAPE[1],)
 PUMP_TARGET_MODE_DTYPE = np.uint8
 PUMP_TARGET_MODE_VALUES = {0, 1, 2}
+FIXED_CADENCE_SAMPLE_INTERVAL_MS = 250
+FIXED_CADENCE_MAX_STEPS = 500
 
 
 def _optional_profile_vector(value: np.ndarray | list[float] | None, field_name: str) -> np.ndarray | None:
@@ -294,6 +296,110 @@ class UploadQueueItem:
             raise ValueError("payload_json is required")
 
 
+@dataclass(frozen=True)
+class FixedCadenceShotSequence:
+    """Canonical per-shot telemetry on an exact, model-safe time grid."""
+
+    sample_interval_ms: int
+    pressure_bar: np.ndarray
+    pressure_target_bar: np.ndarray
+    pump_flow_ml_s: np.ndarray
+    pump_flow_target_ml_s: np.ndarray
+    beverage_flow_g_s: np.ndarray
+    weight_g: np.ndarray
+    temperature_c: np.ndarray
+    temperature_target_c: np.ndarray
+    pump_target_mode: np.ndarray
+    valve_open: np.ndarray
+
+    def __post_init__(self) -> None:
+        if self.sample_interval_ms != FIXED_CADENCE_SAMPLE_INTERVAL_MS:
+            raise ValueError(
+                f"sample_interval_ms must be {FIXED_CADENCE_SAMPLE_INTERVAL_MS}"
+            )
+
+        lengths: set[int] = set()
+        ranges = {
+            "pressure_bar": (0.0, 15.0),
+            "pressure_target_bar": (0.0, 15.0),
+            "pump_flow_ml_s": (0.0, 20.0),
+            "pump_flow_target_ml_s": (0.0, 20.0),
+            "beverage_flow_g_s": (0.0, 20.0),
+            "weight_g": (-1.0, 120.0),
+            "temperature_c": (0.0, 160.0),
+            "temperature_target_c": (0.0, 160.0),
+        }
+        for field_name, (minimum, maximum) in ranges.items():
+            array = np.asarray(getattr(self, field_name), dtype=PROFILE_DTYPE)
+            if array.ndim != 1 or not np.all(np.isfinite(array)):
+                raise ValueError(f"{field_name} must be a finite one-dimensional array")
+            if np.any(array < minimum) or np.any(array > maximum):
+                raise ValueError(f"{field_name} out of range")
+            object.__setattr__(self, field_name, array)
+            lengths.add(len(array))
+
+        pump_modes = np.asarray(self.pump_target_mode, dtype=PUMP_TARGET_MODE_DTYPE)
+        if pump_modes.ndim != 1 or any(int(mode) not in PUMP_TARGET_MODE_VALUES for mode in pump_modes):
+            raise ValueError("pump_target_mode contains invalid values")
+        object.__setattr__(self, "pump_target_mode", pump_modes)
+        lengths.add(len(pump_modes))
+
+        valve = np.asarray(self.valve_open, dtype=np.uint8)
+        if valve.ndim != 1 or any(int(value) not in {0, 1} for value in valve):
+            raise ValueError("valve_open contains invalid values")
+        object.__setattr__(self, "valve_open", valve)
+        lengths.add(len(valve))
+
+        if len(lengths) != 1:
+            raise ValueError("fixed-cadence sequence channels must have matching lengths")
+        step_count = next(iter(lengths), 0)
+        if not 2 <= step_count <= FIXED_CADENCE_MAX_STEPS:
+            raise ValueError(
+                f"fixed-cadence sequence must contain 2..{FIXED_CADENCE_MAX_STEPS} steps"
+            )
+
+    @property
+    def step_count(self) -> int:
+        return len(self.pressure_bar)
+
+    def to_dict(self, *, ndigits: int = 4) -> dict[str, Any]:
+        return {
+            "sample_interval_ms": self.sample_interval_ms,
+            "pressure_bar": _rounded_vector(self.pressure_bar, ndigits),
+            "pressure_target_bar": _rounded_vector(self.pressure_target_bar, ndigits),
+            "pump_flow_ml_s": _rounded_vector(self.pump_flow_ml_s, ndigits),
+            "pump_flow_target_ml_s": _rounded_vector(self.pump_flow_target_ml_s, ndigits),
+            "beverage_flow_g_s": _rounded_vector(self.beverage_flow_g_s, ndigits),
+            "weight_g": _rounded_vector(self.weight_g, ndigits),
+            "temperature_c": _rounded_vector(self.temperature_c, ndigits),
+            "temperature_target_c": _rounded_vector(self.temperature_target_c, ndigits),
+            "pump_target_mode": [int(value) for value in self.pump_target_mode],
+            "valve_open": [bool(value) for value in self.valve_open],
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "FixedCadenceShotSequence":
+        if not isinstance(value, dict):
+            raise ValueError("fixed-cadence sequence must be an object")
+        return cls(
+            sample_interval_ms=value.get("sample_interval_ms"),
+            pressure_bar=value.get("pressure_bar"),
+            pressure_target_bar=value.get("pressure_target_bar"),
+            pump_flow_ml_s=value.get("pump_flow_ml_s"),
+            pump_flow_target_ml_s=value.get("pump_flow_target_ml_s"),
+            beverage_flow_g_s=value.get("beverage_flow_g_s"),
+            weight_g=value.get("weight_g"),
+            temperature_c=value.get("temperature_c"),
+            temperature_target_c=value.get("temperature_target_c"),
+            pump_target_mode=value.get("pump_target_mode"),
+            valve_open=value.get("valve_open"),
+        )
+
+
+def _rounded_vector(value: np.ndarray, ndigits: int) -> list[float]:
+    return [round(float(item), ndigits) for item in value]
+
+
 @dataclass
 class ShotRecord:
     shot_id: str
@@ -369,6 +475,7 @@ class ShotRecord:
     temperature_profile: np.ndarray | None = None
     target_temperature_profile: np.ndarray | None = None
     pump_target_mode_profile: np.ndarray | None = None
+    fixed_cadence_sequence: FixedCadenceShotSequence | None = None
     shot_end_state: str | None = None
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
@@ -404,6 +511,11 @@ class ShotRecord:
             "target_temperature_profile",
         )
         self.pump_target_mode_profile = _optional_pump_target_mode_vector(self.pump_target_mode_profile)
+        if self.fixed_cadence_sequence is not None and not isinstance(
+            self.fixed_cadence_sequence,
+            FixedCadenceShotSequence,
+        ):
+            self.fixed_cadence_sequence = FixedCadenceShotSequence.from_dict(self.fixed_cadence_sequence)
         self.shot_type = ShotType(self.shot_type)
         self.recommendation_decision = RecommendationDecision(self.recommendation_decision)
         self.recommendation_followed = FollowThroughState(self.recommendation_followed)

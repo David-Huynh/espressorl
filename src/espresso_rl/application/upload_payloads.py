@@ -106,6 +106,11 @@ def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
         "temperature_profile": _optional_array(shot.temperature_profile, ndigits=3),
         "target_temperature_profile": _optional_array(shot.target_temperature_profile, ndigits=3),
         "pump_target_mode_profile": _optional_int_array(shot.pump_target_mode_profile),
+        "fixed_cadence_sequence": (
+            shot.fixed_cadence_sequence.to_dict(ndigits=4)
+            if shot.fixed_cadence_sequence is not None
+            else None
+        ),
         "shot_end_state": shot.shot_end_state,
         "created_at": shot.created_at,
         "updated_at": shot.updated_at,

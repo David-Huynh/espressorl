@@ -86,6 +86,7 @@ class PostgresStore:
             "temperature_profile_blob": "BYTEA",
             "target_temperature_profile_blob": "BYTEA",
             "pump_target_mode_profile_blob": "BYTEA",
+            "fixed_cadence_sequence_json": "TEXT",
             "shot_end_state": "TEXT",
             "grinder_calibration_mode": "TEXT NOT NULL DEFAULT 'relative_calibrated'",
             "grinder_step_direction": "TEXT NOT NULL DEFAULT 'higher_is_finer'",

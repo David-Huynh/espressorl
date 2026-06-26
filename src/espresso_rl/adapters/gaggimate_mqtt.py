@@ -191,6 +191,7 @@ class GaggimateMQTTClient:
         temperature = _optional_channel(payload, "temperature", n)
         target_temperature = _optional_channel(payload, "target_temperature", n)
         pump_target_mode = _optional_int_channel(payload, "pump_target_mode", n)
+        valve_open = _optional_bool_channel(payload, "valve_open", n)
         weight = _channel({"weight": weight}, "weight", n)
         target_yield_g = float(payload.get("target_yield_g", self._config.initial_target_yield_g))
         beverage_out_g = payload.get("beverage_out_g")
@@ -215,6 +216,7 @@ class GaggimateMQTTClient:
             temperature=temperature,
             target_temperature=target_temperature,
             pump_target_mode=pump_target_mode,
+            valve_open=valve_open,
             weight=weight,
             microns_per_step=float(payload.get("microns_per_step", self._config.microns_per_step)),
             relative_grind_steps_from_reference=_relative_grind_steps_from_payload(
@@ -462,3 +464,16 @@ def _optional_int_channel(payload: dict[str, Any], key: str, n: int) -> list[int
     if len(result) != n:
         return None
     return [_optional_int(value) or 0 for value in result]
+
+
+def _optional_bool_channel(payload: dict[str, Any], key: str, n: int) -> list[bool] | None:
+    values = payload.get(key)
+    if values is None:
+        return None
+    result = list(values)
+    if len(result) != n:
+        return None
+    parsed = [_optional_bool(value) for value in result]
+    if any(value is None for value in parsed):
+        return None
+    return [bool(value) for value in parsed]

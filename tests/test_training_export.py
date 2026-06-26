@@ -30,6 +30,7 @@ class TrainingDatasetExportTests(unittest.TestCase):
                                 "temperature_profile": [93.0 for _ in range(100)],
                                 "target_temperature_profile": [92.5 for _ in range(100)],
                                 "pump_target_mode_profile": [1 for _ in range(100)],
+                                "fixed_cadence_sequence": fixed_cadence_sequence(),
                             },
                         )
                     ]
@@ -62,10 +63,13 @@ class TrainingDatasetExportTests(unittest.TestCase):
         self.assertEqual(exported_row["observation"]["target_temperature_profile"][0], 92.5)
         self.assertEqual(exported_row["observation"]["pump_target_mode_profile"][0], 1)
         self.assertEqual(exported_row["observation"]["beverage_flow_profile"][0], 1.5)
+        self.assertEqual(exported_row["observation"]["fixed_cadence_sequence"]["sample_interval_ms"], 250)
+        self.assertEqual(len(exported_row["observation"]["fixed_cadence_sequence"]["pressure_bar"]), 4)
         self.assertEqual(validate_training_transition(exported_row), [])
         self.assertIn("'=formula_like_context", csv_text)
         self.assertIn("temperature_profile_sha256", csv_text)
         self.assertIn("beverage_flow_profile_sha256", csv_text)
+        self.assertIn("fixed_cadence_sequence_sha256", csv_text)
         self.assertEqual(manifest["format"], "espresso_rl_training_dataset_v1")
         self.assertEqual(manifest["canonical_row_format"], "espresso_rl_training_transition_v1")
         self.assertEqual(manifest["source_git_sha"], "abc123")
@@ -252,6 +256,22 @@ def training_row(
         trust_weight=trust_weight,
         payload_hash="a" * 64,
     )
+
+
+def fixed_cadence_sequence() -> dict[str, Any]:
+    return {
+        "sample_interval_ms": 250,
+        "pressure_bar": [0.0, 2.0, 5.0, 8.0],
+        "pressure_target_bar": [2.0, 4.0, 8.0, 9.0],
+        "pump_flow_ml_s": [0.0, 1.0, 2.0, 2.2],
+        "pump_flow_target_ml_s": [0.0, 0.0, 0.0, 0.0],
+        "beverage_flow_g_s": [0.0, 0.5, 1.5, 2.0],
+        "weight_g": [0.0, 0.1, 0.5, 1.0],
+        "temperature_c": [92.0, 92.1, 92.2, 92.3],
+        "temperature_target_c": [93.0, 93.0, 93.0, 93.0],
+        "pump_target_mode": [1, 1, 1, 1],
+        "valve_open": [True, True, True, True],
+    }
 
 
 if __name__ == "__main__":

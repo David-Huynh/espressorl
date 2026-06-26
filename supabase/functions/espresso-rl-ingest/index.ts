@@ -35,7 +35,7 @@ const allowedShotFields = new Set([
   'final_phase_type', 'final_phase_elapsed_s', 'final_pump_target', 'final_target_pressure',
   'final_target_flow', 'final_valve_open', 'profile_temperature_c',
   'final_phase_temperature_c', 'beverage_flow_profile', 'temperature_profile', 'target_temperature_profile',
-  'pump_target_mode_profile', 'shot_end_state', 'created_at', 'updated_at',
+  'pump_target_mode_profile', 'fixed_cadence_sequence', 'shot_end_state', 'created_at', 'updated_at',
 ]);
 
 const allowedRecommendationFields = new Set([
@@ -322,6 +322,7 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalNumericProfileVector(payload, 'temperature_profile', 0, 160, errors);
   optionalNumericProfileVector(payload, 'target_temperature_profile', 0, 160, errors);
   optionalPumpTargetModeProfile(payload, 'pump_target_mode_profile', errors);
+  optionalFixedCadenceSequence(payload.fixed_cadence_sequence, errors);
   optionalEnum(payload, 'shot_end_state', ['finished', 'manual_or_interrupted', 'unknown'], errors);
   optionalNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalNumberRange(payload, 'updated_at', 0, Number.MAX_SAFE_INTEGER, errors);
@@ -601,6 +602,79 @@ function optionalPumpTargetModeProfile(payload: JsonRecord, key: string, errors:
   }
   if (channel.some(value => typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 2)) {
     errors.push(`${key} contains invalid pump target mode values`);
+  }
+}
+
+function optionalFixedCadenceSequence(value: unknown, errors: string[]) {
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (!value || Array.isArray(value) || typeof value !== 'object') {
+    errors.push('fixed_cadence_sequence must be an object');
+    return;
+  }
+  const sequence = value as JsonRecord;
+  const numericRanges: Record<string, [number, number]> = {
+    pressure_bar: [0, 15],
+    pressure_target_bar: [0, 15],
+    pump_flow_ml_s: [0, 20],
+    pump_flow_target_ml_s: [0, 20],
+    beverage_flow_g_s: [0, 20],
+    weight_g: [-1, 120],
+    temperature_c: [0, 160],
+    temperature_target_c: [0, 160],
+  };
+  const allowed = new Set(['sample_interval_ms', 'pump_target_mode', 'valve_open', ...Object.keys(numericRanges)]);
+  const unknown = Object.keys(sequence).filter(key => !allowed.has(key)).sort();
+  if (unknown.length > 0) {
+    errors.push(`fixed_cadence_sequence contains unknown fields: ${unknown.slice(0, 10).join(', ')}`);
+  }
+  if (sequence.sample_interval_ms !== 250) {
+    errors.push('fixed_cadence_sequence.sample_interval_ms must be 250');
+  }
+
+  const lengths = new Set<number>();
+  for (const [key, [min, max]] of Object.entries(numericRanges)) {
+    const channel = sequence[key];
+    if (!Array.isArray(channel)) {
+      errors.push(`fixed_cadence_sequence.${key} must be a list`);
+      continue;
+    }
+    lengths.add(channel.length);
+    if (!channelNumericFinite(channel)) {
+      errors.push(`fixed_cadence_sequence.${key} contains non-finite or nonnumeric values`);
+    } else if (!channelInRange(channel, min, max)) {
+      errors.push(`fixed_cadence_sequence.${key} out of range`);
+    }
+  }
+
+  const pumpModes = sequence.pump_target_mode;
+  if (!Array.isArray(pumpModes)) {
+    errors.push('fixed_cadence_sequence.pump_target_mode must be a list');
+  } else {
+    lengths.add(pumpModes.length);
+    if (pumpModes.some(item => typeof item !== 'number' || !Number.isInteger(item) || item < 0 || item > 2)) {
+      errors.push('fixed_cadence_sequence.pump_target_mode contains invalid values');
+    }
+  }
+
+  const valveOpen = sequence.valve_open;
+  if (!Array.isArray(valveOpen)) {
+    errors.push('fixed_cadence_sequence.valve_open must be a list');
+  } else {
+    lengths.add(valveOpen.length);
+    if (valveOpen.some(item => typeof item !== 'boolean')) {
+      errors.push('fixed_cadence_sequence.valve_open contains invalid values');
+    }
+  }
+
+  if (lengths.size !== 1) {
+    errors.push('fixed_cadence_sequence channels must have matching lengths');
+  } else {
+    const stepCount = lengths.values().next().value as number;
+    if (stepCount < 2 || stepCount > 500) {
+      errors.push('fixed_cadence_sequence must contain 2..500 steps');
+    }
   }
 }
 

@@ -15,6 +15,7 @@ from espresso_rl.domain.models import (
     ShotRecord,
 )
 from espresso_rl.domain.profile import (
+    build_fixed_cadence_sequence,
     profile_mse,
     profile_score,
     resample_profile,
@@ -94,6 +95,19 @@ class DomainCoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             event(pump_flow=[0.0, 1.0])
 
+    def test_canonical_profile_rejects_unbounded_sample_count(self) -> None:
+        samples = [0.0] * 501
+        with self.assertRaisesRegex(ValueError, "must not exceed 500"):
+            event(
+                time_ms=list(range(501)),
+                pressure=samples,
+                target_pressure=samples,
+                pump_flow=samples,
+                target_flow=samples,
+                beverage_flow=samples,
+                weight=samples,
+            )
+
     def test_canonical_profile_rejects_nonfinite_profile_values(self) -> None:
         with self.assertRaises(ValueError):
             event(pump_flow=[0.0, float("nan"), 2.0])
@@ -105,6 +119,8 @@ class DomainCoreTests(unittest.TestCase):
     def test_canonical_profile_rejects_boolean_numeric_values(self) -> None:
         with self.assertRaises(ValueError):
             event(pump_flow=[0.0, True, 2.0])
+        with self.assertRaisesRegex(ValueError, "valve_open"):
+            event(valve_open=[False, 1, True])
 
     def test_canonical_profile_accepts_sanitized_execution_metadata(self) -> None:
         parsed = event(
@@ -169,6 +185,43 @@ class DomainCoreTests(unittest.TestCase):
         self.assertAlmostEqual(float(metadata.temperature_profile[-1]), 93.0)  # type: ignore[index]
         self.assertAlmostEqual(float(metadata.target_temperature_profile[-1]), 92.0)  # type: ignore[index]
         self.assertEqual(int(metadata.pump_target_mode_profile[-1]), 2)  # type: ignore[index]
+
+    def test_fixed_cadence_sequence_uses_exact_250ms_transitions(self) -> None:
+        sequence = build_fixed_cadence_sequence(
+            event(
+                time_ms=[240, 510, 745, 1010],
+                pressure=[0.0, 2.0, 4.0, 6.0],
+                target_pressure=[1.0, 2.0, 3.0, 4.0],
+                pump_flow=[0.0, 1.0, 2.0, 3.0],
+                target_flow=[0.0, 1.5, 2.0, 2.5],
+                beverage_flow=[0.0, 0.5, 1.0, 1.5],
+                weight=[0.0, 1.0, 3.0, 6.0],
+                temperature=[90.0, 90.5, 91.0, 91.5],
+                target_temperature=[92.0, 92.0, 92.5, 92.5],
+                pump_target_mode=[1, 1, 2, 2],
+                valve_open=[False, True, True, False],
+            )
+        )
+
+        self.assertIsNotNone(sequence)
+        self.assertEqual(sequence.sample_interval_ms, 250)  # type: ignore[union-attr]
+        self.assertEqual(sequence.step_count, 4)  # type: ignore[union-attr]
+        self.assertEqual(sequence.pump_target_mode.tolist(), [1, 1, 1, 2])  # type: ignore[union-attr]
+        self.assertEqual(sequence.valve_open.tolist(), [0, 0, 1, 1])  # type: ignore[union-attr]
+        self.assertAlmostEqual(float(sequence.pressure_bar[-1]), 5.8491, places=3)  # type: ignore[union-attr]
+
+    def test_fixed_cadence_sequence_requires_complete_control_telemetry(self) -> None:
+        self.assertIsNone(build_fixed_cadence_sequence(event()))
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            build_fixed_cadence_sequence(
+                event(
+                    time_ms=[0, 500, 400],
+                    temperature=[90.0, 91.0, 92.0],
+                    target_temperature=[92.0, 92.0, 92.0],
+                    pump_target_mode=[1, 1, 1],
+                    valve_open=[True, True, True],
+                )
+            )
 
     def test_profile_mse_ignores_inactive_zero_flow_target(self) -> None:
         profile = resample_profile(

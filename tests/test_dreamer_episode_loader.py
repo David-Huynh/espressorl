@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import unittest
 
@@ -35,27 +34,27 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertTrue(all(episode["format"] == DREAMER_EPISODE_FORMAT for episode in episodes))
         self.assertTrue(all(validate_dreamer_episode(episode) == [] for episode in episodes))
 
-    def test_profile_channels_become_recurrent_step_observations(self) -> None:
+    def test_fixed_cadence_channels_become_recurrent_step_observations(self) -> None:
         episode = build_dreamer_episodes_from_training_rows([training_row(1)])[0]
 
-        self.assertEqual(len(episode["steps"]), 100)
-        self.assertEqual(episode["steps"][0]["elapsed_fraction"], 0.0)
-        self.assertEqual(episode["steps"][99]["elapsed_fraction"], 1.0)
+        self.assertEqual(episode["sample_interval_ms"], 250)
+        self.assertEqual(len(episode["steps"]), 4)
+        self.assertEqual(episode["steps"][0]["elapsed_ms"], 0)
+        self.assertEqual(episode["steps"][3]["elapsed_ms"], 750)
         self.assertEqual(episode["steps"][0]["observation"]["pressure_bar"], 1.0)
-        self.assertEqual(episode["steps"][99]["observation"]["pressure_bar"], 10.9)
-        self.assertEqual(episode["steps"][10]["observation"]["weight_g"], 3.6)
-        self.assertEqual(episode["steps"][10]["observed_profile_target"]["pressure_target_bar"], 8.0)
-        self.assertTrue(episode["steps"][10]["observed_profile_target"]["pressure_target_active"])
-        self.assertEqual(episode["steps"][10]["observed_profile_target"]["flow_target_ml_s"], 2.4)
-        self.assertFalse(episode["steps"][10]["observed_profile_target"]["flow_target_active"])
-        self.assertEqual(episode["steps"][10]["observation"]["pump_flow_ml_s"], 1.2)
-        self.assertEqual(episode["steps"][10]["observation"]["beverage_flow_g_s"], 1.1)
-        self.assertEqual(episode["steps"][10]["observation"]["temperature_c"], 93.0)
-        self.assertEqual(episode["steps"][10]["observed_profile_target"]["temperature_target_c"], 92.5)
-        self.assertTrue(episode["steps"][10]["observed_profile_target"]["temperature_target_active"])
-        self.assertNotIn("target_pressure_bar", episode["steps"][10]["observation"])
-        self.assertNotIn("target_flow_ml_s", episode["steps"][10]["observation"])
-        self.assertNotIn("target_temperature_c", episode["steps"][10]["observation"])
+        self.assertEqual(episode["steps"][3]["observation"]["pressure_bar"], 4.0)
+        self.assertEqual(episode["steps"][2]["observation"]["weight_g"], 0.72)
+        self.assertEqual(episode["steps"][2]["observed_profile_target"]["pressure_target_bar"], 8.0)
+        self.assertTrue(episode["steps"][2]["observed_profile_target"]["pressure_target_active"])
+        self.assertEqual(episode["steps"][2]["observed_profile_target"]["flow_target_ml_s"], 2.4)
+        self.assertFalse(episode["steps"][2]["observed_profile_target"]["flow_target_active"])
+        self.assertEqual(episode["steps"][2]["observation"]["pump_flow_ml_s"], 1.04)
+        self.assertEqual(episode["steps"][2]["observation"]["beverage_flow_g_s"], 0.3)
+        self.assertEqual(episode["steps"][2]["observation"]["temperature_c"], 93.0)
+        self.assertEqual(episode["steps"][2]["observed_profile_target"]["temperature_target_c"], 92.5)
+        self.assertTrue(episode["steps"][2]["observed_profile_target"]["temperature_target_active"])
+        self.assertEqual(episode["steps"][2]["observed_profile_target"]["pump_target_mode"], 1)
+        self.assertTrue(episode["steps"][2]["observed_profile_target"]["valve_open"])
 
     def test_sampled_temperature_becomes_step_telemetry(self) -> None:
         episode = build_dreamer_episodes_from_training_rows(
@@ -68,15 +67,17 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
                         "final_target_flow": 0.0,
                         "profile_temperature_c": 93.0,
                         "final_phase_temperature_c": 92.5,
-                        "temperature_profile": [92.0 + index * 0.01 for index in range(100)],
-                        "target_temperature_profile": [93.0 for _ in range(100)],
+                        "fixed_cadence_sequence": fixed_cadence_sequence(
+                            temperature_c=[92.0, 92.1, 92.2, 92.3],
+                            temperature_target_c=[93.0, 93.0, 93.0, 93.0],
+                        ),
                     },
                 )
             ]
         )[0]
 
         self.assertEqual(episode["steps"][0]["observation"]["temperature_c"], 92.0)
-        self.assertEqual(episode["steps"][99]["observation"]["temperature_c"], 92.99)
+        self.assertEqual(episode["steps"][3]["observation"]["temperature_c"], 92.3)
         self.assertEqual(episode["steps"][0]["observed_profile_target"]["temperature_target_c"], 93.0)
         self.assertTrue(episode["steps"][0]["observed_profile_target"]["temperature_target_active"])
         self.assertEqual(episode["terminal"]["final_pump_target"], "pressure")
@@ -174,9 +175,9 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
 
         self.assertEqual(tuple(batch["source_training_row_ids"].tolist()), (1, 2))
         self.assertEqual(batch["episode_ids"], ("training_row_1", "training_row_2"))
-        self.assertEqual(tuple(batch["observations"].shape), (2, 100, len(DREAMER_OBSERVATION_FEATURES)))
-        self.assertEqual(tuple(batch["observed_profile_targets"].shape), (2, 100, len(DREAMER_OBSERVED_TARGET_FEATURES)))
-        self.assertEqual(tuple(batch["observed_profile_target_mask"].shape), (2, 100, len(DREAMER_OBSERVED_TARGET_FEATURES)))
+        self.assertEqual(tuple(batch["observations"].shape), (2, 4, len(DREAMER_OBSERVATION_FEATURES)))
+        self.assertEqual(tuple(batch["observed_profile_targets"].shape), (2, 4, len(DREAMER_OBSERVED_TARGET_FEATURES)))
+        self.assertEqual(tuple(batch["observed_profile_target_mask"].shape), (2, 4, len(DREAMER_OBSERVED_TARGET_FEATURES)))
         self.assertEqual(tuple(batch["static_context"].shape), (2, len(DREAMER_STATIC_CONTEXT_FEATURES)))
         self.assertEqual(batch["feature_names"]["observations"], DREAMER_OBSERVATION_FEATURES)
         self.assertEqual(batch["feature_names"]["observed_profile_target_mask"], DREAMER_OBSERVED_TARGET_FEATURES)
@@ -193,20 +194,22 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         auto_index = DREAMER_STATIC_CONTEXT_FEATURES.index("taste_objective_auto")
 
         self.assertEqual(batch["observations"][0, 0, pressure_index].item(), 1.0)
-        self.assertAlmostEqual(batch["observations"][0, 10, weight_index].item(), 3.6, places=6)
+        self.assertAlmostEqual(batch["observations"][0, 2, weight_index].item(), 0.72, places=6)
         self.assertEqual(batch["observations"][0, 0, temp_index].item(), 93.0)
         self.assertEqual(batch["observed_profile_targets"][0, 0, target_temp_index].item(), 92.5)
         self.assertEqual(batch["observed_profile_targets"][0, 0, target_pressure_index].item(), 8.0)
         self.assertAlmostEqual(batch["observed_profile_targets"][0, 0, target_flow_index].item(), 2.4, places=6)
-        self.assertEqual(batch["observed_profile_target_mask"][0, 0].tolist(), [1.0, 0.0, 1.0])
+        self.assertEqual(batch["observed_profile_target_mask"][0, 0].tolist(), [1.0, 0.0, 1.0, 1.0, 1.0])
         self.assertEqual(batch["static_context"][0, grind_index].item(), -2.0)
         self.assertEqual(batch["static_context"][0, initial_yield_index].item(), 36.0)
         self.assertEqual(batch["static_context"][0, direction_index].item(), 1.0)
         self.assertEqual(batch["static_context"][0, auto_index].item(), 1.0)
-        self.assertAlmostEqual(batch["rewards"][0, 99].item(), 0.8, places=6)
-        self.assertEqual(batch["continuations"][0, 98].item(), 1.0)
-        self.assertEqual(batch["continuations"][0, 99].item(), 0.0)
-        self.assertEqual(batch["step_mask"][0, 99].item(), 1.0)
+        self.assertAlmostEqual(batch["rewards"][0, 3].item(), 0.8, places=6)
+        self.assertEqual(batch["continuations"][0, 2].item(), 1.0)
+        self.assertEqual(batch["continuations"][0, 3].item(), 0.0)
+        self.assertEqual(batch["step_mask"][0, 3].item(), 1.0)
+        self.assertEqual(batch["elapsed_seconds"][0, :, 0].tolist(), [0.0, 0.25, 0.5, 0.75])
+        self.assertEqual(batch["step_duration_seconds"][0, :, 0].tolist(), [0.25, 0.25, 0.25, 0.25])
         self.assertAlmostEqual(batch["episode_weights"][0].item(), 0.2, places=6)
 
     def test_episode_batch_encodes_temperature_when_present(self) -> None:
@@ -240,29 +243,22 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(batch["terminal"][0, final_flow_index].item(), 2.5)
 
     def test_episode_batch_masks_inactive_profile_targets(self) -> None:
-        pressure_only = profile()
-        pressure_only[3] = [0.0 for _ in range(100)]
-        flow_only = profile()
-        flow_only[1] = [0.0 for _ in range(100)]
-        no_pressure_or_flow_target = profile()
-        no_pressure_or_flow_target[1] = [0.0 for _ in range(100)]
-        no_pressure_or_flow_target[3] = [0.0 for _ in range(100)]
         episodes = build_dreamer_episodes_from_training_rows(
             [
-                training_row(1, observation_overrides={"profile_resampled": pressure_only}),
+                training_row(1),
                 training_row(
                     2,
                     observation_overrides={
-                        "profile_resampled": flow_only,
-                        "pump_target_mode_profile": [2 for _ in range(100)],
+                        "fixed_cadence_sequence": fixed_cadence_sequence(pump_target_mode=[2, 2, 2, 2]),
                     },
                 ),
                 training_row(
                     3,
                     observation_overrides={
-                        "profile_resampled": no_pressure_or_flow_target,
-                        "target_temperature_profile": [0.0 for _ in range(100)],
-                        "pump_target_mode_profile": [0 for _ in range(100)],
+                        "fixed_cadence_sequence": fixed_cadence_sequence(
+                            temperature_target_c=[0.0, 0.0, 0.0, 0.0],
+                            pump_target_mode=[0, 0, 0, 0],
+                        ),
                     },
                 ),
             ]
@@ -270,23 +266,23 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
 
         batch = build_dreamer_episode_batch(episodes)
 
-        self.assertEqual(batch["observed_profile_target_mask"][0, 0].tolist(), [1.0, 0.0, 1.0])
-        self.assertEqual(batch["observed_profile_target_mask"][1, 0].tolist(), [0.0, 1.0, 1.0])
-        self.assertEqual(batch["observed_profile_target_mask"][2, 0].tolist(), [0.0, 0.0, 0.0])
+        self.assertEqual(batch["observed_profile_target_mask"][0, 0].tolist(), [1.0, 0.0, 1.0, 1.0, 1.0])
+        self.assertEqual(batch["observed_profile_target_mask"][1, 0].tolist(), [0.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(batch["observed_profile_target_mask"][2, 0].tolist(), [0.0, 0.0, 0.0, 1.0, 1.0])
 
     def test_episode_batch_uses_explicit_pump_target_mode_masks(self) -> None:
-        flow_control_with_pressure_cap = profile()
-        flow_control_with_pressure_cap[1] = [1.0 for _ in range(100)]
-        flow_control_with_pressure_cap[3] = [8.0 for _ in range(100)]
         episode = build_dreamer_episodes_from_training_rows(
             [
                 training_row(
                     1,
                     observation_overrides={
-                        "profile_resampled": flow_control_with_pressure_cap,
-                        "temperature_profile": [86.0 + index * 0.01 for index in range(100)],
-                        "target_temperature_profile": [86.5 for _ in range(100)],
-                        "pump_target_mode_profile": [2 for _ in range(100)],
+                        "fixed_cadence_sequence": fixed_cadence_sequence(
+                            pressure_target_bar=[1.0, 1.0, 1.0, 1.0],
+                            pump_flow_target_ml_s=[8.0, 8.0, 8.0, 8.0],
+                            temperature_c=[86.0, 86.1, 86.2, 86.3],
+                            temperature_target_c=[86.5, 86.5, 86.5, 86.5],
+                            pump_target_mode=[2, 2, 2, 2],
+                        ),
                     },
                 )
             ]
@@ -296,17 +292,17 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
 
         temp_index = DREAMER_OBSERVATION_FEATURES.index("temperature_c")
         target_temp_index = DREAMER_OBSERVED_TARGET_FEATURES.index("temperature_target_c")
-        self.assertEqual(batch["observed_profile_target_mask"][0, 0].tolist(), [0.0, 1.0, 1.0])
+        self.assertEqual(batch["observed_profile_target_mask"][0, 0].tolist(), [0.0, 1.0, 1.0, 1.0, 1.0])
         self.assertEqual(batch["observations"][0, 0, temp_index].item(), 86.0)
         self.assertEqual(batch["observed_profile_targets"][0, 0, target_temp_index].item(), 86.5)
 
     def test_episode_batch_pads_shorter_episodes_and_masks_padding(self) -> None:
-        first = build_dreamer_episodes_from_training_rows([training_row(1)])[0]
-        second = copy.deepcopy(first)
-        second["episode_id"] = "training_row_2"
-        second["source_training_row_id"] = 2
-        first["steps"] = first["steps"][:2]
-        second["steps"] = second["steps"][:3]
+        first, second = build_dreamer_episodes_from_training_rows(
+            [
+                training_row(1, observation_overrides={"fixed_cadence_sequence": fixed_cadence_sequence(2)}),
+                training_row(2, observation_overrides={"fixed_cadence_sequence": fixed_cadence_sequence(3)}),
+            ]
+        )
 
         batch = build_dreamer_episode_batch([second, first], pad_to_step_count=4)
 
@@ -347,19 +343,19 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         with self.assertRaisesRegex(DreamerEpisodeDatasetError, "profile_temperature_c"):
             build_dreamer_episodes_from_training_rows([row])
 
-    def test_episode_loader_rejects_missing_sampled_temperature(self) -> None:
-        for key in (
-            "beverage_flow_profile",
-            "temperature_profile",
-            "target_temperature_profile",
-            "pump_target_mode_profile",
-        ):
-            with self.subTest(key=key):
-                row = training_row(1)
-                row["observation"].pop(key)
+    def test_episode_loader_rejects_missing_fixed_cadence_sequence(self) -> None:
+        row = training_row(1)
+        row["observation"].pop("fixed_cadence_sequence")
 
-                with self.assertRaisesRegex(DreamerEpisodeDatasetError, key):
-                    build_dreamer_episodes_from_training_rows([row])
+        with self.assertRaisesRegex(DreamerEpisodeDatasetError, "fixed_cadence_sequence"):
+            build_dreamer_episodes_from_training_rows([row])
+
+    def test_episode_loader_rejects_invalid_fixed_cadence_channel(self) -> None:
+        row = training_row(1)
+        row["observation"]["fixed_cadence_sequence"]["temperature_c"].pop()
+
+        with self.assertRaisesRegex(DreamerEpisodeDatasetError, "matching lengths"):
+            build_dreamer_episodes_from_training_rows([row])
 
 
 def training_row(
@@ -402,6 +398,7 @@ def training_row(
         "temperature_profile": [93.0 for _ in range(100)],
         "target_temperature_profile": [92.5 for _ in range(100)],
         "pump_target_mode_profile": [1 for _ in range(100)],
+        "fixed_cadence_sequence": fixed_cadence_sequence(),
         "shot_end_state": "completed",
     }
     if observation_overrides:
@@ -449,6 +446,24 @@ def profile() -> list[list[float]]:
         [2.4 for _ in range(100)],
         [round(index * 0.36, 4) for index in range(100)],
     ]
+
+
+def fixed_cadence_sequence(step_count: int = 4, **overrides) -> dict:
+    sequence = {
+        "sample_interval_ms": 250,
+        "pressure_bar": [float(index + 1) for index in range(step_count)],
+        "pressure_target_bar": [8.0 for _ in range(step_count)],
+        "pump_flow_ml_s": [round(1.0 + index * 0.02, 4) for index in range(step_count)],
+        "pump_flow_target_ml_s": [2.4 for _ in range(step_count)],
+        "beverage_flow_g_s": [round(0.1 + index * 0.1, 4) for index in range(step_count)],
+        "weight_g": [round(index * 0.36, 4) for index in range(step_count)],
+        "temperature_c": [93.0 for _ in range(step_count)],
+        "temperature_target_c": [92.5 for _ in range(step_count)],
+        "pump_target_mode": [1 for _ in range(step_count)],
+        "valve_open": [True for _ in range(step_count)],
+    }
+    sequence.update(overrides)
+    return sequence
 
 
 if __name__ == "__main__":

@@ -3,11 +3,15 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from espresso_rl.domain.models import VALID_TASTE_TAGS
+from espresso_rl.domain.models import (
+    FIXED_CADENCE_MAX_STEPS,
+    FIXED_CADENCE_SAMPLE_INTERVAL_MS,
+    VALID_TASTE_TAGS,
+)
 from espresso_rl.domain.training import FORBIDDEN_TRAINING_FIELD_NAMES
 
-DREAMER_EPISODE_FORMAT = "espresso_rl_dreamer_episode_v1"
-DREAMER_EPISODE_SCHEMA_VERSION = 1
+DREAMER_EPISODE_FORMAT = "espresso_rl_dreamer_episode_v2"
+DREAMER_EPISODE_SCHEMA_VERSION = 2
 
 DREAMER_PROFILE_CHANNELS = (
     "pressure_bar",
@@ -23,6 +27,7 @@ _ROOT_FIELDS = frozenset(
         "schema_version",
         "episode_id",
         "source_training_row_id",
+        "sample_interval_ms",
         "group_key",
         "source",
         "context",
@@ -73,7 +78,7 @@ _TASTE_OBJECTIVE_FIELDS = frozenset(
     }
 )
 _TASTE_OBJECTIVE_LEVELS = frozenset({"none", "low", "medium", "high"})
-_STEP_FIELDS = frozenset({"step_index", "elapsed_fraction", "observation", "observed_profile_target", "dynamic_action", "constraints"})
+_STEP_FIELDS = frozenset({"step_index", "elapsed_ms", "observation", "observed_profile_target", "dynamic_action", "constraints"})
 _STEP_OBSERVATION_FIELDS = frozenset(DREAMER_PROFILE_CHANNELS)
 _OBSERVED_PROFILE_TARGET_FIELDS = frozenset(
     {
@@ -83,6 +88,8 @@ _OBSERVED_PROFILE_TARGET_FIELDS = frozenset(
         "flow_target_active",
         "temperature_target_c",
         "temperature_target_active",
+        "pump_target_mode",
+        "valve_open",
     }
 )
 _DYNAMIC_ACTION_FIELDS = frozenset(
@@ -176,6 +183,10 @@ def validate_dreamer_episode(episode: dict[str, Any]) -> list[str]:
         errors.append("Dreamer episode schema_version is unsupported")
     _require_nonempty_string(episode.get("episode_id"), "episode.episode_id", errors)
     _require_positive_int(episode.get("source_training_row_id"), "episode.source_training_row_id", errors)
+    if episode.get("sample_interval_ms") != FIXED_CADENCE_SAMPLE_INTERVAL_MS:
+        errors.append(
+            f"episode.sample_interval_ms must be {FIXED_CADENCE_SAMPLE_INTERVAL_MS}"
+        )
 
     group_key = _require_object(episode, "group_key", errors)
     if group_key is not None:
@@ -196,7 +207,7 @@ def validate_dreamer_episode(episode: dict[str, Any]) -> list[str]:
     steps = episode.get("steps")
     if not isinstance(steps, list) or not steps:
         errors.append("episode.steps must be a non-empty list")
-    elif len(steps) > 10_000:
+    elif len(steps) > FIXED_CADENCE_MAX_STEPS:
         errors.append("episode.steps contains too many steps")
     else:
         for index, step in enumerate(steps):
@@ -296,7 +307,12 @@ def _validate_step(step: object, expected_index: int, errors: list[str]) -> None
     step_index = step.get("step_index")
     if isinstance(step_index, bool) or not isinstance(step_index, int) or step_index != expected_index:
         errors.append(f"episode.steps[{expected_index}].step_index must match its position")
-    _require_number_range(step.get("elapsed_fraction"), f"episode.steps[{expected_index}].elapsed_fraction", 0.0, 1.0, errors)
+    elapsed_ms = step.get("elapsed_ms")
+    expected_elapsed_ms = expected_index * FIXED_CADENCE_SAMPLE_INTERVAL_MS
+    if elapsed_ms != expected_elapsed_ms:
+        errors.append(
+            f"episode.steps[{expected_index}].elapsed_ms must be {expected_elapsed_ms}"
+        )
 
     observation = _require_object(step, "observation", errors, path=f"episode.steps[{expected_index}]")
     if observation is not None:
@@ -344,6 +360,20 @@ def _validate_step(step: object, expected_index: int, errors: list[str]) -> None
         _require_bool(
             observed_profile_target.get("temperature_target_active"),
             f"episode.steps[{expected_index}].observed_profile_target.temperature_target_active",
+            errors,
+        )
+        pump_target_mode = observed_profile_target.get("pump_target_mode")
+        if (
+            isinstance(pump_target_mode, bool)
+            or not isinstance(pump_target_mode, int)
+            or pump_target_mode not in {0, 1, 2}
+        ):
+            errors.append(
+                f"episode.steps[{expected_index}].observed_profile_target.pump_target_mode is invalid"
+            )
+        _require_bool(
+            observed_profile_target.get("valve_open"),
+            f"episode.steps[{expected_index}].observed_profile_target.valve_open",
             errors,
         )
 

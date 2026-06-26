@@ -46,6 +46,7 @@ CSV_COLUMNS = [
     "target_temperature_profile_sha256",
     "pump_target_mode_profile_sha256",
     "beverage_flow_profile_sha256",
+    "fixed_cadence_sequence_sha256",
     "raw_profile_hash",
     "dose_g",
     "target_yield_g",
@@ -284,6 +285,7 @@ def _training_transition_from_payload(
             "temperature_profile": payload.get("temperature_profile"),
             "target_temperature_profile": payload.get("target_temperature_profile"),
             "pump_target_mode_profile": payload.get("pump_target_mode_profile"),
+            "fixed_cadence_sequence": payload.get("fixed_cadence_sequence"),
             "shot_end_state": payload.get("shot_end_state"),
         },
         "reward": {
@@ -407,6 +409,7 @@ def _csv_row(row: dict[str, Any]) -> dict[str, Any]:
         "target_temperature_profile_sha256": _value_sha256(observation.get("target_temperature_profile")),
         "pump_target_mode_profile_sha256": _value_sha256(observation.get("pump_target_mode_profile")),
         "beverage_flow_profile_sha256": _value_sha256(observation.get("beverage_flow_profile")),
+        "fixed_cadence_sequence_sha256": _value_sha256(observation.get("fixed_cadence_sequence")),
         "raw_profile_hash": observation.get("raw_profile_hash") or "",
         "dose_g": action.get("dose_g"),
         "target_yield_g": action.get("target_yield_g"),
@@ -483,6 +486,7 @@ def _manifest(
             "formats": ["jsonl", "csv", "json", "txt"],
             "csv_formula_strings_escaped": True,
             "sequence_group_keys": ["install_id", "machine_id", "bean_context_id", "grinder_context_id"],
+            "dreamer_fixed_cadence_interval_ms": 250,
         },
     }
 
@@ -512,6 +516,8 @@ def _readme_text() -> str:
         "Grind is canonicalized as relative steps and relative microns from the\n"
         "grinder context reference. CSV string cells that could be interpreted as\n"
         "spreadsheet formulas are escaped.\n"
+        "Dreamer rows may include fixed_cadence_sequence as named JSON arrays at\n"
+        "exact 250 ms intervals; 5x100 profile_resampled remains the BO summary.\n"
         "\n"
         "There are no pickles, model binaries, SQLite dumps, parquet files, macros, or executable files.\n"
     )

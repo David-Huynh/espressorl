@@ -705,6 +705,31 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(float(shot.profile[2].max()), 0.0)  # type: ignore[union-attr]
         self.assertEqual(float(shot.profile[3].max()), 0.0)  # type: ignore[union-attr]
 
+    def test_ingest_stores_fixed_cadence_sequence_and_masks_uncalibrated_pump_flow(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        result = service.ingest_shot_profile(
+            shot_event(
+                "shot_1",
+                1,
+                temperature=[90.0, 91.0, 92.0],
+                target_temperature=[93.0, 93.0, 93.0],
+                pump_target_mode=[1, 1, 2],
+                valve_open=[False, True, True],
+                pump_flow_calibration_required=True,
+            )
+        )
+
+        self.assertTrue(result.stored)
+        sequence = result.shot.fixed_cadence_sequence  # type: ignore[union-attr]
+        self.assertIsNotNone(sequence)
+        self.assertEqual(sequence.step_count, 5)  # type: ignore[union-attr]
+        self.assertEqual(sequence.pump_flow_ml_s.tolist(), [0.0] * 5)  # type: ignore[union-attr]
+        self.assertEqual(sequence.pump_flow_target_ml_s.tolist(), [0.0] * 5)  # type: ignore[union-attr]
+        self.assertEqual(sequence.valve_open.tolist(), [0, 0, 1, 1, 1])  # type: ignore[union-attr]
+
     def test_utility_flush_does_not_consume_or_train_active_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()

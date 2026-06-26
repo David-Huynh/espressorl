@@ -484,13 +484,16 @@ should group rows by `install_id`, `machine_id`, `bean_context_id`, and
 `grinder_context_id`.
 
 The Dreamer helper `espresso_rl.dreamer.dataset.load_dreamer_episodes_from_jsonl`
-converts those canonical rows into `espresso_rl_dreamer_episode_v1` shot
-episodes for recurrent training. Each resampled profile sample becomes one
-per-step sensor observation with pressure, pump flow in `ml/s`, beverage mass
-flow in `g/s`, weight, and boiler temperature. The fixed 5x100 profile stores
-pressure, target pressure, pump flow, target pump flow, and weight; beverage
-flow is a separate sampled vector. Gaggimate MQTT `flow` is therefore never
-compared directly with its `target_flow`.
+converts those canonical rows into `espresso_rl_dreamer_episode_v2` shot
+episodes for recurrent training. Dreamer uses the additional named
+`fixed_cadence_sequence`, resampled onto exact 250 ms intervals from the first
+real telemetry sample. Shots remain variable length and are padded only during
+batching. Each step contains pressure, pump flow in `ml/s`, beverage mass flow
+in `g/s`, weight, boiler temperature, profile targets, explicit pump target
+mode, and valve state. The fixed 5x100 profile remains a duration-normalized
+summary for BO, profile scoring, and compatibility; it is not Dreamer's
+recurrent clock. Gaggimate MQTT `flow` is never compared directly with its
+`target_flow`.
 Relative grind, dose, the initial planned yield target, grinder calibration,
 and the default taste objective stay in `static_context`. Historical
 pressure/pump-flow/temperature setpoints are stored separately as observed profile
@@ -499,17 +502,18 @@ a future capability-gated control path supplies safe per-step actions such as
 `yield_stop_target_g` or `stop`. Pressure and flow targets are represented as
 profile targets/control modes, not as proof that pressure and flow are
 independently writable on a given machine. Dreamer episode construction requires
-sampled actual temperature, sampled resolved target temperature, and explicit
-per-step pump target mode. It also requires sampled beverage flow separately
-from pump flow. Scalar profile/final temperatures remain metadata and are never
-expanded into fabricated live telemetry.
+sampled actual temperature, sampled resolved target temperature, explicit
+per-step pump target mode, and valve state. It also requires sampled beverage
+flow separately from pump flow. Scalar profile/final temperatures remain
+metadata and are never expanded into fabricated live telemetry.
 `espresso_rl.dreamer.dataset.build_dreamer_episode_batch` then turns validated
 episodes into deterministic tensors for offline training: observations,
 observed profile targets plus active masks, dynamic action tensors plus
 presence masks, constraints, static context, terminal features, rewards,
 continuations, and step padding masks. The batch includes feature-name metadata
 so external trainers can audit the numeric layout instead of relying on
-implicit column order.
+implicit column order. `elapsed_seconds` advances by 0.25 on every valid step,
+and `step_duration_seconds` is 0.25 for valid steps and zero for padding.
 
 No export artifact uses pickle, model binaries, SQLite dumps, parquet, macros,
 absolute grinder settings, or another executable/opaque format. Trainers should

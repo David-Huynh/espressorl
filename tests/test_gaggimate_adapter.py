@@ -20,7 +20,7 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     RecommendationStatus,
 )
-from espresso_rl.domain.profile import resample_profile, resample_shot_metadata
+from espresso_rl.domain.profile import build_fixed_cadence_sequence, resample_profile, resample_shot_metadata
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 
 
@@ -94,6 +94,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "temperature": [86.0, 86.2, 86.5],
                 "target_temperature": [86.5, 86.5, 86.5],
                 "pump_target_mode": [1, 1, 2],
+                "valve_open": [False, True, True],
                 "weight": [0, 8, 36],
                 "dose_in_g": 18.5,
                 "target_yield_g": 40.0,
@@ -174,6 +175,10 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.temperature, [86.0, 86.2, 86.5])
         self.assertEqual(event.target_temperature, [86.5, 86.5, 86.5])
         self.assertEqual(event.pump_target_mode, [1, 1, 2])
+        self.assertEqual(event.valve_open, [False, True, True])
+        fixed_sequence = build_fixed_cadence_sequence(event)
+        self.assertEqual(fixed_sequence.step_count, 3)  # type: ignore[union-attr]
+        self.assertEqual(fixed_sequence.valve_open.tolist(), [0, 1, 1])  # type: ignore[union-attr]
         self.assertEqual(event.pump_flow_source, "gaggimate_pump_model")
         self.assertEqual(event.pump_flow_units, "ml_per_s")
         self.assertFalse(event.pump_flow_calibration_required)

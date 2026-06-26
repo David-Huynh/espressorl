@@ -11,6 +11,7 @@ from espresso_rl.domain.models import (
     PROFILE_DTYPE,
     PROFILE_SHAPE,
     PUMP_TARGET_MODE_DTYPE,
+    FixedCadenceShotSequence,
     FollowThroughState,
     Recommendation,
     RecommendationApplyStatus,
@@ -117,6 +118,7 @@ class SQLiteStore:
                 temperature_profile_blob BLOB,
                 target_temperature_profile_blob BLOB,
                 pump_target_mode_profile_blob BLOB,
+                fixed_cadence_sequence_json TEXT,
                 shot_end_state TEXT,
                 grinder_calibration_mode TEXT NOT NULL DEFAULT 'relative_calibrated',
                 grinder_step_direction TEXT NOT NULL DEFAULT 'higher_is_finer',
@@ -249,6 +251,7 @@ class SQLiteStore:
         self._ensure_column("shots", "temperature_profile_blob", "BLOB")
         self._ensure_column("shots", "target_temperature_profile_blob", "BLOB")
         self._ensure_column("shots", "pump_target_mode_profile_blob", "BLOB")
+        self._ensure_column("shots", "fixed_cadence_sequence_json", "TEXT")
         self._ensure_column("shots", "shot_end_state", "TEXT")
         self.conn.execute(
             """
@@ -322,7 +325,7 @@ class SQLiteShotRepository:
                 final_target_pressure, final_target_flow, final_valve_open,
                 profile_temperature_c, final_phase_temperature_c,
                 beverage_flow_profile_blob, temperature_profile_blob, target_temperature_profile_blob,
-                pump_target_mode_profile_blob,
+                pump_target_mode_profile_blob, fixed_cadence_sequence_json,
                 shot_end_state, grinder_calibration_mode,
                 grinder_step_direction, grinder_reference_label,
                 current_absolute_step, absolute_reference_step,
@@ -353,7 +356,7 @@ class SQLiteShotRepository:
                 :final_target_pressure, :final_target_flow, :final_valve_open,
                 :profile_temperature_c, :final_phase_temperature_c,
                 :beverage_flow_profile_blob, :temperature_profile_blob, :target_temperature_profile_blob,
-                :pump_target_mode_profile_blob,
+                :pump_target_mode_profile_blob, :fixed_cadence_sequence_json,
                 :shot_end_state, :grinder_calibration_mode,
                 :grinder_step_direction, :grinder_reference_label,
                 :current_absolute_step, :absolute_reference_step,
@@ -1082,6 +1085,7 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "temperature_profile_blob": _optional_profile_vector_to_blob(shot.temperature_profile),
         "target_temperature_profile_blob": _optional_profile_vector_to_blob(shot.target_temperature_profile),
         "pump_target_mode_profile_blob": _optional_pump_target_mode_to_blob(shot.pump_target_mode_profile),
+        "fixed_cadence_sequence_json": _fixed_cadence_sequence_to_json(shot.fixed_cadence_sequence),
         "shot_end_state": shot.shot_end_state,
         "grinder_calibration_mode": shot.grinder_calibration_mode.value,
         "grinder_step_direction": shot.grinder_step_direction.value,
@@ -1169,6 +1173,7 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         temperature_profile=_optional_profile_vector_from_blob(row["temperature_profile_blob"]),
         target_temperature_profile=_optional_profile_vector_from_blob(row["target_temperature_profile_blob"]),
         pump_target_mode_profile=_optional_pump_target_mode_from_blob(row["pump_target_mode_profile_blob"]),
+        fixed_cadence_sequence=_fixed_cadence_sequence_from_json(row["fixed_cadence_sequence_json"]),
         shot_end_state=row["shot_end_state"],
         grinder_calibration_mode=row["grinder_calibration_mode"],
         grinder_step_direction=row["grinder_step_direction"],
@@ -1202,6 +1207,21 @@ def _optional_pump_target_mode_from_blob(value: bytes | None) -> np.ndarray | No
     if value is None:
         return None
     return np.frombuffer(value, dtype=PUMP_TARGET_MODE_DTYPE).reshape(AUX_PROFILE_SHAPE).copy()
+
+
+def _fixed_cadence_sequence_to_json(value: FixedCadenceShotSequence | None) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _fixed_cadence_sequence_from_json(value: str | None) -> FixedCadenceShotSequence | None:
+    if value is None:
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError("fixed_cadence_sequence_json must contain an object")
+    return FixedCadenceShotSequence.from_dict(parsed)
 
 
 def _optional_bool_to_int(value: bool | None) -> int | None:

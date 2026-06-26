@@ -97,6 +97,7 @@ SHOT_RECORD_FIELDS = frozenset(
         "temperature_profile",
         "target_temperature_profile",
         "pump_target_mode_profile",
+        "fixed_cadence_sequence",
         "shot_end_state",
         "created_at",
         "updated_at",
@@ -254,20 +255,35 @@ def mask_untrusted_profile_channels(payload: dict[str, Any]) -> dict[str, Any]:
     """
     copied = dict(payload)
     profile = copied.get("profile_resampled")
-    if not isinstance(profile, list) or len(profile) != 5:
-        return copied
-    channels = [list(channel) if isinstance(channel, list) else channel for channel in profile]
-    target_flow = channels[3]
-    flow = channels[2]
-    flow_valid = payload.get("pump_flow_calibration_required") is not True and _channel_in_range(flow, 0, 20)
-    target_flow_valid = _channel_in_range(target_flow, 0, 20)
-    copied["profile_flow_valid"] = flow_valid
-    copied["profile_flow_masked"] = False
-    if not flow_valid or not target_flow_valid:
-        channels[2] = [0.0 for _ in range(100)]
-        channels[3] = [0.0 for _ in range(100)]
-        copied["profile_resampled"] = channels
-        copied["profile_flow_masked"] = True
+    if isinstance(profile, list) and len(profile) == 5:
+        channels = [list(channel) if isinstance(channel, list) else channel for channel in profile]
+        target_flow = channels[3]
+        flow = channels[2]
+        flow_valid = payload.get("pump_flow_calibration_required") is not True and _channel_in_range(flow, 0, 20)
+        target_flow_valid = _channel_in_range(target_flow, 0, 20)
+        copied["profile_flow_valid"] = flow_valid
+        copied["profile_flow_masked"] = False
+        if not flow_valid or not target_flow_valid:
+            channels[2] = [0.0 for _ in range(100)]
+            channels[3] = [0.0 for _ in range(100)]
+            copied["profile_resampled"] = channels
+            copied["profile_flow_masked"] = True
+    sequence = copied.get("fixed_cadence_sequence")
+    if isinstance(sequence, dict):
+        sequence_copy = deepcopy(sequence)
+        pump_flow = sequence_copy.get("pump_flow_ml_s")
+        pump_target = sequence_copy.get("pump_flow_target_ml_s")
+        if (
+            payload.get("pump_flow_calibration_required") is True
+            or not _channel_in_range(pump_flow, 0, 20)
+            or not _channel_in_range(pump_target, 0, 20)
+        ):
+            step_count = len(sequence_copy.get("pressure_bar") or [])
+            sequence_copy["pump_flow_ml_s"] = [0.0 for _ in range(step_count)]
+            sequence_copy["pump_flow_target_ml_s"] = [0.0 for _ in range(step_count)]
+            copied["profile_flow_valid"] = False
+            copied["profile_flow_masked"] = True
+        copied["fixed_cadence_sequence"] = sequence_copy
     return copied
 
 
@@ -353,6 +369,7 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_numeric_profile_vector(payload, "temperature_profile", 0, 160, errors)
     _optional_numeric_profile_vector(payload, "target_temperature_profile", 0, 160, errors)
     _optional_pump_target_mode_profile(payload, "pump_target_mode_profile", errors)
+    _optional_fixed_cadence_sequence(payload.get("fixed_cadence_sequence"), errors)
     _optional_enum(payload, "shot_end_state", {"finished", "manual_or_interrupted", "unknown"}, errors)
     _optional_string_list_enum(payload, "taste_tags", VALID_TASTE_TAGS, errors)
     _optional_number_range(payload, "created_at", 0, 9_007_199_254_740_991, errors)
@@ -483,6 +500,63 @@ def _optional_pump_target_mode_profile(payload: dict[str, Any], key: str, errors
         return
     if not all(isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2 for value in values):
         errors.append(f"{key} contains invalid pump target mode values")
+
+
+def _optional_fixed_cadence_sequence(value: object, errors: list[str]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        errors.append("fixed_cadence_sequence must be an object")
+        return
+    numeric_ranges = {
+        "pressure_bar": (0.0, 15.0),
+        "pressure_target_bar": (0.0, 15.0),
+        "pump_flow_ml_s": (0.0, 20.0),
+        "pump_flow_target_ml_s": (0.0, 20.0),
+        "beverage_flow_g_s": (0.0, 20.0),
+        "weight_g": (-1.0, 120.0),
+        "temperature_c": (0.0, 160.0),
+        "temperature_target_c": (0.0, 160.0),
+    }
+    allowed = {"sample_interval_ms", "pump_target_mode", "valve_open", *numeric_ranges}
+    unknown = sorted(str(key) for key in value if key not in allowed)
+    if unknown:
+        errors.append(f"fixed_cadence_sequence contains unknown fields: {', '.join(unknown[:10])}")
+    if value.get("sample_interval_ms") != 250:
+        errors.append("fixed_cadence_sequence.sample_interval_ms must be 250")
+
+    lengths: set[int] = set()
+    for key, (minimum, maximum) in numeric_ranges.items():
+        channel = value.get(key)
+        if not isinstance(channel, list):
+            errors.append(f"fixed_cadence_sequence.{key} must be a list")
+            continue
+        lengths.add(len(channel))
+        if not _numeric_vector_finite(channel):
+            errors.append(f"fixed_cadence_sequence.{key} contains non-finite or nonnumeric values")
+        elif not _channel_in_range(channel, minimum, maximum):
+            errors.append(f"fixed_cadence_sequence.{key} out of range")
+
+    pump_modes = value.get("pump_target_mode")
+    if not isinstance(pump_modes, list):
+        errors.append("fixed_cadence_sequence.pump_target_mode must be a list")
+    else:
+        lengths.add(len(pump_modes))
+        if not all(isinstance(item, int) and not isinstance(item, bool) and 0 <= item <= 2 for item in pump_modes):
+            errors.append("fixed_cadence_sequence.pump_target_mode contains invalid values")
+
+    valve_open = value.get("valve_open")
+    if not isinstance(valve_open, list):
+        errors.append("fixed_cadence_sequence.valve_open must be a list")
+    else:
+        lengths.add(len(valve_open))
+        if not all(isinstance(item, bool) for item in valve_open):
+            errors.append("fixed_cadence_sequence.valve_open contains invalid values")
+
+    if len(lengths) != 1:
+        errors.append("fixed_cadence_sequence channels must have matching lengths")
+    elif not 2 <= next(iter(lengths)) <= 500:
+        errors.append("fixed_cadence_sequence must contain 2..500 steps")
 
 
 def _require_string(payload: dict[str, Any], key: str, errors: list[str], max_len: int = 160) -> None:
@@ -665,7 +739,7 @@ def _is_sha256_hex(value: str) -> bool:
 
 
 def _channel_in_range(channel: Any, minimum: float, maximum: float) -> bool:
-    if not _channel_numeric_finite(channel):
+    if not _numeric_vector_finite(channel):
         return False
     for value in channel:
         parsed = float(value)
@@ -676,6 +750,12 @@ def _channel_in_range(channel: Any, minimum: float, maximum: float) -> bool:
 
 def _channel_numeric_finite(channel: Any) -> bool:
     if not isinstance(channel, list) or len(channel) != 100:
+        return False
+    return _numeric_vector_finite(channel)
+
+
+def _numeric_vector_finite(channel: Any) -> bool:
+    if not isinstance(channel, list):
         return False
     for value in channel:
         if not isinstance(value, (int, float)) or isinstance(value, bool):

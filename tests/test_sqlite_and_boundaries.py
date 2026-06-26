@@ -157,12 +157,14 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         temperature=[86.0, 86.5, 87.0],
                         target_temperature=[86.5, 86.5, 87.0],
                         pump_target_mode=[1, 1, 2],
+                        valve_open=[False, True, True],
                     )
                 )
                 self.assertIsNotNone(result.shot.temperature_profile)
                 self.assertIsNotNone(result.shot.target_temperature_profile)
                 self.assertIsNotNone(result.shot.pump_target_mode_profile)
                 self.assertIsNotNone(result.shot.beverage_flow_profile)
+                self.assertIsNotNone(result.shot.fixed_cadence_sequence)
                 feedback = service.record_feedback(
                     ShotFeedbackEvent(
                         shot_id="shot_1",
@@ -197,6 +199,8 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertIsNotNone(stored_shot.pump_target_mode_profile)  # type: ignore[union-attr]
                 self.assertIsNotNone(stored_shot.beverage_flow_profile)  # type: ignore[union-attr]
                 self.assertEqual(stored_shot.pump_target_mode_profile[-1].item(), 2)  # type: ignore[union-attr]
+                self.assertEqual(stored_shot.fixed_cadence_sequence.step_count, 5)  # type: ignore[union-attr]
+                self.assertEqual(stored_shot.fixed_cadence_sequence.valve_open.tolist(), [0, 0, 1, 1, 1])  # type: ignore[union-attr]
                 self.assertTrue(stored_shot.feedback_recorded)  # type: ignore[union-attr]
                 self.assertEqual(stored_rec.reason, feedback.recommendation.reason)  # type: ignore[union-attr]
                 self.assertEqual(stored_rec.apply_status, RecommendationApplyStatus.MANUAL_REQUIRED)  # type: ignore[union-attr]

@@ -5,8 +5,8 @@ Dreamer training dataset helpers.
 
 The legacy `sample_batch` path keeps existing shot-sequence training code
 working. The canonical episode loader below converts validated
-`espresso_rl_training_transition_v1` rows into shot episodes where each
-resampled profile sample is one recurrent time step.
+`espresso_rl_training_transition_v1` rows into variable-length shot episodes
+whose recurrent time steps are always 250 milliseconds apart.
 """
 
 import json
@@ -30,7 +30,6 @@ from .actor import FactoredCategoricalActor
 SEQ_LEN = 8
 MIN_SHOTS = 4
 
-_PROFILE_SAMPLE_COUNT = 100
 _PUMP_TARGET_MODE_PRESSURE = 1
 _PUMP_TARGET_MODE_FLOW = 2
 _DEFAULT_CONSTRAINTS = {
@@ -43,7 +42,13 @@ _DEFAULT_CONSTRAINTS = {
     "stop_control_allowed": False,
 }
 DREAMER_OBSERVATION_FEATURES = DREAMER_PROFILE_CHANNELS
-DREAMER_OBSERVED_TARGET_FEATURES = ("pressure_target_bar", "flow_target_ml_s", "temperature_target_c")
+DREAMER_OBSERVED_TARGET_FEATURES = (
+    "pressure_target_bar",
+    "flow_target_ml_s",
+    "temperature_target_c",
+    "pump_target_mode",
+    "valve_open",
+)
 DREAMER_DYNAMIC_ACTION_FEATURES = (
     "pressure_target_bar",
     "flow_target_ml_s",
@@ -238,7 +243,8 @@ def build_dreamer_episode_batch(
     dynamic_actions = np.zeros((batch_size, max_steps, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=np.float32)
     dynamic_action_mask = np.zeros_like(dynamic_actions)
     constraints = np.zeros((batch_size, max_steps, len(DREAMER_CONSTRAINT_FEATURES)), dtype=np.float32)
-    elapsed = np.zeros((batch_size, max_steps, 1), dtype=np.float32)
+    elapsed_seconds = np.zeros((batch_size, max_steps, 1), dtype=np.float32)
+    step_duration_seconds = np.zeros((batch_size, max_steps, 1), dtype=np.float32)
     step_mask = np.zeros((batch_size, max_steps), dtype=np.float32)
     continuations = np.zeros((batch_size, max_steps), dtype=np.float32)
     rewards = np.zeros((batch_size, max_steps), dtype=np.float32)
@@ -275,7 +281,8 @@ def build_dreamer_episode_batch(
                 step["constraints"],
                 DREAMER_CONSTRAINT_FEATURES,
             )
-            elapsed[batch_index, step_index, 0] = float(step["elapsed_fraction"])
+            elapsed_seconds[batch_index, step_index, 0] = float(step["elapsed_ms"]) / 1000.0
+            step_duration_seconds[batch_index, step_index, 0] = float(episode["sample_interval_ms"]) / 1000.0
             step_mask[batch_index, step_index] = 1.0
             continuations[batch_index, step_index] = 1.0 if step_index < valid_step_count - 1 else 0.0
         rewards[batch_index, valid_step_count - 1] = terminal_reward
@@ -288,7 +295,8 @@ def build_dreamer_episode_batch(
         "dynamic_actions": torch.tensor(dynamic_actions, dtype=torch.float32, device=target_device),
         "dynamic_action_mask": torch.tensor(dynamic_action_mask, dtype=torch.float32, device=target_device),
         "constraints": torch.tensor(constraints, dtype=torch.float32, device=target_device),
-        "elapsed": torch.tensor(elapsed, dtype=torch.float32, device=target_device),
+        "elapsed_seconds": torch.tensor(elapsed_seconds, dtype=torch.float32, device=target_device),
+        "step_duration_seconds": torch.tensor(step_duration_seconds, dtype=torch.float32, device=target_device),
         "step_mask": torch.tensor(step_mask, dtype=torch.float32, device=target_device),
         "continuations": torch.tensor(continuations, dtype=torch.float32, device=target_device),
         "rewards": torch.tensor(rewards, dtype=torch.float32, device=target_device),
@@ -380,7 +388,7 @@ def _encode_terminal(terminal: dict[str, Any]) -> np.ndarray:
 def _encode_object(value: dict[str, Any], features: tuple[str, ...]) -> np.ndarray:
     encoded = np.zeros(len(features), dtype=np.float32)
     for feature_index, feature in enumerate(features):
-        encoded[feature_index] = _finite_or_zero(value.get(feature))
+        encoded[feature_index] = _bool_or_number(value.get(feature))
     return encoded
 
 
@@ -397,6 +405,8 @@ def _encode_observed_target_mask(observed_profile_target: dict[str, Any]) -> np.
             1.0 if observed_profile_target.get("pressure_target_active") is True else 0.0,
             1.0 if observed_profile_target.get("flow_target_active") is True else 0.0,
             1.0 if observed_profile_target.get("temperature_target_active") is True else 0.0,
+            1.0,
+            1.0,
         ],
         dtype=np.float32,
     )
@@ -448,7 +458,7 @@ def _episode_from_training_row(row: dict[str, Any]) -> dict[str, Any]:
     action = row["action"]
     observation = row["observation"]
     reward = row["reward"]
-    profile = observation["profile_resampled"]
+    sequence = observation["fixed_cadence_sequence"]
 
     group_key = {
         "install_id": source["install_id"],
@@ -461,11 +471,12 @@ def _episode_from_training_row(row: dict[str, Any]) -> dict[str, Any]:
         "schema_version": DREAMER_EPISODE_SCHEMA_VERSION,
         "episode_id": f"training_row_{row['training_row_id']}",
         "source_training_row_id": row["training_row_id"],
+        "sample_interval_ms": sequence["sample_interval_ms"],
         "group_key": group_key,
         "source": dict(source),
         "context": dict(context),
         "static_context": _static_context(action, context, observation),
-        "steps": _profile_steps(profile, observation),
+        "steps": _fixed_cadence_steps(sequence, observation),
         "terminal": _terminal(observation, reward),
     }
     recommendation = row.get("recommendation")
@@ -496,41 +507,40 @@ def _static_context(
     )
 
 
-def _profile_steps(profile: list[list[float]], observation: dict[str, Any]) -> list[dict[str, Any]]:
+def _fixed_cadence_steps(sequence: dict[str, Any], observation: dict[str, Any]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
-    last_index = _PROFILE_SAMPLE_COUNT - 1
-    beverage_flow_profile = _required_profile_vector(observation["beverage_flow_profile"])
-    temperature_profile = _required_profile_vector(observation["temperature_profile"])
-    target_temperature_profile = _required_profile_vector(observation["target_temperature_profile"])
-    pump_target_mode_profile = _required_mode_profile(observation["pump_target_mode_profile"])
+    sample_interval_ms = int(sequence["sample_interval_ms"])
+    step_count = len(sequence["pressure_bar"])
     flow_targets_masked = observation.get("profile_flow_masked") is True
-    for index in range(_PROFILE_SAMPLE_COUNT):
-        pressure_target = profile[1][index]
-        flow_target = profile[3][index]
-        pump_target_mode = pump_target_mode_profile[index]
+    for index in range(step_count):
+        pressure_target = sequence["pressure_target_bar"][index]
+        flow_target = sequence["pump_flow_target_ml_s"][index]
+        pump_target_mode = sequence["pump_target_mode"][index]
         pressure_target_active = pump_target_mode == _PUMP_TARGET_MODE_PRESSURE
         flow_target_active = pump_target_mode == _PUMP_TARGET_MODE_FLOW
         if flow_targets_masked:
             flow_target_active = False
         step_observation = {
-            "pressure_bar": profile[0][index],
-            "pump_flow_ml_s": profile[2][index],
-            "beverage_flow_g_s": beverage_flow_profile[index],
-            "weight_g": profile[4][index],
-            "temperature_c": temperature_profile[index],
+            "pressure_bar": sequence["pressure_bar"][index],
+            "pump_flow_ml_s": sequence["pump_flow_ml_s"][index],
+            "beverage_flow_g_s": sequence["beverage_flow_g_s"][index],
+            "weight_g": sequence["weight_g"][index],
+            "temperature_c": sequence["temperature_c"][index],
         }
         observed_profile_target = {
             "pressure_target_bar": pressure_target,
             "pressure_target_active": pressure_target_active,
             "flow_target_ml_s": flow_target,
             "flow_target_active": flow_target_active,
-            "temperature_target_c": target_temperature_profile[index],
-            "temperature_target_active": target_temperature_profile[index] > 0.0,
+            "temperature_target_c": sequence["temperature_target_c"][index],
+            "temperature_target_active": sequence["temperature_target_c"][index] > 0.0,
+            "pump_target_mode": pump_target_mode,
+            "valve_open": sequence["valve_open"][index],
         }
         steps.append(
             {
                 "step_index": index,
-                "elapsed_fraction": round(index / last_index, 6),
+                "elapsed_ms": index * sample_interval_ms,
                 "observation": step_observation,
                 "observed_profile_target": observed_profile_target,
                 "dynamic_action": None,
@@ -541,25 +551,11 @@ def _profile_steps(profile: list[list[float]], observation: dict[str, Any]) -> l
 
 
 def _require_dreamer_profile_inputs(observation: dict[str, Any], row_id: object) -> None:
-    for key in (
-        "beverage_flow_profile",
-        "temperature_profile",
-        "target_temperature_profile",
-        "pump_target_mode_profile",
-    ):
-        value = observation.get(key)
-        if not isinstance(value, list) or len(value) != _PROFILE_SAMPLE_COUNT:
-            raise DreamerEpisodeDatasetError(
-                f"training row {row_id} is missing required observation.{key}"
-            )
-
-
-def _required_profile_vector(value: object) -> list[float]:
-    return [_finite_or_zero(item) for item in value]  # type: ignore[union-attr]
-
-
-def _required_mode_profile(value: object) -> list[int]:
-    return [int(item) for item in value]  # type: ignore[union-attr]
+    value = observation.get("fixed_cadence_sequence")
+    if not isinstance(value, dict):
+        raise DreamerEpisodeDatasetError(
+            f"training row {row_id} is missing required observation.fixed_cadence_sequence"
+        )
 
 
 def _terminal(observation: dict[str, Any], reward: dict[str, Any]) -> dict[str, Any]:

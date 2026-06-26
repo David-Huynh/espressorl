@@ -124,6 +124,7 @@ class ShotProfileEvent:
     temperature: list[float] | None = None
     target_temperature: list[float] | None = None
     pump_target_mode: list[int] | None = None
+    valve_open: list[bool] | None = None
     relative_grind_steps_from_reference: float | None = None
     beverage_out_g: float | None = None
     shot_time_s: float | None = None
@@ -180,6 +181,9 @@ class ShotProfileEvent:
                 object.__setattr__(self, name, _numbers(value, name))
         if self.pump_target_mode is not None:
             object.__setattr__(self, "pump_target_mode", _pump_target_modes(self.pump_target_mode, "pump_target_mode"))
+        if self.valve_open is not None:
+            if not isinstance(self.valve_open, list) or any(not isinstance(value, bool) for value in self.valve_open):
+                raise ValueError("valve_open must contain only booleans")
         object.__setattr__(self, "microns_per_step", _number(self.microns_per_step, "microns_per_step"))
         object.__setattr__(self, "dose_in_g", _number(self.dose_in_g, "dose_in_g"))
         object.__setattr__(self, "target_yield_g", _number(self.target_yield_g, "target_yield_g"))
@@ -299,8 +303,17 @@ class ShotProfileEvent:
             lengths.add(len(self.target_temperature))
         if self.pump_target_mode is not None:
             lengths.add(len(self.pump_target_mode))
+        if self.valve_open is not None:
+            lengths.add(len(self.valve_open))
         if len(lengths) != 1:
             raise ValueError("shot profile arrays must have matching lengths")
+        if len(self.time_ms) > 500:
+            raise ValueError("shot profile arrays must not exceed 500 samples")
+        if any(value < 0 for value in self.time_ms) or any(
+            current <= previous
+            for previous, current in zip(self.time_ms, self.time_ms[1:])
+        ):
+            raise ValueError("time_ms must be nonnegative and strictly increasing")
         if self.microns_per_step <= 0:
             raise ValueError("microns_per_step must be positive")
         if self.dose_in_g <= 0:

@@ -6,7 +6,13 @@ from dataclasses import dataclass
 import numpy as np
 
 from .events import ShotProfileEvent
-from .models import PROFILE_DTYPE, PROFILE_SHAPE
+from .models import (
+    FIXED_CADENCE_MAX_STEPS,
+    FIXED_CADENCE_SAMPLE_INTERVAL_MS,
+    PROFILE_DTYPE,
+    PROFILE_SHAPE,
+    FixedCadenceShotSequence,
+)
 
 CHANNEL_NAMES = ("pressure", "target_pressure", "pump_flow", "target_flow", "weight")
 PUMP_TARGET_MODE_SIMPLE = 0
@@ -75,6 +81,67 @@ def resample_shot_metadata(event: ShotProfileEvent, n_points: int = PROFILE_SHAP
         temperature_profile=temperature_profile,
         target_temperature_profile=target_temperature_profile,
         pump_target_mode_profile=pump_target_mode_profile,
+    )
+
+
+def build_fixed_cadence_sequence(
+    event: ShotProfileEvent,
+    sample_interval_ms: int = FIXED_CADENCE_SAMPLE_INTERVAL_MS,
+) -> FixedCadenceShotSequence | None:
+    """Build a variable-length sequence whose adjacent steps have a fixed dt."""
+    if sample_interval_ms != FIXED_CADENCE_SAMPLE_INTERVAL_MS:
+        raise ValueError(
+            f"sample_interval_ms must be {FIXED_CADENCE_SAMPLE_INTERVAL_MS}"
+        )
+    if event.temperature is None or event.target_temperature is None:
+        return None
+    if event.pump_target_mode is None or event.valve_open is None:
+        return None
+
+    time_ms = np.asarray(event.time_ms, dtype=np.float64)
+    if len(time_ms) < 2:
+        return None
+    if np.any(np.diff(time_ms) <= 0):
+        raise ValueError("time_ms must be strictly increasing")
+
+    available_duration_ms = time_ms[-1] - time_ms[0]
+    last_step_index = int(np.floor(available_duration_ms / sample_interval_ms))
+    if last_step_index < 1:
+        return None
+    fixed_time_ms = time_ms[0] + np.arange(last_step_index + 1, dtype=np.float64) * sample_interval_ms
+    if len(fixed_time_ms) > FIXED_CADENCE_MAX_STEPS:
+        raise ValueError(
+            f"fixed-cadence sequence exceeds {FIXED_CADENCE_MAX_STEPS} steps"
+        )
+
+    continuous_channels = {
+        "pressure_bar": (event.pressure, PRESSURE_RANGE),
+        "pressure_target_bar": (event.target_pressure, PRESSURE_RANGE),
+        "pump_flow_ml_s": (event.pump_flow, FLOW_RANGE),
+        "pump_flow_target_ml_s": (event.target_flow, FLOW_RANGE),
+        "beverage_flow_g_s": (event.beverage_flow, FLOW_RANGE),
+        "weight_g": (event.weight, (-1.0, 120.0)),
+        "temperature_c": (event.temperature, TEMPERATURE_RANGE),
+        "temperature_target_c": (event.target_temperature, TEMPERATURE_RANGE),
+    }
+    resampled: dict[str, np.ndarray] = {}
+    for field_name, (values, allowed_range) in continuous_channels.items():
+        channel = np.interp(fixed_time_ms, time_ms, np.asarray(values, dtype=np.float64)).astype(PROFILE_DTYPE)
+        if not _channel_values_valid(channel, *allowed_range):
+            return None
+        resampled[field_name] = channel
+
+    pump_target_mode = _sample_previous(time_ms, event.pump_target_mode, fixed_time_ms, dtype=np.uint8)
+    valve_open = _sample_previous(time_ms, event.valve_open, fixed_time_ms, dtype=np.uint8)
+    if event.pump_flow_calibration_required:
+        resampled["pump_flow_ml_s"] = np.zeros(len(fixed_time_ms), dtype=PROFILE_DTYPE)
+        resampled["pump_flow_target_ml_s"] = np.zeros(len(fixed_time_ms), dtype=PROFILE_DTYPE)
+
+    return FixedCadenceShotSequence(
+        sample_interval_ms=sample_interval_ms,
+        pump_target_mode=pump_target_mode,
+        valve_open=valve_open,
+        **resampled,
     )
 
 
@@ -186,3 +253,16 @@ def _resample_optional_step_channel(
     indexes = np.searchsorted(time_ms, t_uniform, side="right") - 1
     indexes = np.clip(indexes, 0, len(raw) - 1)
     return raw[indexes].astype(np.uint8)
+
+
+def _sample_previous(
+    source_time_ms: np.ndarray,
+    values: list[int] | list[bool],
+    target_time_ms: np.ndarray,
+    *,
+    dtype: type[np.uint8],
+) -> np.ndarray:
+    raw = np.asarray(values, dtype=dtype)
+    indexes = np.searchsorted(source_time_ms, target_time_ms, side="right") - 1
+    indexes = np.clip(indexes, 0, len(raw) - 1)
+    return raw[indexes].astype(dtype)

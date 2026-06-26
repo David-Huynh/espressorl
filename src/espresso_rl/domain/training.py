@@ -97,6 +97,7 @@ _OBSERVATION_FIELDS = frozenset(
         "temperature_profile",
         "target_temperature_profile",
         "pump_target_mode_profile",
+        "fixed_cadence_sequence",
         "shot_end_state",
     }
 )
@@ -260,6 +261,11 @@ def validate_training_transition(row: dict[str, Any]) -> list[str]:
             "observation.pump_target_mode_profile",
             errors,
         )
+        _optional_fixed_cadence_sequence(
+            observation.get("fixed_cadence_sequence"),
+            "observation.fixed_cadence_sequence",
+            errors,
+        )
         _optional_string(observation.get("shot_end_state"), "observation.shot_end_state", errors)
         profile = observation.get("profile_resampled")
         if profile is not None:
@@ -420,3 +426,58 @@ def _optional_pump_target_mode_profile(values: object, label: str, errors: list[
         return
     if not all(isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2 for value in values):
         errors.append(f"{label} contains invalid pump target mode values")
+
+
+def _optional_fixed_cadence_sequence(value: object, label: str, errors: list[str]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        errors.append(f"{label} must be an object")
+        return
+    numeric_ranges = {
+        "pressure_bar": (0.0, 15.0),
+        "pressure_target_bar": (0.0, 15.0),
+        "pump_flow_ml_s": (0.0, 20.0),
+        "pump_flow_target_ml_s": (0.0, 20.0),
+        "beverage_flow_g_s": (0.0, 20.0),
+        "weight_g": (-1.0, 120.0),
+        "temperature_c": (0.0, 160.0),
+        "temperature_target_c": (0.0, 160.0),
+    }
+    allowed = {"sample_interval_ms", "pump_target_mode", "valve_open", *numeric_ranges}
+    _reject_unknown_fields(value, frozenset(allowed), errors, path=label)
+    if value.get("sample_interval_ms") != 250:
+        errors.append(f"{label}.sample_interval_ms must be 250")
+
+    lengths: set[int] = set()
+    for key, (minimum, maximum) in numeric_ranges.items():
+        values = value.get(key)
+        if not isinstance(values, list):
+            errors.append(f"{label}.{key} must be a list")
+            continue
+        lengths.add(len(values))
+        if not all(_is_finite_number(item) for item in values):
+            errors.append(f"{label}.{key} contains non-finite values")
+        elif not all(minimum <= float(item) <= maximum for item in values):
+            errors.append(f"{label}.{key} out of range")
+
+    pump_modes = value.get("pump_target_mode")
+    if not isinstance(pump_modes, list):
+        errors.append(f"{label}.pump_target_mode must be a list")
+    else:
+        lengths.add(len(pump_modes))
+        if not all(isinstance(item, int) and not isinstance(item, bool) and 0 <= item <= 2 for item in pump_modes):
+            errors.append(f"{label}.pump_target_mode contains invalid values")
+
+    valve_open = value.get("valve_open")
+    if not isinstance(valve_open, list):
+        errors.append(f"{label}.valve_open must be a list")
+    else:
+        lengths.add(len(valve_open))
+        if not all(isinstance(item, bool) for item in valve_open):
+            errors.append(f"{label}.valve_open contains invalid values")
+
+    if len(lengths) != 1:
+        errors.append(f"{label} channels must have matching lengths")
+    elif not 2 <= next(iter(lengths)) <= 500:
+        errors.append(f"{label} must contain 2..500 steps")
