@@ -44,7 +44,7 @@ class CommunityRawUpload:
             raise ValueError("install_id is required")
         if not self.upload_id:
             raise ValueError("upload_id is required")
-        if len(self.payload_hash) != 64:
+        if len(self.payload_hash) != 64 or any(char not in "0123456789abcdef" for char in self.payload_hash.lower()):
             raise ValueError("payload_hash must be a sha256 hex digest")
         if self.event_type not in {"shot_record", "recommendation_record"}:
             raise ValueError("unsupported community upload event_type")

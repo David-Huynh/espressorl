@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from espresso_rl.adapters.sqlite_repositories import SQLiteShotRepository, SQLiteStore, SQLiteUploadQueueRepository
+from espresso_rl.application.upload_payloads import payload_hash as hash_payload_json
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.application.upload_validation import (
     mask_untrusted_profile_channels,
@@ -57,12 +58,13 @@ def queue_item(
     *,
     local_record_id: str = "shot_1",
     status: UploadQueueStatus = UploadQueueStatus.REJECTED,
+    payload_hash_override: str | None = None,
 ) -> UploadQueueItem:
     return UploadQueueItem(
         upload_id=upload_id,
         local_record_type="shot",
         local_record_id=local_record_id,
-        payload_hash=upload_id,
+        payload_hash=payload_hash_override or hash_payload_json(payload_json),
         payload_json=payload_json,
         status=status,
         attempt_count=3,
@@ -261,6 +263,29 @@ class UploadMaintenanceTests(unittest.TestCase):
                 self.assertEqual(invalid["updated_at"], 10)
                 self.assertIn("preflight failed", invalid["error_message"])
                 self.assertIn("shot_type must be espresso", invalid["error_message"])
+
+    def test_requeue_rejects_payload_hash_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                queue = SQLiteUploadQueueRepository(store)
+                queue.enqueue(
+                    queue_item(
+                        "tampered",
+                        payload(),
+                        payload_hash_override="0" * 64,
+                    )
+                )
+                service = UploadQueueMaintenanceService(queue, clock=lambda: 10)
+
+                result = service.requeue_valid_rejected(limit=10)
+
+                self.assertEqual(result.requeued, 0)
+                self.assertEqual(result.skipped, 1)
+                row = store.conn.execute(
+                    "SELECT status, error_message FROM upload_queue WHERE upload_id='tampered'"
+                ).fetchone()
+                self.assertEqual(row["status"], "rejected")
+                self.assertIn("payload_hash does not match payload_json", row["error_message"])
 
     def test_latest_rejected_summary_does_not_expose_payload_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

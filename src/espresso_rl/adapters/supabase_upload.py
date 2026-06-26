@@ -10,7 +10,7 @@ from typing import Callable
 from urllib import error, request
 
 from espresso_rl.domain.models import UploadQueueItem, UploadQueueStatus
-from espresso_rl.application.upload_validation import validate_upload_payload_json
+from espresso_rl.application.upload_validation import validate_upload_envelope
 from espresso_rl.ports.repositories import UploadQueueRepository
 
 logger = logging.getLogger(__name__)
@@ -56,10 +56,17 @@ class SignedSupabaseUploadClient:
         self._config = config
 
     def upload(self, item: UploadQueueItem) -> None:
-        body = item.payload_json.encode("utf-8")
-        if len(body) > self._config.max_payload_bytes:
-            raise UploadRejected(413, "payload too large")
+        validation = validate_upload_envelope(
+            item.payload_json,
+            item.payload_hash,
+            expected_install_id=self._config.install_id,
+            max_payload_bytes=self._config.max_payload_bytes,
+        )
+        if not validation.ok:
+            status = 413 if "payload too large" in validation.errors else 422
+            raise UploadRejected(status, "local envelope failed: " + "; ".join(validation.errors[:3]))
 
+        body = item.payload_json.encode("utf-8")
         timestamp = str(int(time.time()))
         signature = self._signature(timestamp, item.payload_json)
         headers = {
@@ -116,7 +123,7 @@ class UploadQueueWorker:
         uploaded = 0
         for item in self._queue.list_ready(now=now, limit=limit):
             try:
-                validation = validate_upload_payload_json(item.payload_json)
+                validation = validate_upload_envelope(item.payload_json, item.payload_hash)
                 if not validation.ok:
                     raise UploadRejected(422, "local preflight failed: " + "; ".join(validation.errors[:3]))
                 self._queue.update_status(

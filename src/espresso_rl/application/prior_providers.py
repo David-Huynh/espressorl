@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 from espresso_rl.application.community_priors import (
     COMMUNITY_PRIOR_OBSERVATION_NOISE,
+    DEFAULT_MAX_PRIOR_POINTS_PER_CONTEXT,
     MAX_COMMUNITY_PRIOR_CONFIDENCE,
     community_prior_context_key,
 )
@@ -12,6 +13,11 @@ from espresso_rl.domain.models import FollowThroughState, RecommendationDecision
 from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
 from espresso_rl.ports.community import CommunityWarehouseRepository
 from espresso_rl.ports.optimizers import PriorProvider
+
+
+DEFAULT_LOCAL_HISTORY_PRIOR_POINTS = 64
+MIN_LOCAL_HISTORY_RANK_SCALE = 0.35
+MAX_LOCAL_HISTORY_OBSERVATION_NOISE = 0.75
 
 
 class CompositePriorProvider:
@@ -26,7 +32,7 @@ class CompositePriorProvider:
 
 
 class LocalHistoryPriorProvider:
-    def __init__(self, limit: int = 5) -> None:
+    def __init__(self, limit: int = DEFAULT_LOCAL_HISTORY_PRIOR_POINTS) -> None:
         self._limit = limit
 
     def get_prior_points(self, context: OptimizationContext) -> list[PriorPoint]:
@@ -37,7 +43,8 @@ class LocalHistoryPriorProvider:
         ]
         shots = sorted(shots, key=_shot_prior_score, reverse=True)[: self._limit]
         points: list[PriorPoint] = []
-        for shot in shots:
+        for rank, shot in enumerate(shots, start=1):
+            rank_scale = max(MIN_LOCAL_HISTORY_RANK_SCALE, 1.0 / (rank ** 0.5))
             target_ratio = shot.target_ratio or shot.target_yield_g / shot.dose_in_g
             points.append(
                 PriorPoint(
@@ -47,8 +54,8 @@ class LocalHistoryPriorProvider:
                     target_yield_g=shot.target_yield_g,
                     target_ratio=target_ratio,
                     predicted_reward=max(0.0, min(1.0, shot.reward or 0.0)),
-                    confidence=max(0.0, min(0.8, shot.reward_confidence * 0.8)),
-                    observation_noise=0.05,
+                    confidence=max(0.0, min(0.8, shot.reward_confidence * 0.8)) * rank_scale,
+                    observation_noise=min(MAX_LOCAL_HISTORY_OBSERVATION_NOISE, 0.05 / rank_scale),
                     source="local_history",
                     reason="High-confidence local history point.",
                 )
@@ -61,7 +68,7 @@ class CommunityPriorProvider:
         self,
         repository: CommunityWarehouseRepository,
         *,
-        max_points: int = 5,
+        max_points: int = DEFAULT_MAX_PRIOR_POINTS_PER_CONTEXT,
     ) -> None:
         self._repository = repository
         self._max_points = max_points
@@ -78,7 +85,15 @@ class CommunityPriorProvider:
         priors = self._repository.list_community_priors(context_key, limit=self._max_points)
         points: list[PriorPoint] = []
         for prior in priors:
-            points.extend(_prior_points_from_community_prior(prior.context_key, prior.prior_json, prior.confidence, context_key))
+            points.extend(
+                _prior_points_from_community_prior(
+                    prior.context_key,
+                    prior.prior_json,
+                    prior.confidence,
+                    context_key,
+                    max_points=self._max_points,
+                )
+            )
         return points[: self._max_points]
 
 
@@ -87,6 +102,7 @@ def _prior_points_from_community_prior(
     prior_json: dict[str, Any],
     prior_confidence: float,
     expected_context_key: str,
+    max_points: int = DEFAULT_MAX_PRIOR_POINTS_PER_CONTEXT,
 ) -> list[PriorPoint]:
     if prior_context_key != expected_context_key:
         return []
@@ -107,7 +123,7 @@ def _prior_points_from_community_prior(
         return []
 
     points: list[PriorPoint] = []
-    for point in points_json[:5]:
+    for point in points_json[:max(1, int(max_points))]:
         if not isinstance(point, dict):
             continue
         prior_point = _community_point_from_json(point, prior_confidence)

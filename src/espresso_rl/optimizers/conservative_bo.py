@@ -15,6 +15,8 @@ from espresso_rl.domain.models import (
 from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
 from espresso_rl.domain.safety import clamp_candidate_recipe, validate_recommendation
 
+MAX_USABLE_PRIOR_POINTS = 64
+
 
 class ConservativeBOOptimizer:
     """
@@ -435,7 +437,7 @@ class ConservativeBOOptimizer:
             if not context.safety_bounds.target_ratio_min <= point.target_ratio <= context.safety_bounds.target_ratio_max:
                 continue
             points.append(point)
-        return points[:10]
+        return points[:MAX_USABLE_PRIOR_POINTS]
 
     def _warm_start_reason(self, prior_points: list[PriorPoint]) -> str:
         if any(point.source == "local_bean_history" for point in prior_points):

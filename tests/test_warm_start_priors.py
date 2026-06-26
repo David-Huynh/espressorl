@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from espresso_rl.application.prior_providers import CommunityPriorProvider
+from espresso_rl.application.prior_providers import CommunityPriorProvider, LocalHistoryPriorProvider
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityPrior
@@ -398,6 +398,65 @@ class WarmStartPriorTests(unittest.TestCase):
         self.assertEqual(points[0].source, "community")
         self.assertEqual(points[0].confidence, 0.18)
         self.assertEqual(points[0].observation_noise, 0.5)
+
+    def test_community_provider_consumes_more_than_five_low_weight_prior_points(self) -> None:
+        prior = released_prior(confidence=0.12, point_confidence=0.02, observation_noise=0.5)
+        prior.prior_json["points"] = [
+            {
+                "grind_delta_um_from_current": float(index),
+                "dose_g": 18.0,
+                "target_yield_g": 36.0,
+                "target_ratio": 2.0,
+                "predicted_reward": 0.4 + index * 0.01,
+                "confidence": 0.02,
+                "observation_noise": 0.5,
+            }
+            for index in range(12)
+        ]
+        repo = FakeCommunityPriorRepo([prior])
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=Recipe(
+                relative_grind_steps_from_reference=42,
+                microns_per_step=12.5,
+                dose_g=18.0,
+                target_yield_g=36.0,
+            ),
+            shots=[shot_record("shot_1", timestamp=1)],
+            safety_bounds=SafetyBounds(),
+            now=10,
+        )
+
+        points = CommunityPriorProvider(repo).get_prior_points(context)
+
+        self.assertEqual(len(points), 12)
+        self.assertEqual(points[-1].grind_delta_um_from_current, 11.0)
+        self.assertLessEqual(max(point.confidence for point in points), 0.02)
+
+    def test_local_history_provider_can_emit_more_than_five_rank_weighted_points(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[
+                shot_record(f"shot_{index}", timestamp=index, reward=0.7, rating=4)
+                for index in range(12)
+            ],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        points = LocalHistoryPriorProvider().get_prior_points(context)
+
+        self.assertEqual(len(points), 12)
+        self.assertGreater(points[0].confidence, points[-1].confidence)
+        self.assertLess(points[0].observation_noise, points[-1].observation_noise)
 
     def test_default_prior_provider_does_not_emit_handwritten_rule_priors(self) -> None:
         current = Recipe(42, 12.5, 18.0, 36.0)

@@ -5,6 +5,8 @@ from typing import Any
 
 from espresso_rl.application.upload_validation import (
     mask_untrusted_profile_channels,
+    sanitize_upload_payload,
+    validate_canonical_payload_hash,
     validate_upload_payload,
 )
 from espresso_rl.domain.community import (
@@ -87,14 +89,19 @@ class CommunityValidationService:
         if payload_install_id != upload.install_id:
             errors.append("payload install_id does not match verified upload credential")
 
+        hash_validation = validate_canonical_payload_hash(payload, upload.payload_hash)
+        errors.extend(hash_validation.errors)
+
         # Ownership for trusted storage is always taken from the verified raw
         # queue row, never from client-controlled JSON.
         payload["install_id"] = upload.install_id
 
         validation = validate_upload_payload(payload)
         errors.extend(validation.errors)
-        if not errors and upload.event_type == "shot_record":
-            payload = mask_untrusted_profile_channels(payload)
+        if not errors:
+            payload = sanitize_upload_payload(payload)
+            if upload.event_type == "shot_record":
+                payload = mask_untrusted_profile_channels(payload)
 
         if upload.event_type == "shot_record":
             shot_type = payload.get("shot_type", "espresso")

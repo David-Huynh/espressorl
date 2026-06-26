@@ -8,6 +8,7 @@ from espresso_rl.application.community_validation import (
     install_trust_score,
     payload_trust_weight,
 )
+from espresso_rl.application.upload_payloads import canonical_payload_json, payload_hash
 from espresso_rl.domain.community import (
     CommunityAbuseEvent,
     CommunityInstallStats,
@@ -16,9 +17,6 @@ from espresso_rl.domain.community import (
     CommunityValidatedShot,
     InstallTrustScore,
 )
-
-
-HASH = "f" * 64
 
 
 class CommunityValidationTests(unittest.TestCase):
@@ -80,6 +78,57 @@ class CommunityValidationTests(unittest.TestCase):
         self.assertEqual(warehouse.statuses[upload.upload_id], "rejected")
         self.assertIn("install_id", warehouse.rejections[upload.upload_id][0])
         self.assertEqual(warehouse.abuse_events[0].reason, "community_upload_validation_failed")
+
+    def test_payload_hash_mismatch_is_rejected(self) -> None:
+        upload = raw_upload(payload=shot_payload(), payload_hash_override="0" * 64)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.rejected, 1)
+        self.assertEqual(warehouse.validated_shots, [])
+        self.assertEqual(warehouse.training_rows, [])
+        self.assertEqual(warehouse.statuses[upload.upload_id], "rejected")
+        self.assertIn("payload_hash", " ".join(warehouse.rejections[upload.upload_id]))
+
+    def test_unknown_payload_fields_are_rejected_before_trusted_storage(self) -> None:
+        payload = shot_payload()
+        payload["debug_html"] = "<script>alert(1)</script>"
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.rejected, 1)
+        self.assertEqual(warehouse.validated_shots, [])
+        self.assertEqual(warehouse.training_rows, [])
+        self.assertIn("unknown fields", " ".join(warehouse.rejections[upload.upload_id]))
+
+    def test_xss_like_metadata_string_is_rejected_before_trusted_storage(self) -> None:
+        payload = shot_payload()
+        payload["profile_label"] = "<img src=x onerror=alert(1)>"
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.rejected, 1)
+        self.assertEqual(warehouse.validated_shots, [])
+        self.assertEqual(warehouse.training_rows, [])
+        self.assertIn("profile_label", " ".join(warehouse.rejections[upload.upload_id]))
+
+    def test_wrong_schema_version_is_rejected_before_trusted_storage(self) -> None:
+        payload = shot_payload()
+        payload["schema_version"] = 2
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.rejected, 1)
+        self.assertEqual(warehouse.validated_shots, [])
+        self.assertEqual(warehouse.training_rows, [])
+        self.assertIn("schema_version", " ".join(warehouse.rejections[upload.upload_id]))
 
     def test_utility_upload_is_rejected_before_trusted_storage(self) -> None:
         payload = shot_payload()
@@ -178,7 +227,7 @@ class CommunityValidationTests(unittest.TestCase):
     def test_nonfinite_flow_is_rejected_not_masked(self) -> None:
         payload = shot_payload()
         payload["profile_resampled"][2] = [float("nan") for _ in range(100)]
-        upload = raw_upload(payload=payload)
+        upload = raw_upload(payload=payload, payload_hash_override="0" * 64)
         warehouse = FakeWarehouse([upload])
 
         result = CommunityValidationService(warehouse).validate_once()
@@ -212,11 +261,15 @@ def raw_upload(
     *,
     event_type: str = "shot_record",
     upload_id: str = "upload_1",
+    payload_hash_override: str | None = None,
 ) -> CommunityRawUpload:
+    digest = payload_hash_override
+    if digest is None:
+        digest = payload_hash(canonical_payload_json(payload))
     return CommunityRawUpload(
         install_id="verified_install",
         upload_id=upload_id,
-        payload_hash=HASH,
+        payload_hash=digest,
         event_type=event_type,
         payload_json=payload,
     )

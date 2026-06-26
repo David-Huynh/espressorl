@@ -133,6 +133,77 @@ class AdminCollectorTests(unittest.TestCase):
         self.assertIn('"p_rejected_retention_days":30', body)
         self.assertIn('"p_failed_retention_days":90', body)
 
+    def test_supabase_queue_rejects_non_list_claim_response(self) -> None:
+        def transport(req: request.Request, timeout_s: float) -> HttpResponse:
+            return HttpResponse(200, json.dumps({"not": "a list"}))
+
+        client = SupabaseCommunityQueueClient(
+            SupabaseCommunityQueueConfig(
+                rest_url="https://example.supabase.co/rest/v1",
+                service_role_key="service-role",
+            ),
+            transport=transport,
+        )
+
+        with self.assertRaises(ValueError):
+            client.claim_batch(limit=5)
+
+    def test_supabase_queue_rejects_non_object_payload_json(self) -> None:
+        def transport(req: request.Request, timeout_s: float) -> HttpResponse:
+            return HttpResponse(
+                200,
+                json.dumps(
+                    [
+                        {
+                            "install_id": "install_1",
+                            "upload_id": "upload_1",
+                            "payload_hash": HASH,
+                            "event_type": "shot_record",
+                            "payload_json": ["not", "an", "object"],
+                        }
+                    ]
+                ),
+            )
+
+        client = SupabaseCommunityQueueClient(
+            SupabaseCommunityQueueConfig(
+                rest_url="https://example.supabase.co/rest/v1",
+                service_role_key="service-role",
+            ),
+            transport=transport,
+        )
+
+        with self.assertRaises(ValueError):
+            client.claim_batch(limit=5)
+
+    def test_supabase_queue_rejects_non_hex_payload_hash(self) -> None:
+        def transport(req: request.Request, timeout_s: float) -> HttpResponse:
+            return HttpResponse(
+                200,
+                json.dumps(
+                    [
+                        {
+                            "install_id": "install_1",
+                            "upload_id": "upload_1",
+                            "payload_hash": "not-a-sha256-digest",
+                            "event_type": "shot_record",
+                            "payload_json": {"event_type": "shot_record", "shot_id": "shot_1"},
+                        }
+                    ]
+                ),
+            )
+
+        client = SupabaseCommunityQueueClient(
+            SupabaseCommunityQueueConfig(
+                rest_url="https://example.supabase.co/rest/v1",
+                service_role_key="service-role",
+            ),
+            transport=transport,
+        )
+
+        with self.assertRaises(ValueError):
+            client.claim_batch(limit=5)
+
     def test_admin_collector_worker_requires_admin_role_and_supabase_credentials(self) -> None:
         public_config = Config(
             mqtt_host="localhost",

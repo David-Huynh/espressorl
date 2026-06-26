@@ -4,7 +4,9 @@ import unittest
 from typing import Any
 
 from espresso_rl.application.community_priors import (
+    DEFAULT_MAX_PRIOR_POINTS_PER_CONTEXT,
     MAX_COMMUNITY_PRIOR_CONFIDENCE,
+    MAX_COMMUNITY_PRIOR_POINT_CONFIDENCE,
     CommunityPriorGenerationService,
     community_prior_contribution_bucket,
     community_prior_context_key,
@@ -76,6 +78,36 @@ class CommunityPriorTests(unittest.TestCase):
         self.assertGreater(point["predicted_reward"], 0.0)
         self.assertEqual(prior.prior_json["zero_trust"]["per_install_contribution_bucket_cap"], 2)
         self.assertIn("diminishing-install-weight", prior.prior_json["aggregation"]["method"])
+
+    def test_released_prior_retains_bounded_low_weight_support_point_cloud(self) -> None:
+        rows = [
+            training_row(
+                index,
+                install_id=f"install_{index % 4}",
+                bean_context_id=f"bean_{index}",
+                shot_time_s=20.0 + (index % 15),
+                reward=0.55 + (index % 5) * 0.05,
+            )
+            for index in range(1, 90)
+        ]
+        warehouse = FakeWarehouse(rows)
+
+        result = CommunityPriorGenerationService(
+            warehouse,
+            min_independent_installs=3,
+            min_context_points=6,
+        ).generate_once()
+
+        self.assertEqual(result.priors_written, 1)
+        points = warehouse.priors[0].prior_json["points"]
+        self.assertEqual(len(points), DEFAULT_MAX_PRIOR_POINTS_PER_CONTEXT)
+        self.assertEqual(points[0]["kind"], "aggregate")
+        support_points = [point for point in points if point.get("kind") == "support"]
+        self.assertGreater(len(support_points), 5)
+        self.assertLessEqual(
+            max(point["confidence"] for point in support_points),
+            MAX_COMMUNITY_PRIOR_POINT_CONFIDENCE,
+        )
 
     def test_dry_run_reports_proposed_priors_without_writing(self) -> None:
         rows = [

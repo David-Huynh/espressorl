@@ -13,11 +13,13 @@ from espresso_rl.ports.community import CommunityWarehouseRepository
 
 
 MAX_COMMUNITY_PRIOR_CONFIDENCE = 0.18
+MAX_COMMUNITY_PRIOR_POINT_CONFIDENCE = 0.035
 COMMUNITY_PRIOR_OBSERVATION_NOISE = 0.5
 DEFAULT_MIN_INDEPENDENT_INSTALLS = 3
 DEFAULT_MIN_CONTEXT_POINTS = 6
 DEFAULT_MIN_DIVERSE_BUCKETS_FOR_SINGLE_INSTALL = 6
 DEFAULT_MAX_POINTS_PER_INSTALL_PER_BUCKET = 3
+DEFAULT_MAX_PRIOR_POINTS_PER_CONTEXT = 64
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,7 @@ class CommunityPriorGenerationService:
         min_diverse_buckets_for_single_install: int = DEFAULT_MIN_DIVERSE_BUCKETS_FOR_SINGLE_INSTALL,
         max_points_per_install_per_bucket: int = DEFAULT_MAX_POINTS_PER_INSTALL_PER_BUCKET,
         max_points_per_install_per_context: int | None = None,
+        max_prior_points_per_context: int = DEFAULT_MAX_PRIOR_POINTS_PER_CONTEXT,
     ) -> None:
         if min_independent_installs < 2:
             raise ValueError("min_independent_installs must be at least 2")
@@ -67,11 +70,14 @@ class CommunityPriorGenerationService:
             max_points_per_install_per_bucket = max_points_per_install_per_context
         if max_points_per_install_per_bucket < 1:
             raise ValueError("max_points_per_install_per_bucket must be positive")
+        if max_prior_points_per_context < 1:
+            raise ValueError("max_prior_points_per_context must be positive")
         self._warehouse = warehouse
         self._min_independent_installs = min_independent_installs
         self._min_context_points = min_context_points
         self._min_diverse_buckets_for_single_install = min_diverse_buckets_for_single_install
         self._max_points_per_install_per_bucket = max_points_per_install_per_bucket
+        self._max_prior_points_per_context = max_prior_points_per_context
 
     def generate_once(self, limit: int = 5000, *, dry_run: bool = False) -> CommunityPriorGenerationResult:
         rows = self._warehouse.list_training_rows(limit=limit)
@@ -102,6 +108,7 @@ class CommunityPriorGenerationService:
                 per_install_bucket_cap=self._max_points_per_install_per_bucket,
                 min_independent_installs=self._min_independent_installs,
                 min_diverse_buckets_for_single_install=self._min_diverse_buckets_for_single_install,
+                max_prior_points=self._max_prior_points_per_context,
             )
             if prior.confidence <= 0:
                 continue
@@ -236,9 +243,11 @@ def aggregate_community_prior(
     per_install_bucket_cap: int,
     min_independent_installs: int = DEFAULT_MIN_INDEPENDENT_INSTALLS,
     min_diverse_buckets_for_single_install: int = DEFAULT_MIN_DIVERSE_BUCKETS_FOR_SINGLE_INSTALL,
+    max_prior_points: int = DEFAULT_MAX_PRIOR_POINTS_PER_CONTEXT,
 ) -> CommunityPrior:
     if not candidates:
         raise ValueError("candidates are required")
+    max_prior_points = max(1, int(max_prior_points))
 
     install_count = len({candidate.row.install_id for candidate in candidates})
     diversity_count = len({candidate.contribution_bucket for candidate in candidates})
@@ -271,6 +280,29 @@ def aggregate_community_prior(
     target_ratio = round(float(median(candidate.target_ratio for candidate in candidates)), 3)
     target_yield = round(float(median(candidate.target_yield_g for candidate in candidates)), 1)
 
+    points = [
+        {
+            "grind_delta_um_from_current": 0.0,
+            "dose_g": dose,
+            "target_yield_g": target_yield,
+            "target_ratio": target_ratio,
+            "predicted_reward": round(predicted_reward, 6),
+            "confidence": confidence,
+            "observation_noise": COMMUNITY_PRIOR_OBSERVATION_NOISE,
+            "support": len(candidates),
+            "independent_install_count": install_count,
+            "contribution_bucket_count": diversity_count,
+            "kind": "aggregate",
+        }
+    ]
+    points.extend(
+        _support_prior_points(
+            candidates,
+            effective_weights,
+            max_points=max_prior_points - 1,
+        )
+    )
+
     prior_json = {
         "schema_version": 1,
         "source": "community_validated_training_v1",
@@ -282,9 +314,12 @@ def aggregate_community_prior(
             "min_independent_installs": min_independent_installs,
             "min_diverse_buckets_for_single_install": min_diverse_buckets_for_single_install,
             "max_confidence": MAX_COMMUNITY_PRIOR_CONFIDENCE,
+            "max_point_confidence": MAX_COMMUNITY_PRIOR_POINT_CONFIDENCE,
+            "max_prior_points_per_context": max_prior_points,
         },
         "aggregation": {
             "support": len(candidates),
+            "point_count": len(points),
             "independent_install_count": install_count,
             "contribution_bucket_count": diversity_count,
             "dominant_install_share": round(dominant_install_share, 6),
@@ -293,20 +328,7 @@ def aggregate_community_prior(
             "avg_reward_confidence": round(avg_confidence, 6),
             "method": "per-install-bucket-cap+diminishing-install-weight+median+trimmed-weighted-mean",
         },
-        "points": [
-            {
-                "grind_delta_um_from_current": 0.0,
-                "dose_g": dose,
-                "target_yield_g": target_yield,
-                "target_ratio": target_ratio,
-                "predicted_reward": round(predicted_reward, 6),
-                "confidence": confidence,
-                "observation_noise": COMMUNITY_PRIOR_OBSERVATION_NOISE,
-                "support": len(candidates),
-                "independent_install_count": install_count,
-                "contribution_bucket_count": diversity_count,
-            }
-        ],
+        "points": points,
     }
     return CommunityPrior(
         context_key=context_key,
@@ -348,6 +370,55 @@ def _diminished_install_weights(candidates: list[_PriorCandidate]) -> dict[int, 
             base = max(candidate.trust_weight * candidate.reward_confidence, 0.001)
             weights[candidate.row.training_row_id] = base / math.sqrt(index)
     return weights
+
+
+def _support_prior_points(
+    candidates: list[_PriorCandidate],
+    effective_weights: dict[int, float],
+    *,
+    max_points: int,
+) -> list[dict[str, Any]]:
+    if max_points <= 0:
+        return []
+
+    ordered = sorted(
+        candidates,
+        key=lambda candidate: (
+            effective_weights.get(candidate.row.training_row_id, 0.0) * max(candidate.reward, 0.0),
+            candidate.row.training_row_id,
+        ),
+        reverse=True,
+    )
+
+    points: list[dict[str, Any]] = []
+    for candidate in ordered[:max_points]:
+        payload = candidate.row.payload_json
+        target_ratio = candidate.target_ratio or candidate.target_yield_g / candidate.dose_g
+        confidence = min(
+            MAX_COMMUNITY_PRIOR_POINT_CONFIDENCE,
+            max(0.0, candidate.trust_weight * candidate.reward_confidence * 0.2),
+        )
+        if confidence <= 0:
+            continue
+        points.append(
+            {
+                "grind_delta_um_from_current": round(
+                    _number(payload.get("recommended_grind_delta_um_from_current")) or 0.0,
+                    4,
+                ),
+                "dose_g": round(candidate.dose_g, 3),
+                "target_yield_g": round(candidate.target_yield_g, 3),
+                "target_ratio": round(target_ratio, 4),
+                "predicted_reward": round(candidate.reward, 6),
+                "confidence": round(confidence, 6),
+                "observation_noise": COMMUNITY_PRIOR_OBSERVATION_NOISE,
+                "support": 1,
+                "independent_install_count": 1,
+                "contribution_bucket_count": 1,
+                "kind": "support",
+            }
+        )
+    return points
 
 
 def _number(value: Any) -> float | None:

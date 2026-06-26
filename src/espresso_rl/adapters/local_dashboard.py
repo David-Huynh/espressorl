@@ -8,15 +8,35 @@ from espresso_rl.application.local_data import LocalDataService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 
 
+DASHBOARD_MAX_BODY_BYTES = 64_000
+SECURITY_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+}
+
+
 def create_local_dashboard_app(
     service: LocalDataService,
     upload_maintenance: UploadQueueMaintenanceService,
     local_token: str,
 ):
     from fastapi import Depends, FastAPI, Header, HTTPException
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, PlainTextResponse
 
     app = FastAPI(title="EspressoRL Local", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.middleware("http")
+    async def harden_dashboard(request, call_next):
+        if _body_too_large(request.headers.get("content-length")):
+            return PlainTextResponse("request body too large", status_code=413, headers=SECURITY_HEADERS)
+        response = await call_next(request)
+        for key, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(key, value)
+        return response
 
     def require_local(authorization: str | None = Header(default=None)) -> None:
         token = _token_from_authorization(authorization)
@@ -126,6 +146,16 @@ def _token_from_authorization(authorization: str | None) -> str | None:
         return None
     token = authorization[len(prefix) :].strip()
     return token or None
+
+
+def _body_too_large(content_length: str | None) -> bool:
+    if not content_length:
+        return False
+    try:
+        parsed = int(content_length)
+    except ValueError:
+        return True
+    return parsed > DASHBOARD_MAX_BODY_BYTES
 
 
 def _limit(payload: object, *, default: int, maximum: int) -> int:

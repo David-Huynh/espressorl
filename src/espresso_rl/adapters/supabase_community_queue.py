@@ -59,6 +59,8 @@ class SupabaseCommunityQueueClient:
                 "p_lease_seconds": self._config.claim_lease_seconds,
             },
         )
+        if not isinstance(rows, list):
+            raise ValueError("Supabase claim RPC must return a list of rows")
         return [_upload_from_row(row) for row in rows]
 
     def mark_mirrored(self, upload: CommunityRawUpload) -> None:
@@ -178,14 +180,26 @@ def _default_transport(req: request.Request, timeout_s: float) -> HttpResponse:
 
 
 def _upload_from_row(row: dict) -> CommunityRawUpload:
+    if not isinstance(row, dict):
+        raise ValueError("Supabase raw upload row must be an object")
+    payload_json = row.get("payload_json")
+    if not isinstance(payload_json, dict):
+        raise ValueError("Supabase raw upload payload_json must be an object")
     return CommunityRawUpload(
-        install_id=str(row.get("install_id") or ""),
-        upload_id=str(row.get("upload_id") or ""),
-        payload_hash=str(row.get("payload_hash") or ""),
-        event_type=str(row.get("event_type") or ""),
-        payload_json=dict(row.get("payload_json") or {}),
+        install_id=_required_string(row, "install_id"),
+        upload_id=_required_string(row, "upload_id"),
+        payload_hash=_required_string(row, "payload_hash"),
+        event_type=_required_string(row, "event_type"),
+        payload_json=payload_json,
         received_at=row.get("received_at"),
     )
+
+
+def _required_string(row: dict, key: str) -> str:
+    value = row.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Supabase raw upload {key} is required")
+    return value.strip()
 
 
 def _utc_now() -> str:

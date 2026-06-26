@@ -234,6 +234,13 @@ Public deployment settings:
 If upload is enabled without a configured `upload_secret`, EspressoRL uses the
 registration URL to request anonymous upload credentials and stores them under
 `/data/espresso_rl/community_upload_credentials.json`. The secret is not logged.
+Before any queued payload is signed or retried, EspressoRL validates its schema
+and verifies that the stored SHA-256 `payload_hash` still matches the queued
+JSON. The signed upload adapter also refuses to sign payloads whose `install_id`
+does not match the configured upload credential. Community upload validation is
+allowlisted by `schema_version`; unknown fields, unsafe IDs/metadata strings,
+non-finite numbers, invalid JSON shapes, and out-of-range physical values are
+rejected before network upload or trusted admin storage.
 
 The Supabase scaffold lives in `supabase/`:
 
@@ -315,12 +322,15 @@ for a short audit/debug window and later removed by
 
 After mirroring, the admin worker validates local `community_raw_uploads` rows
 before they can enter trusted warehouse tables. Validation rejects spoofed
-payload install IDs, event-type mismatches, malformed payloads, impossible
-espresso values, invalid taste tags, unsafe profile arrays, and non-espresso
-utility shots. Accepted shot uploads are stored in `community_validated_shots`
-with a capped low trust weight and are copied into `training_dataset` only when
-their trust weight is non-zero. Recommendation uploads are stored for audit and
-follow-through analysis, but they are not training rows by themselves.
+payload install IDs, event-type mismatches, payload-hash mismatches, malformed
+payloads, impossible espresso values, invalid taste tags, unsafe profile arrays,
+and non-espresso utility shots. The admin Supabase adapter rejects malformed raw
+queue rows instead of coercing them into objects. Accepted shot uploads are
+stored in `community_validated_shots` as sanitized allowlisted payloads with a
+capped low trust weight and are copied into `training_dataset` only when their
+trust weight is non-zero.
+Recommendation uploads are stored for audit and follow-through analysis, but
+they are not training rows by themselves.
 
 The admin worker can also generate released community priors into
 `community_priors`. These are weak prior summaries, not trusted commands. The
@@ -333,6 +343,9 @@ shots can override the prior quickly. High-volume installs are allowed and
 valuable when they span many bean contexts, recipe ranges, and profile shapes;
 repetitive data from one narrow context remains stored for diagnostics and
 experiments, but does not dominate released public priors.
+Released priors carry a bounded low-confidence point cloud, not only a single
+median recipe, so early optimizers can infer a rough direction from many weak
+validated examples while still letting local shots dominate.
 
 Manual dashboard actions are locked per job type. If `Run validation now`,
 `Generate priors now`, `Purge queue now`, or another manual action is clicked
@@ -348,17 +361,27 @@ warning count, and a short sanitized error summary. Rejection summaries exposed
 by the dashboard are category-only, such as `invalid_schema`,
 `invalid_signature`, `rate_limited`, `impossible_flow`, `duplicate_shot_id`, and
 `payload_too_large`.
+Local and admin dashboards require bearer tokens, reject oversized request
+bodies, set no-store/security headers, and avoid rendering raw payload JSON,
+profiles, request headers, Supabase keys, upload secrets, or HMAC material.
 
 ## Warm-Started BO Priors
 
 Runtime recommendation generation can consume canonical `PriorPoint` values
-from local history, lightweight rule priors, and released community priors.
+from local history and released community priors.
 Community prior JSON is treated as hostile at read time: the provider requires
 the expected context key and zero-trust metadata, revalidates numeric fields,
 caps confidence, enforces minimum observation noise, and emits only weak
 canonical prior points. The optimizer uses priors only while local data is
 sparse, keeps the first shot as `zero_observe`, applies normal trust-region and
 safety bounds, and stops using external priors once enough local shots exist.
+Previous bags of the same normalized bean on the same grinder are converted into
+up to 64 local `local_bean_history` prior points after the new bag has at least
+one valid local observation. These points are ranked and down-weighted by rank,
+so they can provide an initial directional shape without replacing the current
+bag's real shots. The same `OptimizationContext.prior_points` stream is the
+optimizer-agnostic contract for BO, future DreamerV3 inference, and other
+optimizers; no optimizer should receive adapter-specific prior data.
 
 Run local verification with:
 

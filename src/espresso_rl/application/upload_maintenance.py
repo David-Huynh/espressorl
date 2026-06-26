@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from espresso_rl.application.upload_validation import validate_upload_payload_json
+from espresso_rl.application.upload_validation import validate_upload_envelope
 from espresso_rl.domain.models import UploadQueueItem, UploadQueueStatus, now_ts
 from espresso_rl.ports.repositories import UploadQueueRepository
 
@@ -59,7 +59,7 @@ class UploadQueueMaintenanceService:
 
         for item in self._queue.list_by_status(UploadQueueStatus.REJECTED, limit=_safe_limit(limit)):
             inspected += 1
-            validation = validate_upload_payload_json(item.payload_json)
+            validation = validate_upload_envelope(item.payload_json, item.payload_hash)
             if validation.ok:
                 self._queue.requeue(item.upload_id, now=now, error_message="requeued after local preflight")
                 requeued += 1

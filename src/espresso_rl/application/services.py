@@ -48,7 +48,9 @@ from espresso_rl.ports.repositories import (
 
 LOCAL_BEAN_HISTORY_PRIOR_SOURCE = "local_bean_history"
 LOCAL_BEAN_HISTORY_LOOKBACK = 500
-MAX_LOCAL_BEAN_HISTORY_PRIORS = 10
+MAX_LOCAL_BEAN_HISTORY_PRIORS = 64
+MIN_LOCAL_BEAN_HISTORY_RANK_SCALE = 0.35
+MAX_LOCAL_BEAN_HISTORY_OBSERVATION_NOISE = 0.75
 
 
 @dataclass(frozen=True)
@@ -184,12 +186,17 @@ def _same_bean_previous_bag_prior_points(
     )[:MAX_LOCAL_BEAN_HISTORY_PRIORS]
 
     points: list[PriorPoint] = []
-    for shot in candidates:
-        confidence = _prior_confidence_from_shot(shot)
+    for rank, shot in enumerate(candidates, start=1):
+        rank_scale = max(MIN_LOCAL_BEAN_HISTORY_RANK_SCALE, 1.0 / (rank ** 0.5))
+        confidence = _prior_confidence_from_shot(shot) * rank_scale
         if confidence <= 0:
             continue
         target_ratio = shot.target_ratio or shot.target_yield_g / shot.dose_in_g
-        observation_noise = 0.25 if shot.human_rating is not None else 0.4
+        base_observation_noise = 0.25 if shot.human_rating is not None else 0.4
+        observation_noise = min(
+            MAX_LOCAL_BEAN_HISTORY_OBSERVATION_NOISE,
+            base_observation_noise / rank_scale,
+        )
         if shot.recommendation_followed == FollowThroughState.PARTIALLY_FOLLOWED:
             observation_noise = max(observation_noise, 0.45)
         points.append(

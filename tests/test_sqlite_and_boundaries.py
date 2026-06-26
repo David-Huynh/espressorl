@@ -16,11 +16,14 @@ from espresso_rl.adapters.sqlite_repositories import (
     _shot_to_row,
 )
 from espresso_rl.adapters.postgres_repositories import _upsert
+from espresso_rl.application.upload_payloads import payload_hash as hash_payload_json
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.domain.events import RecommendationApplyEvent, ShotFeedbackEvent, ShotProfileEvent
 from espresso_rl.domain.models import RecommendationApplyStatus, UploadQueueItem, UploadQueueStatus
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from espresso_rl.adapters.supabase_upload import (
+    SignedSupabaseUploadClient,
+    SignedUploadConfig,
     UploadRejected,
     UploadQueueWorker,
     UploadRateLimited,
@@ -88,6 +91,28 @@ def queue_item(
         local_record_id=local_record_id,
         payload_hash=payload_hash,
         payload_json=valid_upload_payload(local_record_id),
+        status=status,
+        attempt_count=attempt_count,
+        created_at=1,
+        updated_at=1,
+    )
+
+
+def uploadable_queue_item(
+    upload_id: str,
+    *,
+    status: UploadQueueStatus = UploadQueueStatus.PENDING,
+    local_record_type: str = "shot",
+    local_record_id: str = "shot_1",
+    attempt_count: int = 0,
+) -> UploadQueueItem:
+    payload_json = valid_upload_payload(local_record_id)
+    return UploadQueueItem(
+        upload_id=upload_id,
+        local_record_type=local_record_type,
+        local_record_id=local_record_id,
+        payload_hash=hash_payload_json(payload_json),
+        payload_json=payload_json,
         status=status,
         attempt_count=attempt_count,
         created_at=1,
@@ -351,7 +376,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         upload_id="upload_1",
                         local_record_type="shot",
                         local_record_id="shot_1",
-                        payload_hash="abc",
+                        payload_hash=hash_payload_json(valid_upload_payload()),
                         payload_json=valid_upload_payload(),
                         status=UploadQueueStatus.PENDING,
                         created_at=1,
@@ -383,13 +408,14 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 queue = SQLiteUploadQueueRepository(store)
+                payload_json = valid_upload_payload()
                 queue.enqueue(
                     UploadQueueItem(
                         upload_id="upload_1",
                         local_record_type="shot",
                         local_record_id="shot_1",
-                        payload_hash="abc",
-                        payload_json=valid_upload_payload(),
+                        payload_hash=hash_payload_json(payload_json),
+                        payload_json=payload_json,
                         status=UploadQueueStatus.PENDING,
                         created_at=1,
                         updated_at=1,
@@ -401,6 +427,65 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertEqual(worker.run_once(), 1)
                 self.assertEqual(client.uploaded, ["upload_1"])
                 self.assertEqual(queue.list_ready(now=6), [])
+
+    def test_upload_worker_rejects_payload_hash_mismatch_before_client_upload(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.uploaded: list[str] = []
+
+            def upload(self, item: UploadQueueItem) -> None:
+                self.uploaded.append(item.upload_id)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                queue = SQLiteUploadQueueRepository(store)
+                queue.enqueue(
+                    UploadQueueItem(
+                        upload_id="upload_1",
+                        local_record_type="shot",
+                        local_record_id="shot_1",
+                        payload_hash="0" * 64,
+                        payload_json=valid_upload_payload(),
+                        status=UploadQueueStatus.PENDING,
+                        created_at=1,
+                        updated_at=1,
+                    )
+                )
+                client = FakeClient()
+                worker = UploadQueueWorker(queue, client, clock=lambda: 5)
+
+                self.assertEqual(worker.run_once(), 0)
+                self.assertEqual(client.uploaded, [])
+                self.assertEqual(
+                    store.conn.execute("SELECT COUNT(*) AS c FROM upload_queue").fetchone()["c"],
+                    0,
+                )
+
+    def test_signed_client_rejects_install_id_mismatch_before_network(self) -> None:
+        payload_json = valid_upload_payload().replace('"install_id": "install_1"', '"install_id": "other"')
+        item = UploadQueueItem(
+            upload_id="upload_1",
+            local_record_type="shot",
+            local_record_id="shot_1",
+            payload_hash=hash_payload_json(payload_json),
+            payload_json=payload_json,
+            status=UploadQueueStatus.PENDING,
+            created_at=1,
+            updated_at=1,
+        )
+        client = SignedSupabaseUploadClient(
+            SignedUploadConfig(
+                ingest_url="https://example.invalid/ingest",
+                install_id="install_1",
+                upload_secret="x" * 32,
+            )
+        )
+
+        with self.assertRaises(UploadRejected) as raised:
+            client.upload(item)
+
+        self.assertEqual(raised.exception.status, 422)
+        self.assertIn("install_id", str(raised.exception))
 
     def test_enqueue_coalesces_pending_versions_of_same_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -502,7 +587,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 queue = SQLiteUploadQueueRepository(store)
-                queue.enqueue(queue_item("u_a", "a", attempt_count=99))
+                queue.enqueue(uploadable_queue_item("u_a", attempt_count=99))
                 worker = UploadQueueWorker(queue, BoomClient(), clock=lambda: 100)
                 worker.run_once()
                 row = store.conn.execute(
@@ -525,7 +610,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 EspressoRLService(shots, SQLiteRecommendationRepository(store), ConservativeBOOptimizer()).ingest_shot_profile(
                     shot_event()
                 )
-                queue.enqueue(queue_item("u_a", "a"))
+                queue.enqueue(uploadable_queue_item("u_a"))
                 worker = UploadQueueWorker(queue, RejectingClient(), clock=lambda: 100)
 
                 worker.run_once()
@@ -544,7 +629,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 queue = SQLiteUploadQueueRepository(store)
-                queue.enqueue(queue_item("u_a", "a"))
+                queue.enqueue(uploadable_queue_item("u_a"))
                 worker = UploadQueueWorker(queue, LimitedClient(), clock=lambda: 1000)
                 worker.run_once()
                 self.assertEqual(queue.list_ready(now=1001), [])  # deferred past now
@@ -561,7 +646,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 queue = SQLiteUploadQueueRepository(store)
-                queue.enqueue(queue_item("u_a", "a"))
+                queue.enqueue(uploadable_queue_item("u_a"))
                 worker = UploadQueueWorker(queue, LimitedClient(), clock=lambda: 1000)
                 worker.run_once()
                 next_retry_at = store.conn.execute(

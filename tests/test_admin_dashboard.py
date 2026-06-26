@@ -29,6 +29,27 @@ class AdminDashboardTests(unittest.TestCase):
         self.assertNotIn("admin_dashboard_token", body)
         self.assertNotIn("service_role_key", body)
         self.assertNotIn("upload_secret", body)
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertIn("frame-ancestors 'none'", response.headers["content-security-policy"])
+
+    def test_dashboard_rejects_oversized_request_body_before_action_dispatch(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from espresso_rl.adapters.admin_dashboard import create_admin_dashboard_app
+
+        client = TestClient(
+            create_admin_dashboard_app(FakeAdminService(), "a" * 32)
+        )
+
+        response = client.post(
+            "/api/validation/run",
+            headers={"Authorization": f"Bearer {'a' * 32}"},
+            content='{"padding":"' + ("x" * 70_000) + '"}',
+        )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
 
 
 class FakeAdminService:

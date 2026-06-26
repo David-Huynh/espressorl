@@ -3,7 +3,11 @@ from __future__ import annotations
 import copy
 import unittest
 
-from espresso_rl.application.services import EspressoRLService, _recommendation_signature
+from espresso_rl.application.services import (
+    MAX_LOCAL_BEAN_HISTORY_PRIORS,
+    EspressoRLService,
+    _recommendation_signature,
+)
 from espresso_rl.domain.events import (
     MachineStateEvent,
     RecommendationApplyEvent,
@@ -423,6 +427,47 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(point.source, "local_bean_history")
         self.assertEqual(point.grind_delta_um_from_current, -25.0)
         self.assertEqual(point.target_yield_g, 38.0)
+
+    def test_previous_bag_same_bean_history_keeps_bounded_diminishing_prior_cloud(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(shots, recs, optimizer, clock=lambda: 10)
+
+        for index in range(MAX_LOCAL_BEAN_HISTORY_PRIORS + 6):
+            ingest_and_feedback(
+                service,
+                shot_event(
+                    f"old_bag_{index}",
+                    index + 1,
+                    bean_context_id=f"bean_lavazza_old_{index}",
+                    bean_context_name="Lavazza",
+                    grinder_context_id="grinder_jx_pro",
+                    relative_grind_steps_from_reference=36 + (index % 10),
+                    target_yield_g=34.0 + (index % 5),
+                ),
+                rating=5,
+            )
+        ingest_and_feedback(
+            service,
+            shot_event(
+                "current_bag_first",
+                200,
+                bean_context_id="bean_lavazza_new_bag",
+                bean_context_name="Lavazza",
+                grinder_context_id="grinder_jx_pro",
+                relative_grind_steps_from_reference=42,
+                target_yield_g=36.0,
+            ),
+            rating=3,
+        )
+
+        prior_points = list(optimizer.contexts[-1].prior_points)
+
+        self.assertEqual(len(prior_points), MAX_LOCAL_BEAN_HISTORY_PRIORS)
+        self.assertTrue(all(point.source == "local_bean_history" for point in prior_points))
+        self.assertGreater(prior_points[0].confidence, prior_points[-1].confidence)
+        self.assertLess(prior_points[0].observation_noise, prior_points[-1].observation_noise)
 
     def test_previous_bag_priors_are_bean_and_grinder_isolated(self) -> None:
         shots = MemoryShotRepository()

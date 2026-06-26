@@ -6,8 +6,49 @@ const MAX_CLOCK_SKEW_S = 15 * 60;
 const INSTALL_MINUTE_LIMIT = 30;
 const INSTALL_DAY_LIMIT = 500;
 const IP_MINUTE_LIMIT = 30;
+const SUPPORTED_SCHEMA_VERSION = 1;
+const SAFE_IDENTIFIER = /^[A-Za-z0-9_.:@-]{1,160}$/;
+const SHA256_HEX = /^[0-9a-f]{64}$/i;
+const UNSAFE_TEXT = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f<>]/;
 
 type JsonRecord = Record<string, unknown>;
+
+const allowedShotFields = new Set([
+  'event_type', 'schema_version', 'shot_id', 'timestamp', 'install_id', 'machine_id',
+  'machine_adapter', 'bean_context_id', 'grinder_context_id', 'profile_resampled',
+  'raw_profile_available', 'raw_profile_hash', 'grinder_calibration_mode', 'microns_per_step',
+  'step_direction', 'reference_label', 'relative_grind_steps_from_reference',
+  'relative_grind_um_from_reference', 'current_absolute_step', 'absolute_reference_step',
+  'dose_in_g', 'beverage_out_g', 'brew_ratio', 'target_yield_g', 'target_ratio',
+  'shot_time_s', 'recommendation_id', 'recommended_grind_delta_steps_from_current',
+  'recommended_grind_delta_um_from_current', 'recommended_projected_relative_step_from_reference',
+  'recommended_dose_g', 'recommended_target_yield_g', 'recommended_target_ratio',
+  'recommendation_decision', 'recommendation_followed', 'recommendation_attribution_weight',
+  'human_rating', 'taste_tags', 'feedback_recorded', 'profile_score', 'profile_mse',
+  'reward', 'reward_confidence', 'shot_type', 'exclude_from_local_optimization',
+  'optimization_weight', 'rating_prompt_allowed', 'grind_followed', 'dose_followed',
+  'yield_followed', 'grind_recommendation_trust', 'dose_recommendation_trust',
+  'yield_recommendation_trust', 'weight_source', 'flow_source', 'flow_units',
+  'pump_flow_source', 'pump_flow_units', 'pump_flow_calibration_required',
+  'profile_flow_valid', 'profile_flow_masked', 'profile_id', 'profile_label',
+  'profile_type', 'profile_phase_count', 'final_phase_index', 'final_phase_name',
+  'final_phase_type', 'final_phase_elapsed_s', 'final_pump_target', 'final_target_pressure',
+  'final_target_flow', 'final_valve_open', 'profile_temperature_c',
+  'final_phase_temperature_c', 'shot_end_state', 'created_at', 'updated_at',
+]);
+
+const allowedRecommendationFields = new Set([
+  'event_type', 'schema_version', 'recommendation_id', 'created_at', 'updated_at',
+  'expires_at', 'install_id', 'machine_id', 'bean_context_id', 'grinder_context_id',
+  'grind_delta_steps_from_current', 'grind_delta_um_from_current',
+  'projected_relative_step_from_reference', 'projected_relative_grind_um_from_reference',
+  'grinder_calibration_mode', 'microns_per_step', 'step_direction', 'reference_label',
+  'current_absolute_step', 'absolute_reference_step', 'projected_absolute_step',
+  'next_dose_g', 'target_yield_g', 'target_ratio', 'mode', 'confidence', 'reason',
+  'status', 'shown_count', 'accepted_at', 'ignored_at', 'edited_at', 'used_at',
+  'superseded_at', 'source_shot_id', 'apply_status', 'apply_acknowledged_at',
+  'applied_fields', 'manual_fields', 'apply_error',
+]);
 
 serve(async request => {
   if (request.method !== 'POST') {
@@ -32,6 +73,16 @@ serve(async request => {
   if (!installId || !uploadId || !timestampText || !signature || !payloadHash) {
     await logAbuse(supabase, { installId, uploadId, payloadHash, reason: 'missing_headers' });
     return jsonResponse(400, { error: 'missing required EspressoRL upload headers' });
+  }
+  if (!safeIdentifier(installId) || !safeIdentifier(uploadId) || !SHA256_HEX.test(signature) || !SHA256_HEX.test(payloadHash)) {
+    await logAbuse(supabase, { installId, uploadId, payloadHash, reason: 'invalid_headers' });
+    return jsonResponse(400, { error: 'invalid EspressoRL upload headers' });
+  }
+
+  const contentLength = request.headers.get('content-length');
+  if (contentLength && Number(contentLength) > MAX_PAYLOAD_BYTES) {
+    await logAbuse(supabase, { installId, uploadId, payloadHash, reason: 'payload_too_large' });
+    return jsonResponse(413, { error: 'payload too large' });
   }
 
   const body = await request.text();
@@ -92,6 +143,10 @@ serve(async request => {
     await logAbuse(supabase, { installId, uploadId, payloadHash, sourceIpHash, reason: 'invalid_json' });
     return jsonResponse(400, { error: 'invalid JSON payload' });
   }
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+    await logAbuse(supabase, { installId, uploadId, payloadHash, sourceIpHash, reason: 'invalid_json_shape' });
+    return jsonResponse(400, { error: 'payload must be an object' });
+  }
 
   const validation = validatePayload(payload);
   if (!validation.ok) {
@@ -116,7 +171,8 @@ serve(async request => {
     });
     return jsonResponse(403, { error: 'payload install_id does not match upload credential' });
   }
-  payload.install_id = installId;
+  const sanitizedPayload = sanitizePayload(payload);
+  sanitizedPayload.install_id = installId;
 
   const { error } = await supabase.from('raw_upload_queue').insert({
     install_id: installId,
@@ -125,8 +181,8 @@ serve(async request => {
     payload_hash: payloadHash,
     local_record_type: validation.localRecordType,
     local_record_id: validation.localRecordId,
-    event_type: payload.event_type,
-    payload_json: payload,
+    event_type: sanitizedPayload.event_type,
+    payload_json: sanitizedPayload,
     client_timestamp: timestamp,
     status: 'queued',
     source_ip_hash: sourceIpHash,
@@ -158,6 +214,7 @@ function validatePayload(payload: JsonRecord): {
 } {
   const errors: string[] = [];
   if (payload.event_type === 'shot_record') {
+    rejectUnknownFields(payload, allowedShotFields, errors);
     validateShotRecord(payload, errors);
     return {
       ok: errors.length === 0,
@@ -167,6 +224,7 @@ function validatePayload(payload: JsonRecord): {
     };
   }
   if (payload.event_type === 'recommendation_record') {
+    rejectUnknownFields(payload, allowedRecommendationFields, errors);
     validateRecommendationRecord(payload, errors);
     return {
       ok: errors.length === 0,
@@ -182,20 +240,55 @@ function validatePayload(payload: JsonRecord): {
 }
 
 function validateShotRecord(payload: JsonRecord, errors: string[]) {
-  requireString(payload, 'shot_id', errors);
-  requireString(payload, 'install_id', errors);
-  requireString(payload, 'machine_id', errors);
+  requireNumberRange(payload, 'schema_version', SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSION, errors);
+  requireIdentifier(payload, 'shot_id', errors);
+  requireIdentifier(payload, 'install_id', errors);
+  requireIdentifier(payload, 'machine_id', errors);
+  optionalIdentifier(payload, 'machine_adapter', errors);
+  optionalIdentifier(payload, 'bean_context_id', errors);
+  optionalString(payload, 'grinder_context_id', 120, errors);
   requireNumberRange(payload, 'timestamp', 0, Number.MAX_SAFE_INTEGER, errors);
   requireNumberRange(payload, 'dose_in_g', 5, 30, errors);
-  optionalNumberRange(payload, 'beverage_out_g', 5, 100, errors);
+  optionalNumberRange(payload, 'beverage_out_g', 0, 120, errors);
+  optionalNumberRange(payload, 'brew_ratio', 0.1, 10, errors);
   requireNumberRange(payload, 'target_yield_g', 5, 100, errors);
-  optionalNumberRange(payload, 'shot_time_s', 5, 90, errors);
+  optionalNumberRange(payload, 'target_ratio', 1.2, 3.5, errors);
+  optionalNumberRange(payload, 'shot_time_s', 0, 180, errors);
+  optionalBoolean(payload, 'raw_profile_available', errors);
+  optionalSha256(payload, 'raw_profile_hash', errors);
+  optionalEnum(payload, 'grinder_calibration_mode', ['uncalibrated', 'relative_calibrated', 'absolute_display_calibrated'], errors);
+  optionalEnum(payload, 'step_direction', ['higher_is_finer', 'higher_is_coarser'], errors);
+  optionalString(payload, 'reference_label', 80, errors);
+  optionalNumberRange(payload, 'microns_per_step', 0.1, 100, errors);
+  optionalNumberRange(payload, 'relative_grind_steps_from_reference', -10_000, 10_000, errors);
+  optionalNumberRange(payload, 'relative_grind_um_from_reference', -1_000_000, 1_000_000, errors);
+  optionalNumberRange(payload, 'current_absolute_step', -10_000, 10_000, errors);
+  optionalNumberRange(payload, 'absolute_reference_step', -10_000, 10_000, errors);
+  optionalIdentifier(payload, 'recommendation_id', errors);
+  optionalNumberRange(payload, 'recommended_grind_delta_steps_from_current', -1000, 1000, errors);
+  optionalNumberRange(payload, 'recommended_grind_delta_um_from_current', -100_000, 100_000, errors);
+  optionalNumberRange(payload, 'recommended_projected_relative_step_from_reference', -10_000, 10_000, errors);
+  optionalNumberRange(payload, 'recommended_dose_g', 5, 30, errors);
+  optionalNumberRange(payload, 'recommended_target_yield_g', 5, 100, errors);
+  optionalNumberRange(payload, 'recommended_target_ratio', 1.2, 3.5, errors);
+  optionalEnum(payload, 'recommendation_decision', ['accepted', 'edited', 'ignored', 'dismissed', 'unknown'], errors);
+  optionalEnum(payload, 'recommendation_followed', ['followed', 'partially_followed', 'not_followed', 'unknown'], errors);
+  optionalNumberRange(payload, 'recommendation_attribution_weight', 0, 1, errors);
   optionalNumberRange(payload, 'human_rating', 1, 5, errors);
+  optionalStringListEnum(payload, 'taste_tags', ['sour', 'bitter', 'weak', 'harsh', 'thin', 'channeling_suspected', 'balanced', 'astringent', 'too_fast', 'too_slow', 'muddy', 'dry', 'sweet', 'good_body'], errors);
   optionalBoolean(payload, 'feedback_recorded', errors);
   optionalEnum(payload, 'shot_type', ['espresso', 'utility_flush', 'cleaning', 'calibration', 'unknown'], errors);
+  if (payload.shot_type !== undefined && payload.shot_type !== null && payload.shot_type !== 'espresso') {
+    errors.push('non-espresso shot uploads are not trusted training shots');
+    errors.push('shot_type must be espresso');
+  }
   optionalBoolean(payload, 'exclude_from_local_optimization', errors);
   optionalBoolean(payload, 'rating_prompt_allowed', errors);
   optionalNumberRange(payload, 'optimization_weight', 0, 1, errors);
+  optionalNumberRange(payload, 'profile_score', 0, 1, errors);
+  optionalNumberRange(payload, 'profile_mse', 0, 1_000_000, errors);
+  optionalNumberRange(payload, 'reward', 0, 1, errors);
+  optionalNumberRange(payload, 'reward_confidence', 0, 1, errors);
   optionalBoolean(payload, 'grind_followed', errors);
   optionalBoolean(payload, 'dose_followed', errors);
   optionalBoolean(payload, 'yield_followed', errors);
@@ -210,6 +303,23 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalNumberRange(payload, 'grind_recommendation_trust', 0, 1, errors);
   optionalNumberRange(payload, 'dose_recommendation_trust', 0, 1, errors);
   optionalNumberRange(payload, 'yield_recommendation_trust', 0, 1, errors);
+  optionalString(payload, 'profile_id', 120, errors);
+  optionalString(payload, 'profile_label', 120, errors);
+  optionalString(payload, 'profile_type', 80, errors);
+  optionalIntegerRange(payload, 'profile_phase_count', 0, 100, errors);
+  optionalIntegerRange(payload, 'final_phase_index', 0, 100, errors);
+  optionalString(payload, 'final_phase_name', 120, errors);
+  optionalEnum(payload, 'final_phase_type', ['preinfusion', 'brew'], errors);
+  optionalNumberRange(payload, 'final_phase_elapsed_s', 0, 600, errors);
+  optionalEnum(payload, 'final_pump_target', ['simple', 'pressure', 'flow'], errors);
+  optionalNumberRange(payload, 'final_target_pressure', 0, 15, errors);
+  optionalNumberRange(payload, 'final_target_flow', 0, 25, errors);
+  optionalBoolean(payload, 'final_valve_open', errors);
+  optionalNumberRange(payload, 'profile_temperature_c', 0, 160, errors);
+  optionalNumberRange(payload, 'final_phase_temperature_c', 0, 160, errors);
+  optionalEnum(payload, 'shot_end_state', ['finished', 'manual_or_interrupted', 'unknown'], errors);
+  optionalNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalNumberRange(payload, 'updated_at', 0, Number.MAX_SAFE_INTEGER, errors);
   const profile = payload.profile_resampled;
   if (profile !== undefined) {
     if (!Array.isArray(profile) || profile.length !== 5) {
@@ -221,17 +331,66 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
 }
 
 function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
-  requireString(payload, 'recommendation_id', errors);
-  requireString(payload, 'install_id', errors);
-  requireString(payload, 'machine_id', errors);
+  requireNumberRange(payload, 'schema_version', SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSION, errors);
+  requireIdentifier(payload, 'recommendation_id', errors);
+  requireIdentifier(payload, 'install_id', errors);
+  requireIdentifier(payload, 'machine_id', errors);
+  optionalIdentifier(payload, 'bean_context_id', errors);
+  optionalString(payload, 'grinder_context_id', 120, errors);
+  optionalNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalNumberRange(payload, 'updated_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalNumberRange(payload, 'expires_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalNumberRange(payload, 'grind_delta_steps_from_current', -1000, 1000, errors);
+  optionalNumberRange(payload, 'grind_delta_um_from_current', -100_000, 100_000, errors);
+  optionalNumberRange(payload, 'projected_relative_step_from_reference', -10_000, 10_000, errors);
+  optionalNumberRange(payload, 'projected_relative_grind_um_from_reference', -1_000_000, 1_000_000, errors);
+  optionalEnum(payload, 'grinder_calibration_mode', ['uncalibrated', 'relative_calibrated', 'absolute_display_calibrated'], errors);
+  optionalEnum(payload, 'step_direction', ['higher_is_finer', 'higher_is_coarser'], errors);
+  optionalString(payload, 'reference_label', 80, errors);
+  optionalNumberRange(payload, 'microns_per_step', 0.1, 100, errors);
+  optionalNumberRange(payload, 'current_absolute_step', -10_000, 10_000, errors);
+  optionalNumberRange(payload, 'absolute_reference_step', -10_000, 10_000, errors);
+  optionalNumberRange(payload, 'projected_absolute_step', -10_000, 10_000, errors);
   requireNumberRange(payload, 'next_dose_g', 5, 30, errors);
   requireNumberRange(payload, 'target_yield_g', 5, 100, errors);
   requireNumberRange(payload, 'target_ratio', 1.2, 3.5, errors);
+  optionalEnum(payload, 'mode', ['zero_observe', 'zero_immediate_bo', 'warm_started_bo', 'local_bo', 'dreamer_candidate', 'dreamer_active', 'bo_fallback'], errors);
+  optionalNumberRange(payload, 'confidence', 0, 1, errors);
+  optionalString(payload, 'reason', 500, errors);
+  optionalEnum(payload, 'status', ['pending', 'shown', 'accepted', 'edited', 'ignored', 'expired', 'used', 'superseded'], errors);
+  optionalIntegerRange(payload, 'shown_count', 0, 1_000_000, errors);
+  optionalNumberRange(payload, 'accepted_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalNumberRange(payload, 'ignored_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalNumberRange(payload, 'edited_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalNumberRange(payload, 'used_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalNumberRange(payload, 'superseded_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalIdentifier(payload, 'source_shot_id', errors);
+  optionalEnum(payload, 'apply_status', ['unknown', 'applied', 'partially_applied', 'manual_required', 'failed'], errors);
+  optionalNumberRange(payload, 'apply_acknowledged_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalObject(payload, 'applied_fields', errors);
+  optionalStringList(payload, 'manual_fields', errors);
+  optionalString(payload, 'apply_error', 500, errors);
 }
 
 function requireString(payload: JsonRecord, key: string, errors: string[]) {
-  if (typeof payload[key] !== 'string' || String(payload[key]).length === 0) {
+  const value = payload[key];
+  if (typeof value !== 'string' || value.trim().length === 0) {
     errors.push(`${key} is required`);
+    return;
+  }
+  if (value.length > 160 || UNSAFE_TEXT.test(value)) {
+    errors.push(`${key} contains unsafe characters`);
+  }
+}
+
+function requireIdentifier(payload: JsonRecord, key: string, errors: string[]) {
+  const value = payload[key];
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    errors.push(`${key} is required`);
+    return;
+  }
+  if (!safeIdentifier(value)) {
+    errors.push(`${key} contains unsafe characters`);
   }
 }
 
@@ -262,8 +421,36 @@ function optionalString(payload: JsonRecord, key: string, maxLength: number, err
   if (payload[key] === undefined || payload[key] === null) {
     return;
   }
-  if (typeof payload[key] !== 'string' || String(payload[key]).length > maxLength) {
+  if (typeof payload[key] !== 'string' || String(payload[key]).length > maxLength || UNSAFE_TEXT.test(String(payload[key]))) {
     errors.push(`${key} must be a short string`);
+  }
+}
+
+function optionalIdentifier(payload: JsonRecord, key: string, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  if (typeof payload[key] !== 'string' || !safeIdentifier(String(payload[key]))) {
+    errors.push(`${key} contains unsafe characters`);
+  }
+}
+
+function optionalSha256(payload: JsonRecord, key: string, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  if (typeof payload[key] !== 'string' || !SHA256_HEX.test(String(payload[key]))) {
+    errors.push(`${key} must be a sha256 hex digest`);
+  }
+}
+
+function optionalIntegerRange(payload: JsonRecord, key: string, min: number, max: number, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  const value = payload[key];
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+    errors.push(`${key} out of range`);
   }
 }
 
@@ -276,15 +463,81 @@ function optionalEnum(payload: JsonRecord, key: string, allowed: string[], error
   }
 }
 
+function optionalStringList(payload: JsonRecord, key: string, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  const value = payload[key];
+  if (!Array.isArray(value)) {
+    errors.push(`${key} must be a list`);
+    return;
+  }
+  if (value.some(item => typeof item !== 'string' || item.length > 80 || UNSAFE_TEXT.test(item))) {
+    errors.push(`${key} contains invalid values`);
+  }
+}
+
+function optionalStringListEnum(payload: JsonRecord, key: string, allowed: string[], errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  const value = payload[key];
+  if (!Array.isArray(value)) {
+    errors.push(`${key} must be a list`);
+    return;
+  }
+  if (value.some(item => typeof item !== 'string' || !allowed.includes(item))) {
+    errors.push(`${key} contains invalid values`);
+  }
+}
+
+function optionalObject(payload: JsonRecord, key: string, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  const value = payload[key];
+  if (!value || Array.isArray(value) || typeof value !== 'object') {
+    errors.push(`${key} must be an object`);
+    return;
+  }
+  const entries = Object.entries(value as JsonRecord);
+  if (entries.length > 25) {
+    errors.push(`${key} must be an object`);
+    return;
+  }
+  for (const [entryKey, entryValue] of entries) {
+    if (entryKey.length > 80 || UNSAFE_TEXT.test(entryKey)) {
+      errors.push(`${key} contains unsafe keys`);
+      return;
+    }
+    if (
+      entryValue !== null &&
+      typeof entryValue !== 'string' &&
+      typeof entryValue !== 'number' &&
+      typeof entryValue !== 'boolean'
+    ) {
+      errors.push(`${key} contains unsafe values`);
+      return;
+    }
+    if (typeof entryValue === 'string' && (entryValue.length > 160 || UNSAFE_TEXT.test(entryValue))) {
+      errors.push(`${key} contains unsafe values`);
+      return;
+    }
+    if (typeof entryValue === 'number' && !Number.isFinite(entryValue)) {
+      errors.push(`${key} contains unsafe values`);
+      return;
+    }
+  }
+}
+
 function validateProfileResampled(profile: unknown[], beverageOutG: unknown, errors: string[]) {
   const ranges: Array<[number, number, string]> = [
     [0, 15, 'pressure'],
     [0, 15, 'target_pressure'],
     [0, 20, 'flow'],
     [0, 20, 'target_flow'],
-    [-1, 100, 'weight'],
+    [-1, 120, 'weight'],
   ];
-  const targetFlowActive = channelActive(profile[3]);
   for (let channelIndex = 0; channelIndex < 5; channelIndex += 1) {
     const channel = profile[channelIndex];
     const [min, max, label] = ranges[channelIndex];
@@ -292,8 +545,12 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
       errors.push(`profile_resampled ${label} channel must have exactly 100 samples`);
       continue;
     }
+    if (!channelNumericFinite(channel)) {
+      errors.push(`profile_resampled ${label} contains non-finite or nonnumeric values`);
+      continue;
+    }
     if (!channelInRange(channel, min, max)) {
-      if (label === 'flow' && !targetFlowActive) {
+      if (label === 'flow' || label === 'target_flow') {
         continue;
       }
       errors.push(`profile_resampled ${label} out of range`);
@@ -310,17 +567,36 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
   }
 }
 
-function channelActive(channel: unknown): boolean {
-  if (!Array.isArray(channel) || channel.length !== 100) {
-    return false;
-  }
-  return channel.some(value => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) > 1e-6);
-}
-
 function channelInRange(channel: unknown[], min: number, max: number): boolean {
   return channel.every(
     value => typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max,
   );
+}
+
+function channelNumericFinite(channel: unknown[]): boolean {
+  return channel.every(value => typeof value === 'number' && Number.isFinite(value));
+}
+
+function rejectUnknownFields(payload: JsonRecord, allowed: Set<string>, errors: string[]) {
+  const unknown = Object.keys(payload).filter(key => !allowed.has(key)).sort();
+  if (unknown.length > 0) {
+    errors.push(`unknown fields: ${unknown.slice(0, 10).join(', ')}`);
+  }
+}
+
+function sanitizePayload(payload: JsonRecord): JsonRecord {
+  const allowed = payload.event_type === 'shot_record' ? allowedShotFields : allowedRecommendationFields;
+  const sanitized: JsonRecord = {};
+  for (const key of allowed) {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) {
+      sanitized[key] = payload[key];
+    }
+  }
+  return sanitized;
+}
+
+function safeIdentifier(value: string): boolean {
+  return SAFE_IDENTIFIER.test(value);
 }
 
 async function lookupCredential(
