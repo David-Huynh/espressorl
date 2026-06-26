@@ -62,6 +62,9 @@ Important fields in `data/options.json`:
   "initial_grind_um": 525.0,
   "initial_dose_g": 18.0,
   "initial_target_yield_g": 36.0,
+  "optimizer_mode": "bayesian_optimization",
+  "optimizer_model_artifact_path": "",
+  "optimizer_model_artifact_sha256": "",
 
   "storage_backend": "postgres",
   "postgres_dsn": "postgresql://espresso_rl:espresso_rl@postgres:5432/espresso_rl",
@@ -81,6 +84,12 @@ Local optimizer state is scoped by `install_id`, `machine_id`,
 `grinder_context_id` when the same bean is dialed on a different grinder; local
 shots and active recommendations will not be mixed across those grinder
 contexts.
+
+Gaggimate can override `optimizer_mode` at runtime by publishing a retained
+`gaggimate/<machine>/rl/settings` payload. `bayesian_optimization` is always
+available. DreamerV3 is only advertised to the Gaggimate UI when model artifact
+metadata is configured; until active Dreamer inference is safety-gated, BO
+remains the effective recommendation path.
 
 Start the local service and Postgres:
 

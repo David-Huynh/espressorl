@@ -10,6 +10,7 @@ import paho.mqtt.client as mqtt
 from espresso_rl.config import Config
 from espresso_rl.domain.events import (
     MachineStateEvent,
+    OptimizerSettingsEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotCorrectionEvent,
@@ -29,6 +30,7 @@ UPLOAD_REQUEUE_TOPIC = "gaggimate/+/rl/upload/requeue"
 DECISION_TOPIC = "gaggimate/+/rl/recommendation/decision"
 APPLY_TOPIC = "gaggimate/+/rl/recommendation/apply"
 MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
+OPTIMIZER_SETTINGS_TOPIC = "gaggimate/+/rl/settings"
 
 
 class GaggimateMQTTClient:
@@ -44,6 +46,7 @@ class GaggimateMQTTClient:
         on_decision: Callable[[RecommendationDecisionEvent], None],
         on_apply: Callable[[RecommendationApplyEvent], None],
         on_machine_state: Callable[[MachineStateEvent], None],
+        on_optimizer_settings: Callable[[OptimizerSettingsEvent], None] | None = None,
     ) -> None:
         self._config = config
         self._on_shot = on_shot
@@ -53,6 +56,7 @@ class GaggimateMQTTClient:
         self._on_decision = on_decision
         self._on_apply = on_apply
         self._on_machine_state = on_machine_state
+        self._on_optimizer_settings = on_optimizer_settings or (lambda event: None)
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.mqtt_user:
             self._client.username_pw_set(config.mqtt_user, config.mqtt_password)
@@ -129,8 +133,9 @@ class GaggimateMQTTClient:
             client.subscribe(DECISION_TOPIC)
             client.subscribe(APPLY_TOPIC)
             client.subscribe(MACHINE_STATE_TOPIC)
+            client.subscribe(OPTIMIZER_SETTINGS_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
                 FEEDBACK_TOPIC,
                 CORRECTION_TOPIC,
@@ -138,6 +143,7 @@ class GaggimateMQTTClient:
                 DECISION_TOPIC,
                 APPLY_TOPIC,
                 MACHINE_STATE_TOPIC,
+                OPTIMIZER_SETTINGS_TOPIC,
             )
         else:
             logger.error("MQTT connection refused: %s", reason_code)
@@ -166,6 +172,8 @@ class GaggimateMQTTClient:
                 self._on_apply(self.translate_apply_payload(payload, mac))
             elif msg.topic.endswith("/machine/state"):
                 self._on_machine_state(self.translate_machine_state_payload(payload, mac))
+            elif msg.topic.endswith("/rl/settings"):
+                self._on_optimizer_settings(self.translate_optimizer_settings_payload(payload, mac))
         except Exception:
             logger.exception("Error handling message on %s", msg.topic)
 
@@ -348,6 +356,20 @@ class GaggimateMQTTClient:
                 payload.get("target_yield_g", self._config.initial_target_yield_g)
             ),
             community_upload_enabled=_optional_bool(payload.get("community_upload_enabled")),
+            source=payload.get("source", "gaggimate_mqtt"),
+        )
+
+    def translate_optimizer_settings_payload(self, payload: dict[str, Any], mac: str) -> OptimizerSettingsEvent:
+        return OptimizerSettingsEvent(
+            install_id=str(payload.get("install_id") or self._config.install_id),
+            machine_id=str(payload.get("machine_id") or f"gaggimate:{mac}"),
+            timestamp=int(payload.get("timestamp") or self._config.now()),
+            schema_version=int(payload.get("schema_version", 1)),
+            optimizer_mode=str(payload.get("optimizer_mode") or payload.get("mode") or self._config.optimizer_mode),
+            bean_context_id=_optional_string(payload.get("bean_context_id")),
+            grinder_context_id=_optional_string(payload.get("grinder_context_id")),
+            model_artifact_path=_optional_string(payload.get("model_artifact_path")),
+            model_artifact_sha256=_optional_string(payload.get("model_artifact_sha256")),
             source=payload.get("source", "gaggimate_mqtt"),
         )
 

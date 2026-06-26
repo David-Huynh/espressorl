@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
+
 _OPTIONS_PATH = Path("/data/options.json")
 _DATA_DIR = Path("/data/espresso_rl")
 
@@ -31,6 +33,9 @@ class Config:
     initial_target_yield_g: float = 36.0
     # Reward weighting: r = alpha*human + (1-alpha)*profile_score
     alpha: float = 0.5
+    optimizer_mode: str = DEFAULT_OPTIMIZER_MODE
+    optimizer_model_artifact_path: str = ""
+    optimizer_model_artifact_sha256: str = ""
     # When True: run DreamerV3 training thread locally (central-server install only).
     # When False (default): inference + BO only; downloads weights from central server.
     training_mode: bool = False
@@ -60,6 +65,9 @@ class Config:
     local_dashboard_port: int = 8081
     local_dashboard_token: str = ""
     data_dir: Path = field(default_factory=lambda: _DATA_DIR)
+
+    def __post_init__(self) -> None:
+        self.optimizer_mode = normalize_optimizer_mode(self.optimizer_mode)
 
     def now(self) -> int:
         return int(time.time())
@@ -122,6 +130,22 @@ class Config:
             initial_dose_g=float(opts.get("initial_dose_g", 18.0)),
             initial_target_yield_g=float(opts.get("initial_target_yield_g", 36.0)),
             alpha=float(opts.get("alpha", 0.5)),
+            optimizer_mode=normalize_optimizer_mode(
+                opts.get(
+                    "optimizer_mode",
+                    os.getenv("ESPRESSORL_OPTIMIZER_MODE", DEFAULT_OPTIMIZER_MODE),
+                )
+            ),
+            optimizer_model_artifact_path=_option_string_or_env(
+                opts,
+                "optimizer_model_artifact_path",
+                "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_PATH",
+            ),
+            optimizer_model_artifact_sha256=_option_string_or_env(
+                opts,
+                "optimizer_model_artifact_sha256",
+                "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_SHA256",
+            ),
             training_mode=bool(opts.get("training_mode", False)),
             community_upload_enabled=bool(opts.get("community_upload_enabled", False)),
             supabase_registration_url=_option_string_or_env(

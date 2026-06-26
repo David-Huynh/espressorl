@@ -282,6 +282,46 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertEqual(recent[0]["shot_end_state"], "manual_or_interrupted")
                 self.assertNotIn("profile_resampled", recent[0])
 
+    def test_status_payload_reports_optimizer_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(
+                mqtt_host="localhost",
+                data_dir=Path(tmp),
+                install_id="install_1",
+                optimizer_mode="dreamer_v3_shadow",
+            )
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                    clock=lambda: 10,
+                )
+
+                status = build_status_payload(
+                    config=config,
+                    service=service,
+                    shot_repo=None,
+                    upload_maintenance=None,
+                    upload_queue_repo=None,
+                    machine_id="machine_1",
+                    bean_context_id=None,
+                    optimizer_status={
+                        "configured_mode": "dreamer_v3_shadow",
+                        "effective_mode": "bayesian_optimization",
+                        "model_artifact_path": "models/dreamer.pt",
+                        "model_artifact_sha256": "a" * 64,
+                        "dreamer_v3_available": True,
+                        "fallback_reason": "Bayesian Optimization is serving recommendations.",
+                    },
+                )
+
+            self.assertEqual(status["optimizer_configured_mode"], "dreamer_v3_shadow")
+            self.assertEqual(status["optimizer_effective_mode"], "bayesian_optimization")
+            self.assertTrue(status["optimizer_dreamer_v3_available"])
+            self.assertEqual(status["optimizer_model_artifact_path"], "models/dreamer.pt")
+            self.assertIn("Bayesian Optimization", status["optimizer_fallback_reason"])
+
     def test_status_payload_derives_grinder_catalog_search_url_from_supabase_function_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(
@@ -724,7 +764,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         violations: list[str] = []
         for dirname in core_dirs:
             for path in (root / dirname).rglob("*.py"):
-                tree = ast.parse(path.read_text(), filename=str(path))
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
                 for node in ast.walk(tree):
                     module = None
                     if isinstance(node, ast.Import):

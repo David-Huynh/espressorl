@@ -5,6 +5,25 @@ from typing import Sequence
 
 from .models import Recipe, Recommendation, SafetyBounds, ShotRecord
 
+DEFAULT_OPTIMIZER_MODE = "bayesian_optimization"
+OPTIMIZER_MODE_DREAMER_V3_SHADOW = "dreamer_v3_shadow"
+VALID_OPTIMIZER_MODES = {
+    DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+}
+OPTIMIZER_MODE_ALIASES = {
+    "bo": DEFAULT_OPTIMIZER_MODE,
+    "conservative_bo": DEFAULT_OPTIMIZER_MODE,
+}
+
+
+def normalize_optimizer_mode(value: object) -> str:
+    mode = str(value or DEFAULT_OPTIMIZER_MODE).strip().lower()
+    mode = OPTIMIZER_MODE_ALIASES.get(mode, mode)
+    if mode not in VALID_OPTIMIZER_MODES:
+        raise ValueError("optimizer_mode is invalid")
+    return mode
+
 
 @dataclass(frozen=True)
 class PriorPoint:

@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from espresso_rl.domain.events import ShotFeedbackEvent, ShotProfileEvent
+from espresso_rl.domain.events import OptimizerSettingsEvent, ShotFeedbackEvent, ShotProfileEvent
 from espresso_rl.domain.follow_through import infer_follow_through
 from espresso_rl.domain.models import (
     FollowThroughState,
@@ -49,6 +49,33 @@ def event(**overrides) -> ShotProfileEvent:
 
 
 class DomainCoreTests(unittest.TestCase):
+    def test_optimizer_settings_event_normalizes_safe_modes(self) -> None:
+        event = OptimizerSettingsEvent(
+            install_id="install_1",
+            machine_id="machine_1",
+            timestamp=1,
+            optimizer_mode="bo",
+        )
+
+        self.assertEqual(event.optimizer_mode, "bayesian_optimization")
+
+    def test_optimizer_settings_event_rejects_invalid_mode_and_digest(self) -> None:
+        with self.assertRaises(ValueError):
+            OptimizerSettingsEvent(
+                install_id="install_1",
+                machine_id="machine_1",
+                timestamp=1,
+                optimizer_mode="remote_exec",
+            )
+        with self.assertRaises(ValueError):
+            OptimizerSettingsEvent(
+                install_id="install_1",
+                machine_id="machine_1",
+                timestamp=1,
+                optimizer_mode="bayesian_optimization",
+                model_artifact_sha256="not-a-digest",
+            )
+
     def test_feedback_requires_rating_or_explicit_skip(self) -> None:
         base = {
             "shot_id": "shot_1",

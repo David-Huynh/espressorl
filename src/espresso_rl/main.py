@@ -53,6 +53,7 @@ from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityUploadCredentials
 from espresso_rl.domain.events import (
     MachineStateEvent,
+    OptimizerSettingsEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotCorrectionEvent,
@@ -61,7 +62,8 @@ from espresso_rl.domain.events import (
     UploadQueueMaintenanceEvent,
 )
 from espresso_rl.domain.models import Recipe, SafetyBounds, UploadQueueStatus
-from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
+from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE
+from espresso_rl.optimizers.runtime import RuntimeOptimizer
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import LocalDataRepository, RecommendationRepository, ShotRepository, UploadQueueRepository
 
@@ -80,17 +82,26 @@ def main() -> None:
         return
 
     maybe_resolve_community_upload_credentials(config)
-    logger.info("EspressoRL starting [training_mode=%s]", config.training_mode)
+    logger.info(
+        "EspressoRL starting [training_mode=%s optimizer_mode=%s]",
+        config.training_mode,
+        config.optimizer_mode,
+    )
     if config.training_mode:
         logger.warning(
             "DreamerV3 training is not wired into the active path yet; BO remains the safe recommendation path."
         )
 
     shot_repo, recommendation_repo, upload_queue_repo, local_data_repo = open_repositories(config)
+    runtime_optimizer = RuntimeOptimizer(
+        optimizer_mode=config.optimizer_mode,
+        model_artifact_path=config.optimizer_model_artifact_path,
+        model_artifact_sha256=config.optimizer_model_artifact_sha256,
+    )
     service = EspressoRLService(
         shots=shot_repo,
         recommendations=recommendation_repo,
-        optimizer=ConservativeBOOptimizer(),
+        optimizer=runtime_optimizer,
         upload_queue=upload_queue_for_service(config, upload_queue_repo),
         prior_provider=open_prior_provider(config),
         safety_bounds=SafetyBounds(),
@@ -152,6 +163,7 @@ def main() -> None:
             last_recommendation_id=last_recommendation_id,
             last_recommendation_at=last_recommendation_at,
             mode=mode,
+            optimizer_status=runtime_optimizer.status().to_dict(),
         )
         mqtt_client.publish_status(machine_id, status)
 
@@ -333,6 +345,20 @@ def main() -> None:
             mode=recommendation.mode.value,
         )
 
+    def on_optimizer_settings(event: OptimizerSettingsEvent) -> None:
+        status = runtime_optimizer.configure(
+            optimizer_mode=event.optimizer_mode,
+            model_artifact_path=event.model_artifact_path,
+            model_artifact_sha256=event.model_artifact_sha256,
+        )
+        logger.info(
+            "Optimizer settings accepted machine=%s configured=%s effective=%s",
+            event.machine_id,
+            status.configured_mode,
+            status.effective_mode,
+        )
+        publish_status(event.machine_id, event.bean_context_id, event.grinder_context_id)
+
     mqtt_client = GaggimateMQTTClient(
         config=config,
         on_shot=on_shot,
@@ -342,6 +368,7 @@ def main() -> None:
         on_decision=on_decision,
         on_apply=on_apply,
         on_machine_state=on_machine_state,
+        on_optimizer_settings=on_optimizer_settings,
     )
 
     def shutdown(sig: int, frame: object) -> None:
@@ -369,6 +396,7 @@ def main() -> None:
         upload_maintenance=upload_maintenance,
         shot_repo=shot_repo,
         upload_queue_repo=upload_queue_repo,
+        optimizer_status=runtime_optimizer.status().to_dict(),
     )
     logger.info("Listening for canonical events via Gaggimate MQTT adapter")
     signal.pause()
@@ -413,6 +441,7 @@ def maybe_publish_startup_recommendation(
     upload_maintenance: UploadQueueMaintenanceService | None = None,
     shot_repo: ShotRepository | None = None,
     upload_queue_repo: UploadQueueRepository | None = None,
+    optimizer_status: dict[str, object] | None = None,
 ) -> None:
     if config.machine_id == "gaggimate:local":
         return
@@ -440,6 +469,7 @@ def maybe_publish_startup_recommendation(
                 last_recommendation_id=current.recommendation_id,
                 last_recommendation_at=current.updated_at,
                 mode=current.mode.value,
+                optimizer_status=optimizer_status,
             ),
         )
         return
@@ -471,6 +501,7 @@ def maybe_publish_startup_recommendation(
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.created_at,
             mode=recommendation.mode.value,
+            optimizer_status=optimizer_status,
         ),
     )
 
@@ -490,6 +521,7 @@ def build_status_payload(
     last_recommendation_id: str | None = None,
     last_recommendation_at: int | None = None,
     mode: str | None = None,
+    optimizer_status: dict[str, object] | None = None,
 ) -> dict:
     now = config.now()
     recent = (
@@ -549,6 +581,24 @@ def build_status_payload(
         for item in rejected_summaries
         if item.local_record_type == "shot" and item.local_record_id
     }
+    config_dreamer_v3_available = bool(
+        config.optimizer_model_artifact_path and config.optimizer_model_artifact_sha256
+    )
+    config_optimizer_mode = (
+        config.optimizer_mode
+        if config.optimizer_mode == DEFAULT_OPTIMIZER_MODE or config_dreamer_v3_available
+        else DEFAULT_OPTIMIZER_MODE
+    )
+    optimizer_status = optimizer_status or {
+        "configured_mode": config_optimizer_mode,
+        "effective_mode": DEFAULT_OPTIMIZER_MODE,
+        "model_artifact_path": config.optimizer_model_artifact_path or None,
+        "model_artifact_sha256": config.optimizer_model_artifact_sha256 or None,
+        "dreamer_v3_available": config_dreamer_v3_available,
+        "fallback_reason": None
+        if config_optimizer_mode == DEFAULT_OPTIMIZER_MODE
+        else "Bayesian Optimization is serving recommendations.",
+    }
 
     return {
         "addon_online": True,
@@ -568,6 +618,12 @@ def build_status_payload(
         "last_recommendation_at": last_recommendation_at,
         "recommendation_apply_status": apply_status,
         "mode": mode,
+        "optimizer_configured_mode": optimizer_status.get("configured_mode"),
+        "optimizer_effective_mode": optimizer_status.get("effective_mode"),
+        "optimizer_model_artifact_path": optimizer_status.get("model_artifact_path"),
+        "optimizer_model_artifact_sha256": optimizer_status.get("model_artifact_sha256"),
+        "optimizer_dreamer_v3_available": bool(optimizer_status.get("dreamer_v3_available")),
+        "optimizer_fallback_reason": optimizer_status.get("fallback_reason"),
         "local_shot_count": len(optimizer_shots),
         "rated_shot_count": len(rated_shots),
         "best_known_recipe": best_known_recipe_payload(optimizer_shots),

@@ -14,6 +14,7 @@ from .models import (
     ShotType,
     VALID_TASTE_TAGS,
 )
+from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
 
 VALID_CORRECTION_TAGS = {
     "changed_manually",
@@ -28,6 +29,7 @@ VALID_CORRECTION_TAGS = {
 VALID_FINAL_PHASE_TYPES = {"preinfusion", "brew"}
 VALID_FINAL_PUMP_TARGETS = {"simple", "pressure", "flow"}
 VALID_SHOT_END_STATES = {"finished", "manual_or_interrupted", "unknown"}
+_HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
 def _number(value: Any, field_name: str) -> float:
@@ -520,3 +522,55 @@ class MachineStateEvent:
             target_yield_g=self.target_yield_g,
             grinder_step_direction=self.grinder_step_direction,
         )
+
+
+@dataclass(frozen=True)
+class OptimizerSettingsEvent:
+    install_id: str
+    machine_id: str
+    timestamp: int
+    optimizer_mode: str = DEFAULT_OPTIMIZER_MODE
+    schema_version: int = 1
+    bean_context_id: str | None = None
+    grinder_context_id: str | None = None
+    model_artifact_path: str | None = None
+    model_artifact_sha256: str | None = None
+    source: str = "unknown"
+
+    event_type: str = field(default="optimizer_settings", init=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported optimizer settings schema_version")
+        object.__setattr__(self, "optimizer_mode", normalize_optimizer_mode(self.optimizer_mode))
+        object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
+        object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
+        object.__setattr__(
+            self,
+            "model_artifact_path",
+            _safe_artifact_path(self.model_artifact_path),
+        )
+        object.__setattr__(
+            self,
+            "model_artifact_sha256",
+            _optional_sha256(self.model_artifact_sha256),
+        )
+        object.__setattr__(self, "source", _optional_string(self.source, "source", 80) or "unknown")
+
+
+def _safe_artifact_path(value: Any) -> str | None:
+    parsed = _optional_string(value, "model_artifact_path", 240)
+    if parsed is None:
+        return None
+    if any(ord(ch) < 32 for ch in parsed):
+        raise ValueError("model_artifact_path must be a safe short string")
+    return parsed
+
+
+def _optional_sha256(value: Any) -> str | None:
+    parsed = _optional_string(value, "model_artifact_sha256", 64)
+    if parsed is None:
+        return None
+    if len(parsed) != 64 or any(ch not in _HEX_CHARS for ch in parsed):
+        raise ValueError("model_artifact_sha256 must be a sha256 hex digest")
+    return parsed.lower()

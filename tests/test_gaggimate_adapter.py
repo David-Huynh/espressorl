@@ -32,6 +32,41 @@ class FakeMQTT:
 
 
 class GaggimateAdapterTests(unittest.TestCase):
+    def test_optimizer_settings_payload_translates_to_canonical_event(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_optimizer_settings_payload(
+            {
+                "event_type": "optimizer_settings",
+                "schema_version": 1,
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 100,
+                "optimizer_mode": "dreamer_v3_shadow",
+                "bean_context_id": "bean_1",
+                "grinder_context_id": "grinder_1",
+                "model_artifact_path": "models/dreamer-v3.pt",
+                "model_artifact_sha256": "a" * 64,
+                "source": "gaggimate_webui",
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.optimizer_mode, "dreamer_v3_shadow")
+        self.assertEqual(event.machine_id, "gaggimate:AA_BB")
+        self.assertEqual(event.bean_context_id, "bean_1")
+        self.assertEqual(event.grinder_context_id, "grinder_1")
+        self.assertEqual(event.model_artifact_path, "models/dreamer-v3.pt")
+        self.assertEqual(event.model_artifact_sha256, "a" * 64)
+
     def test_shot_profile_payload_accepts_gaggimate_recipe_metadata(self) -> None:
         client = GaggimateMQTTClient(
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
