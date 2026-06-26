@@ -491,6 +491,12 @@ grinder calibration, and the default taste objective stay in `static_context`.
 Historical profile targets are stored as observed profile targets, while
 `dynamic_action` remains null unless a future capability-gated control path
 supplies safe per-step actions such as `yield_stop_target_g` or `stop`.
+`espresso_rl.dreamer.dataset.build_dreamer_episode_batch` then turns validated
+episodes into deterministic tensors for offline training: observations,
+observed profile targets, nullable dynamic actions plus presence masks,
+constraints, static context, terminal features, rewards, continuations, and
+padding masks. The batch includes feature-name metadata so external trainers can
+audit the numeric layout instead of relying on implicit column order.
 
 No export artifact uses pickle, model binaries, SQLite dumps, parquet, macros,
 absolute grinder settings, or another executable/opaque format. Trainers should

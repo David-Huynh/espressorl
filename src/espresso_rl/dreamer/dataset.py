@@ -18,6 +18,7 @@ import torch
 
 from espresso_rl.domain.dreamer_episodes import (
     DREAMER_EPISODE_FORMAT,
+    DREAMER_PROFILE_CHANNELS,
     DREAMER_EPISODE_SCHEMA_VERSION,
     validate_dreamer_episode,
 )
@@ -38,6 +39,58 @@ _DEFAULT_CONSTRAINTS = {
     "valve_control_allowed": False,
     "temperature_control_allowed": False,
     "stop_control_allowed": False,
+}
+DREAMER_OBSERVATION_FEATURES = DREAMER_PROFILE_CHANNELS
+DREAMER_OBSERVED_TARGET_FEATURES = ("pressure_target_bar", "flow_target_ml_s")
+DREAMER_DYNAMIC_ACTION_FEATURES = (
+    "pressure_target_bar",
+    "flow_target_ml_s",
+    "pump_duty",
+    "valve_position",
+    "temperature_target_c",
+    "yield_stop_target_g",
+    "stop",
+)
+DREAMER_CONSTRAINT_FEATURES = tuple(_DEFAULT_CONSTRAINTS)
+DREAMER_STATIC_CONTEXT_FEATURES = (
+    "relative_grind_steps_from_reference",
+    "relative_grind_um_from_reference",
+    "dose_g",
+    "initial_target_yield_g",
+    "target_ratio",
+    "microns_per_step",
+    "step_direction_sign",
+    "profile_phase_count",
+    "taste_objective_auto",
+    "taste_objective_acidity",
+    "taste_objective_sweetness",
+    "taste_objective_clarity",
+    "taste_objective_body",
+    "taste_objective_bitterness",
+    "taste_objective_chocolatiness",
+    "taste_objective_fruitiness",
+    "taste_objective_roastiness",
+)
+DREAMER_TERMINAL_FEATURES = (
+    "beverage_out_g",
+    "brew_ratio",
+    "shot_time_s",
+    "human_rating",
+    "reward",
+    "confidence",
+    "feedback_recorded",
+    "optimization_weight",
+    "profile_score",
+    "profile_mse",
+    "profile_flow_valid",
+    "profile_flow_masked",
+)
+_TASTE_LEVEL_VALUES = {
+    None: 0.0,
+    "none": 0.0,
+    "low": 1.0 / 3.0,
+    "medium": 2.0 / 3.0,
+    "high": 1.0,
 }
 
 
@@ -151,6 +204,212 @@ def build_dreamer_episodes_from_training_rows(
         episodes.append(episode)
 
     return sorted(episodes, key=_episode_sort_key)
+
+
+def build_dreamer_episode_batch(
+    episodes: Iterable[dict[str, Any]],
+    *,
+    pad_to_step_count: int | None = None,
+    device: torch.device | str | None = None,
+) -> dict[str, Any]:
+    sorted_episodes = sorted(_validated_episodes(episodes), key=_episode_sort_key)
+    if not sorted_episodes:
+        raise DreamerEpisodeDatasetError("Dreamer episode batch must contain at least one episode")
+
+    max_steps = max(len(episode["steps"]) for episode in sorted_episodes)
+    if pad_to_step_count is not None:
+        if pad_to_step_count < max_steps:
+            raise DreamerEpisodeDatasetError("pad_to_step_count cannot be shorter than the longest episode")
+        max_steps = pad_to_step_count
+
+    batch_size = len(sorted_episodes)
+    observations = np.zeros((batch_size, max_steps, len(DREAMER_OBSERVATION_FEATURES)), dtype=np.float32)
+    observed_targets = np.zeros((batch_size, max_steps, len(DREAMER_OBSERVED_TARGET_FEATURES)), dtype=np.float32)
+    dynamic_actions = np.zeros((batch_size, max_steps, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=np.float32)
+    dynamic_action_mask = np.zeros_like(dynamic_actions)
+    constraints = np.zeros((batch_size, max_steps, len(DREAMER_CONSTRAINT_FEATURES)), dtype=np.float32)
+    elapsed = np.zeros((batch_size, max_steps, 1), dtype=np.float32)
+    step_mask = np.zeros((batch_size, max_steps), dtype=np.float32)
+    continuations = np.zeros((batch_size, max_steps), dtype=np.float32)
+    rewards = np.zeros((batch_size, max_steps), dtype=np.float32)
+    static_context = np.zeros((batch_size, len(DREAMER_STATIC_CONTEXT_FEATURES)), dtype=np.float32)
+    terminal = np.zeros((batch_size, len(DREAMER_TERMINAL_FEATURES)), dtype=np.float32)
+    episode_weights = np.zeros(batch_size, dtype=np.float32)
+    source_training_row_ids = np.zeros(batch_size, dtype=np.int64)
+    episode_ids: list[str] = []
+
+    for batch_index, episode in enumerate(sorted_episodes):
+        steps = episode["steps"]
+        valid_step_count = len(steps)
+        static_context[batch_index] = _encode_static_context(episode["static_context"])
+        terminal[batch_index] = _encode_terminal(episode["terminal"])
+        terminal_reward = _finite_or_zero(episode["terminal"].get("reward"))
+        episode_weights[batch_index] = _episode_weight(episode)
+        source_training_row_ids[batch_index] = int(episode["source_training_row_id"])
+        episode_ids.append(str(episode["episode_id"]))
+
+        for step_index, step in enumerate(steps):
+            observations[batch_index, step_index] = _encode_object(
+                step["observation"],
+                DREAMER_OBSERVATION_FEATURES,
+            )
+            observed_targets[batch_index, step_index] = _encode_object(
+                step["observed_profile_target"],
+                DREAMER_OBSERVED_TARGET_FEATURES,
+            )
+            action_values, action_mask = _encode_dynamic_action(step.get("dynamic_action"))
+            dynamic_actions[batch_index, step_index] = action_values
+            dynamic_action_mask[batch_index, step_index] = action_mask
+            constraints[batch_index, step_index] = _encode_bool_object(
+                step["constraints"],
+                DREAMER_CONSTRAINT_FEATURES,
+            )
+            elapsed[batch_index, step_index, 0] = float(step["elapsed_fraction"])
+            step_mask[batch_index, step_index] = 1.0
+            continuations[batch_index, step_index] = 1.0 if step_index < valid_step_count - 1 else 0.0
+        rewards[batch_index, valid_step_count - 1] = terminal_reward
+
+    target_device = torch.device(device) if device is not None else None
+    return {
+        "observations": torch.tensor(observations, dtype=torch.float32, device=target_device),
+        "observed_profile_targets": torch.tensor(observed_targets, dtype=torch.float32, device=target_device),
+        "dynamic_actions": torch.tensor(dynamic_actions, dtype=torch.float32, device=target_device),
+        "dynamic_action_mask": torch.tensor(dynamic_action_mask, dtype=torch.float32, device=target_device),
+        "constraints": torch.tensor(constraints, dtype=torch.float32, device=target_device),
+        "elapsed": torch.tensor(elapsed, dtype=torch.float32, device=target_device),
+        "step_mask": torch.tensor(step_mask, dtype=torch.float32, device=target_device),
+        "continuations": torch.tensor(continuations, dtype=torch.float32, device=target_device),
+        "rewards": torch.tensor(rewards, dtype=torch.float32, device=target_device),
+        "static_context": torch.tensor(static_context, dtype=torch.float32, device=target_device),
+        "terminal": torch.tensor(terminal, dtype=torch.float32, device=target_device),
+        "episode_weights": torch.tensor(episode_weights, dtype=torch.float32, device=target_device),
+        "source_training_row_ids": torch.tensor(source_training_row_ids, dtype=torch.long, device=target_device),
+        "episode_ids": tuple(episode_ids),
+        "feature_names": {
+            "observations": DREAMER_OBSERVATION_FEATURES,
+            "observed_profile_targets": DREAMER_OBSERVED_TARGET_FEATURES,
+            "dynamic_actions": DREAMER_DYNAMIC_ACTION_FEATURES,
+            "constraints": DREAMER_CONSTRAINT_FEATURES,
+            "static_context": DREAMER_STATIC_CONTEXT_FEATURES,
+            "terminal": DREAMER_TERMINAL_FEATURES,
+        },
+    }
+
+
+def _validated_episodes(episodes: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    validated: list[dict[str, Any]] = []
+    for index, episode in enumerate(episodes):
+        if not isinstance(episode, dict):
+            raise DreamerEpisodeDatasetError(f"Dreamer episode {index} must be an object")
+        errors = validate_dreamer_episode(episode)
+        if errors:
+            label = episode.get("episode_id", index)
+            raise DreamerEpisodeDatasetError(f"Dreamer episode {label} failed validation: {'; '.join(errors[:10])}")
+        validated.append(episode)
+    return validated
+
+
+def _encode_static_context(static_context: dict[str, Any]) -> np.ndarray:
+    encoded = np.zeros(len(DREAMER_STATIC_CONTEXT_FEATURES), dtype=np.float32)
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "relative_grind_steps_from_reference")] = _finite_or_zero(
+        static_context.get("relative_grind_steps_from_reference")
+    )
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "relative_grind_um_from_reference")] = _finite_or_zero(
+        static_context.get("relative_grind_um_from_reference")
+    )
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "dose_g")] = _finite_or_zero(static_context.get("dose_g"))
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "initial_target_yield_g")] = _finite_or_zero(
+        static_context.get("initial_target_yield_g")
+    )
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "target_ratio")] = _finite_or_zero(static_context.get("target_ratio"))
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "microns_per_step")] = _finite_or_zero(static_context.get("microns_per_step"))
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "step_direction_sign")] = (
+        1.0 if static_context.get("step_direction") == "higher_is_finer" else -1.0
+    )
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "profile_phase_count")] = _finite_or_zero(
+        static_context.get("profile_phase_count")
+    )
+
+    taste_objective = static_context.get("taste_objective") or {}
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "taste_objective_auto")] = (
+        1.0 if taste_objective.get("mode") == "auto" else 0.0
+    )
+    for attribute in (
+        "acidity",
+        "sweetness",
+        "clarity",
+        "body",
+        "bitterness",
+        "chocolatiness",
+        "fruitiness",
+        "roastiness",
+    ):
+        encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, f"taste_objective_{attribute}")] = _TASTE_LEVEL_VALUES[
+            taste_objective.get(attribute)
+        ]
+    return encoded
+
+
+def _encode_terminal(terminal: dict[str, Any]) -> np.ndarray:
+    encoded = np.zeros(len(DREAMER_TERMINAL_FEATURES), dtype=np.float32)
+    for feature in DREAMER_TERMINAL_FEATURES:
+        value = terminal.get(feature)
+        encoded[_feature_index(DREAMER_TERMINAL_FEATURES, feature)] = _bool_or_number(value)
+    return encoded
+
+
+def _encode_object(value: dict[str, Any], features: tuple[str, ...]) -> np.ndarray:
+    encoded = np.zeros(len(features), dtype=np.float32)
+    for feature_index, feature in enumerate(features):
+        encoded[feature_index] = _finite_or_zero(value.get(feature))
+    return encoded
+
+
+def _encode_bool_object(value: dict[str, Any], features: tuple[str, ...]) -> np.ndarray:
+    encoded = np.zeros(len(features), dtype=np.float32)
+    for feature_index, feature in enumerate(features):
+        encoded[feature_index] = 1.0 if value.get(feature) is True else 0.0
+    return encoded
+
+
+def _encode_dynamic_action(action: dict[str, Any] | None) -> tuple[np.ndarray, np.ndarray]:
+    values = np.zeros(len(DREAMER_DYNAMIC_ACTION_FEATURES), dtype=np.float32)
+    mask = np.zeros(len(DREAMER_DYNAMIC_ACTION_FEATURES), dtype=np.float32)
+    if action is None:
+        return values, mask
+    for feature_index, feature in enumerate(DREAMER_DYNAMIC_ACTION_FEATURES):
+        if feature not in action:
+            continue
+        mask[feature_index] = 1.0
+        values[feature_index] = _bool_or_number(action.get(feature))
+    return values, mask
+
+
+def _episode_weight(episode: dict[str, Any]) -> float:
+    source_weight = _clamp01(_finite_or_zero(episode["source"].get("trust_weight")))
+    optimization_weight = _clamp01(_finite_or_zero(episode["terminal"].get("optimization_weight")))
+    confidence = _clamp01(_finite_or_zero(episode["terminal"].get("confidence")))
+    return source_weight * optimization_weight * confidence
+
+
+def _feature_index(features: tuple[str, ...], feature: str) -> int:
+    return features.index(feature)
+
+
+def _bool_or_number(value: object) -> float:
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    return _finite_or_zero(value)
+
+
+def _finite_or_zero(value: object) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(float(value)):
+        return float(value)
+    return 0.0
+
+
+def _clamp01(value: float) -> float:
+    return min(1.0, max(0.0, value))
 
 
 def _episode_from_training_row(row: dict[str, Any]) -> dict[str, Any]:

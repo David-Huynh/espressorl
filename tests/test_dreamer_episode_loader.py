@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import copy
 import json
 import unittest
 
 from espresso_rl.domain.dreamer_episodes import DREAMER_EPISODE_FORMAT, validate_dreamer_episode
 from espresso_rl.dreamer.dataset import (
+    DREAMER_DYNAMIC_ACTION_FEATURES,
+    DREAMER_OBSERVATION_FEATURES,
+    DREAMER_STATIC_CONTEXT_FEATURES,
     DreamerEpisodeDatasetError,
+    build_dreamer_episode_batch,
     build_dreamer_episodes_from_training_rows,
     load_dreamer_episodes_from_jsonl,
 )
@@ -119,6 +124,81 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
     def test_jsonl_loader_rejects_non_object_rows(self) -> None:
         with self.assertRaisesRegex(DreamerEpisodeDatasetError, "must be an object"):
             load_dreamer_episodes_from_jsonl("[]\n")
+
+    def test_episode_batch_has_deterministic_feature_order_and_shapes(self) -> None:
+        episodes = build_dreamer_episodes_from_training_rows(
+            [
+                training_row(2, timestamp=1_800_000_002),
+                training_row(1, timestamp=1_800_000_001, action_overrides={"relative_grind_steps_from_reference": -2.0}),
+            ]
+        )
+
+        batch = build_dreamer_episode_batch(list(reversed(episodes)))
+
+        self.assertEqual(tuple(batch["source_training_row_ids"].tolist()), (1, 2))
+        self.assertEqual(batch["episode_ids"], ("training_row_1", "training_row_2"))
+        self.assertEqual(tuple(batch["observations"].shape), (2, 100, len(DREAMER_OBSERVATION_FEATURES)))
+        self.assertEqual(tuple(batch["static_context"].shape), (2, len(DREAMER_STATIC_CONTEXT_FEATURES)))
+        self.assertEqual(batch["feature_names"]["observations"], DREAMER_OBSERVATION_FEATURES)
+
+        pressure_index = DREAMER_OBSERVATION_FEATURES.index("pressure_bar")
+        weight_index = DREAMER_OBSERVATION_FEATURES.index("weight_g")
+        grind_index = DREAMER_STATIC_CONTEXT_FEATURES.index("relative_grind_steps_from_reference")
+        initial_yield_index = DREAMER_STATIC_CONTEXT_FEATURES.index("initial_target_yield_g")
+        direction_index = DREAMER_STATIC_CONTEXT_FEATURES.index("step_direction_sign")
+        auto_index = DREAMER_STATIC_CONTEXT_FEATURES.index("taste_objective_auto")
+
+        self.assertEqual(batch["observations"][0, 0, pressure_index].item(), 1.0)
+        self.assertAlmostEqual(batch["observations"][0, 10, weight_index].item(), 3.6, places=6)
+        self.assertEqual(batch["static_context"][0, grind_index].item(), -2.0)
+        self.assertEqual(batch["static_context"][0, initial_yield_index].item(), 36.0)
+        self.assertEqual(batch["static_context"][0, direction_index].item(), 1.0)
+        self.assertEqual(batch["static_context"][0, auto_index].item(), 1.0)
+        self.assertAlmostEqual(batch["rewards"][0, 99].item(), 0.8, places=6)
+        self.assertEqual(batch["continuations"][0, 98].item(), 1.0)
+        self.assertEqual(batch["continuations"][0, 99].item(), 0.0)
+        self.assertEqual(batch["step_mask"][0, 99].item(), 1.0)
+        self.assertAlmostEqual(batch["episode_weights"][0].item(), 0.2, places=6)
+
+    def test_episode_batch_pads_shorter_episodes_and_masks_padding(self) -> None:
+        first = build_dreamer_episodes_from_training_rows([training_row(1)])[0]
+        second = copy.deepcopy(first)
+        second["episode_id"] = "training_row_2"
+        second["source_training_row_id"] = 2
+        first["steps"] = first["steps"][:2]
+        second["steps"] = second["steps"][:3]
+
+        batch = build_dreamer_episode_batch([second, first], pad_to_step_count=4)
+
+        self.assertEqual(tuple(batch["observations"].shape), (2, 4, len(DREAMER_OBSERVATION_FEATURES)))
+        self.assertEqual(batch["step_mask"][0].tolist(), [1.0, 1.0, 0.0, 0.0])
+        self.assertEqual(batch["step_mask"][1].tolist(), [1.0, 1.0, 1.0, 0.0])
+        self.assertAlmostEqual(batch["rewards"][0, 1].item(), 0.8, places=6)
+        self.assertEqual(batch["rewards"][0, [0, 2, 3]].tolist(), [0.0, 0.0, 0.0])
+        self.assertEqual(batch["continuations"][1].tolist(), [1.0, 1.0, 0.0, 0.0])
+
+    def test_episode_batch_encodes_dynamic_action_values_and_presence_masks(self) -> None:
+        episode = build_dreamer_episodes_from_training_rows([training_row(1)])[0]
+        episode["steps"][0]["dynamic_action"] = {"yield_stop_target_g": 38.5, "stop": False}
+
+        batch = build_dreamer_episode_batch([episode])
+
+        yield_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("yield_stop_target_g")
+        stop_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("stop")
+        pressure_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")
+        self.assertEqual(batch["dynamic_actions"][0, 0, yield_index].item(), 38.5)
+        self.assertEqual(batch["dynamic_action_mask"][0, 0, yield_index].item(), 1.0)
+        self.assertEqual(batch["dynamic_actions"][0, 0, stop_index].item(), 0.0)
+        self.assertEqual(batch["dynamic_action_mask"][0, 0, stop_index].item(), 1.0)
+        self.assertEqual(batch["dynamic_action_mask"][0, 0, pressure_index].item(), 0.0)
+        self.assertEqual(batch["dynamic_action_mask"][0, 1, yield_index].item(), 0.0)
+
+    def test_episode_batch_rejects_invalid_episode(self) -> None:
+        episode = build_dreamer_episodes_from_training_rows([training_row(1)])[0]
+        episode["static_context"]["current_absolute_step"] = 42
+
+        with self.assertRaisesRegex(DreamerEpisodeDatasetError, "current_absolute_step"):
+            build_dreamer_episode_batch([episode])
 
 
 def training_row(
