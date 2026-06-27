@@ -19,7 +19,10 @@ from espresso_rl.application.trainer_artifacts import (
     DEFAULT_MAX_DATASET_BYTES,
 )
 from espresso_rl.domain.model_manifest import validate_model_manifest
-from espresso_rl.domain.trainer_artifacts import default_training_config
+from espresso_rl.domain.trainer_artifacts import (
+    TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
+    default_training_config,
+)
 from espresso_rl.trainer_cli import main as trainer_cli_main
 
 
@@ -156,6 +159,48 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(tensor_contract["decision_step_count"], 2)
         self.assertTrue(tensor_contract["control_spec"]["pressure_control_allowed"])
 
+    def test_world_model_smoke_stage_writes_deterministic_metrics_without_inference_ready(self) -> None:
+        dataset_text, manifest_text = dataset_export_text([training_row(1)])
+        config_text = canonical_json(
+            default_training_config(seed=11, artifact_stage=TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
+        ) + "\n"
+
+        first = build_dreamer_trainer_artifacts(
+            training_rows_jsonl=dataset_text,
+            training_dataset_manifest_json=manifest_text,
+            training_config_json=config_text,
+            trainer_git_sha="trainerabc",
+            created_at=1_800_000_000,
+        )
+        second = build_dreamer_trainer_artifacts(
+            training_rows_jsonl=dataset_text,
+            training_dataset_manifest_json=manifest_text,
+            training_config_json=config_text,
+            trainer_git_sha="trainerabc",
+            created_at=1_800_000_000,
+        )
+
+        first_files = {file.relative_path: file for file in first.files}
+        second_files = {file.relative_path: file for file in second.files}
+        self.assertEqual(first_files[AUDIT_REPORT_FILENAME].content, second_files[AUDIT_REPORT_FILENAME].content)
+        self.assertEqual(first_files[MODEL_FILENAME].content, second_files[MODEL_FILENAME].content)
+        audit = json.loads(first_files[AUDIT_REPORT_FILENAME].content.decode("utf-8"))
+        manifest = json.loads(first_files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
+        model_metadata = placeholder_metadata(first_files[MODEL_FILENAME].content)
+
+        self.assertEqual(audit["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
+        self.assertTrue(audit["zero_trust"]["world_model_smoke_trained"])
+        self.assertEqual(audit["world_model_smoke"]["seed"], 11)
+        self.assertEqual(audit["world_model_smoke"]["train_steps"], 2)
+        self.assertLess(
+            audit["world_model_smoke"]["final"]["loss_total"],
+            audit["world_model_smoke"]["initial"]["loss_total"],
+        )
+        self.assertFalse(manifest["runtime_compatibility"]["inference_ready"])
+        self.assertEqual(manifest["trainer"]["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
+        self.assertEqual(model_metadata["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
+        self.assertEqual(len(model_metadata["world_model_smoke_sha256"]), 64)
+
     def test_rejects_training_config_with_non_dreamer_adaptive_control(self) -> None:
         dataset_text, manifest_text = dataset_export_text([training_row(1)])
         config = default_training_config()
@@ -219,6 +264,28 @@ class TrainerArtifactTests(unittest.TestCase):
             self.assertTrue((output_dir / MODEL_FILENAME).is_file())
             self.assertTrue((output_dir / MODEL_MANIFEST_FILENAME).is_file())
             self.assertTrue((output_dir / CHECKSUMS_FILENAME).is_file())
+
+    def test_cli_writes_world_model_smoke_default_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "training_config.json"
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = trainer_cli_main(
+                    [
+                        "--write-default-config",
+                        str(config_path),
+                        "--artifact-stage",
+                        "world_model_smoke",
+                        "--seed",
+                        "13",
+                    ]
+                )
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(config["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
+            self.assertEqual(config["seed"], 13)
+            self.assertEqual(config["world_model_smoke_steps"], 2)
 
 
 def dataset_export_text(rows: list[dict]) -> tuple[str, str]:
@@ -332,6 +399,12 @@ def fixed_cadence_sequence(step_count: int = 4) -> dict:
         "pump_target_mode": [1 for _ in range(step_count)],
         "valve_open": [True for _ in range(step_count)],
     }
+
+
+def placeholder_metadata(payload: bytes) -> dict:
+    header_len = int.from_bytes(payload[:8], "little")
+    header = json.loads(payload[8 : 8 + header_len].decode("utf-8"))
+    return header["__metadata__"]
 
 
 def canonical_json(value) -> str:

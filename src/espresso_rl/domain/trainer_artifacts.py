@@ -9,6 +9,13 @@ TRAINING_CONFIG_FORMAT = "espresso_rl_training_config_v1"
 TRAINING_CONFIG_SCHEMA_VERSION = 1
 TRAINER_AUDIT_REPORT_FORMAT = "espresso_rl_trainer_audit_report_v1"
 TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY = "artifact_contract_only"
+TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE = "world_model_smoke"
+TRAINER_ARTIFACT_STAGES = frozenset(
+    {
+        TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
+        TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
+    }
+)
 
 _TRAINING_CONFIG_FIELDS = frozenset(
     {
@@ -17,6 +24,7 @@ _TRAINING_CONFIG_FIELDS = frozenset(
         "model_family",
         "artifact_stage",
         "dreamer_control_spec",
+        "world_model_smoke_steps",
         "seed",
         "notes",
     }
@@ -34,8 +42,17 @@ def validate_training_config(config: dict[str, Any]) -> list[str]:
         errors.append("training config schema_version is unsupported")
     if config.get("model_family") != MODEL_FAMILY_DREAMER_V3:
         errors.append("training config model_family is unsupported")
-    if config.get("artifact_stage") != TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY:
+    artifact_stage = config.get("artifact_stage")
+    if artifact_stage not in TRAINER_ARTIFACT_STAGES:
         errors.append("training config artifact_stage is unsupported")
+    smoke_steps = config.get("world_model_smoke_steps")
+    if smoke_steps is not None and (
+        artifact_stage != TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE
+        or isinstance(smoke_steps, bool)
+        or not isinstance(smoke_steps, int)
+        or not 1 <= smoke_steps <= 20
+    ):
+        errors.append("training config world_model_smoke_steps is invalid")
     try:
         DreamerControlSpec.from_dict(config.get("dreamer_control_spec"))
     except ValueError as exc:
@@ -49,15 +66,25 @@ def validate_training_config(config: dict[str, Any]) -> list[str]:
     return errors
 
 
-def default_training_config(*, seed: int = 0) -> dict[str, Any]:
-    return {
+def default_training_config(
+    *,
+    seed: int = 0,
+    artifact_stage: str = TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
+) -> dict[str, Any]:
+    config = {
         "format": TRAINING_CONFIG_FORMAT,
         "schema_version": TRAINING_CONFIG_SCHEMA_VERSION,
         "model_family": MODEL_FAMILY_DREAMER_V3,
-        "artifact_stage": TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
+        "artifact_stage": artifact_stage,
         "dreamer_control_spec": DEFAULT_DREAMER_CONTROL_SPEC.to_dict(),
         "seed": seed,
     }
+    if artifact_stage == TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE:
+        config["world_model_smoke_steps"] = 2
+    errors = validate_training_config(config)
+    if errors:
+        raise ValueError("; ".join(errors[:10]))
+    return config
 
 
 def _reject_unknown_fields(value: dict[str, Any], allowed: frozenset[str], errors: list[str]) -> None:

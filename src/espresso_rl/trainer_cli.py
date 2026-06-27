@@ -20,7 +20,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.write_default_config:
-            _write_default_config(Path(args.write_default_config), seed=args.seed, force=args.force)
+            _write_default_config(
+                Path(args.write_default_config),
+                seed=args.seed,
+                artifact_stage=args.artifact_stage,
+                force=args.force,
+            )
             return 0
         _require_build_args(args)
         dataset_path = Path(args.dataset_jsonl)
@@ -67,6 +72,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Write a minimal artifact-contract-only training_config.json and exit",
     )
     parser.add_argument("--seed", type=int, default=0, help="Seed used by --write-default-config")
+    parser.add_argument(
+        "--artifact-stage",
+        default="artifact_contract_only",
+        choices=("artifact_contract_only", "world_model_smoke"),
+        help="Artifact stage used by --write-default-config",
+    )
     return parser
 
 
@@ -80,12 +91,12 @@ def _require_build_args(args: argparse.Namespace) -> None:
         raise TrainerArtifactError(f"missing required arguments: {', '.join('--' + name.replace('_', '-') for name in missing)}")
 
 
-def _write_default_config(path: Path, *, seed: int, force: bool) -> None:
+def _write_default_config(path: Path, *, seed: int, artifact_stage: str, force: bool) -> None:
     if path.exists() and not force:
         raise TrainerArtifactError(f"{path} already exists; use --force to overwrite")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(default_training_config(seed=seed), sort_keys=True, indent=2) + "\n",
+        json.dumps(default_training_config(seed=seed, artifact_stage=artifact_stage), sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
         newline="\n",
     )

@@ -20,7 +20,7 @@ from espresso_rl.domain.model_manifest import (
 )
 from espresso_rl.domain.optimization import OPTIMIZER_MODE_DREAMER_V3_SHADOW
 from espresso_rl.domain.trainer_artifacts import (
-    TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
+    TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
     TRAINER_AUDIT_REPORT_FORMAT,
     validate_training_config,
 )
@@ -29,6 +29,10 @@ from espresso_rl.dreamer.dataset import (
     DreamerEpisodeDatasetError,
     build_dreamer_episode_batch,
     build_dreamer_episodes_from_training_rows,
+)
+from espresso_rl.dreamer.world_model_smoke import (
+    FixedCadenceWorldModelSmokeError,
+    run_fixed_cadence_world_model_smoke_train,
 )
 
 MODEL_FILENAME = "dreamer_v3.safetensors"
@@ -136,8 +140,14 @@ def build_dreamer_trainer_artifacts(
     config_errors = validate_training_config(training_config)
     if config_errors:
         raise TrainerArtifactError("; ".join(config_errors[:10]))
+    artifact_stage = training_config["artifact_stage"]
     control_spec = DreamerControlSpec.from_dict(training_config["dreamer_control_spec"])
-    dreamer_tensor_contract = _dreamer_tensor_contract(training_rows, control_spec=control_spec)
+    dreamer_tensor_build = _dreamer_tensor_build(training_rows, control_spec=control_spec)
+    dreamer_tensor_contract = dreamer_tensor_build["contract"]
+    world_model_smoke = _world_model_smoke_metrics(
+        dreamer_tensor_build["batch"],
+        training_config=training_config,
+    )
     canonical_training_config_text = _canonical_json(training_config) + "\n"
     canonical_training_config_payload = canonical_training_config_text.encode("utf-8")
     training_config_sha256 = _sha256_bytes(canonical_training_config_payload)
@@ -146,6 +156,8 @@ def build_dreamer_trainer_artifacts(
         dataset_sha256=dataset_sha256,
         training_config_sha256=training_config_sha256,
         dreamer_tensor_contract_sha256=dreamer_tensor_contract["tensor_contract_sha256"],
+        world_model_smoke_sha256=_sha256_json(world_model_smoke) if world_model_smoke is not None else None,
+        artifact_stage=artifact_stage,
         row_count=row_count,
         created_at=created_at,
     )
@@ -156,6 +168,7 @@ def build_dreamer_trainer_artifacts(
         dataset_manifest_sha256=dataset_manifest_sha256,
         training_config_sha256=training_config_sha256,
         trainer_git_sha=trainer_git_sha,
+        artifact_stage=artifact_stage,
     )
     model_manifest_payload = (_canonical_json(model_manifest) + "\n").encode("utf-8")
     model_manifest_sha256 = _sha256_bytes(model_manifest_payload)
@@ -172,6 +185,8 @@ def build_dreamer_trainer_artifacts(
                 model_manifest_sha256=model_manifest_sha256,
                 trainer_git_sha=trainer_git_sha,
                 dreamer_tensor_contract=dreamer_tensor_contract,
+                world_model_smoke=world_model_smoke,
+                artifact_stage=artifact_stage,
             )
         )
         + "\n"
@@ -201,7 +216,7 @@ def build_dreamer_trainer_artifacts(
         model_manifest_sha256=model_manifest_sha256,
         files=files,
         warnings=(
-            "artifact_contract_only output is a placeholder safetensors file and is not inference-ready",
+            f"{artifact_stage} output is a placeholder safetensors file and is not inference-ready",
             "DreamerV3 active inference and training are not implemented in this command",
         ),
     )
@@ -244,7 +259,7 @@ def _validate_dataset(
     return [row for _, row in rows]
 
 
-def _dreamer_tensor_contract(
+def _dreamer_tensor_build(
     training_rows: list[dict[str, Any]],
     *,
     control_spec: DreamerControlSpec,
@@ -284,9 +299,29 @@ def _dreamer_tensor_contract(
         "control_spec": control_spec_dict,
     }
     return {
-        **tensor_contract_base,
-        "tensor_contract_sha256": _sha256_json(tensor_contract_base),
+        "contract": {
+            **tensor_contract_base,
+            "tensor_contract_sha256": _sha256_json(tensor_contract_base),
+        },
+        "batch": batch,
     }
+
+
+def _world_model_smoke_metrics(
+    batch: dict[str, Any],
+    *,
+    training_config: dict[str, Any],
+) -> dict[str, Any] | None:
+    if training_config.get("artifact_stage") != TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE:
+        return None
+    try:
+        return run_fixed_cadence_world_model_smoke_train(
+            batch,
+            seed=int(training_config["seed"]),
+            train_steps=int(training_config.get("world_model_smoke_steps", 2)),
+        ).to_dict()
+    except FixedCadenceWorldModelSmokeError as exc:
+        raise TrainerArtifactError(f"Dreamer world-model smoke training failed: {exc}") from exc
 
 
 def _feature_names(batch: dict[str, Any]) -> dict[str, list[str]]:
@@ -329,6 +364,7 @@ def _model_manifest(
     dataset_manifest_sha256: str,
     training_config_sha256: str,
     trainer_git_sha: str,
+    artifact_stage: str,
 ) -> dict[str, Any]:
     return {
         "format": MODEL_MANIFEST_FORMAT,
@@ -346,7 +382,7 @@ def _model_manifest(
         "trainer": {
             "git_sha": trainer_git_sha,
             "training_config_sha256": training_config_sha256,
-            "artifact_stage": TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
+            "artifact_stage": artifact_stage,
         },
         "schemas": {
             "state_schema_version": STATE_SCHEMA_VERSION,
@@ -372,13 +408,15 @@ def _audit_report(
     model_manifest_sha256: str,
     trainer_git_sha: str,
     dreamer_tensor_contract: dict[str, Any],
+    world_model_smoke: dict[str, Any] | None,
+    artifact_stage: str,
 ) -> dict[str, Any]:
     return {
         "format": TRAINER_AUDIT_REPORT_FORMAT,
         "schema_version": 1,
         "created_at": int(created_at),
         "model_family": MODEL_FAMILY_DREAMER_V3,
-        "artifact_stage": TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
+        "artifact_stage": artifact_stage,
         "inference_ready": False,
         "row_count": row_count,
         "dataset_sha256": dataset_sha256,
@@ -388,10 +426,12 @@ def _audit_report(
         "model_manifest_sha256": model_manifest_sha256,
         "trainer_git_sha": trainer_git_sha,
         "dreamer_tensor_contract": dreamer_tensor_contract,
+        "world_model_smoke": world_model_smoke,
         "zero_trust": {
             "dataset_manifest_hash_verified": True,
             "training_rows_revalidated": True,
             "dreamer_tensors_revalidated": True,
+            "world_model_smoke_trained": world_model_smoke is not None,
             "absolute_grinder_fields_allowed": False,
             "pickle_outputs_allowed": False,
             "runtime_inference_enabled": False,
@@ -404,6 +444,8 @@ def _placeholder_safetensors(
     dataset_sha256: str,
     training_config_sha256: str,
     dreamer_tensor_contract_sha256: str,
+    world_model_smoke_sha256: str | None,
+    artifact_stage: str,
     row_count: int,
     created_at: int,
 ) -> bytes:
@@ -411,11 +453,12 @@ def _placeholder_safetensors(
         "__metadata__": {
             "format": "espresso_rl_placeholder_safetensors_v1",
             "model_family": MODEL_FAMILY_DREAMER_V3,
-            "artifact_stage": TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
+            "artifact_stage": artifact_stage,
             "inference_ready": "false",
             "dataset_sha256": dataset_sha256,
             "training_config_sha256": training_config_sha256,
             "dreamer_tensor_contract_sha256": dreamer_tensor_contract_sha256,
+            "world_model_smoke_sha256": world_model_smoke_sha256 or "",
             "row_count": str(row_count),
             "created_at": str(int(created_at)),
         }
