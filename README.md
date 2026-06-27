@@ -613,6 +613,17 @@ A successfully loaded preview is reported as `checkpoint_verified=true` and
 bytes are not an executable policy, DreamerV3 is not added to the available
 optimizer modes, and Bayesian Optimization remains active.
 
+Checkpoint contract v2 also authenticates the exact world-model, actor, and
+critic reconstruction configuration. The trainer records a deterministic
+inference-probe hash from the original modules, serializes the checkpoint,
+reloads it through the same strict runtime loader, and requires the reloaded
+modules to reproduce both that probe and the held-out validation inference
+hash. Materialized modules are CPU-only, evaluation mode, and have gradients
+disabled. Runtime status exposes checkpoint parity separately from inference
+readiness; parity does not enable recommendations or machine control.
+Earlier v1 preview checkpoints do not contain authenticated reconstruction
+metadata and must be regenerated; they are rejected rather than inferred.
+
 ## Warm-Started BO Priors
 
 Runtime recommendation generation can consume canonical `PriorPoint` values

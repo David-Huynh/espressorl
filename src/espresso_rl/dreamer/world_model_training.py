@@ -9,6 +9,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from espresso_rl.domain.model_checkpoint import DreamerCheckpointArchitecture
+from espresso_rl.dreamer.checkpoint_inference import (
+    checkpoint_architecture_from_models,
+    dreamer_inference_probe_sha256,
+    dreamer_batch_inference_sha256,
+)
 from espresso_rl.dreamer.imagination import (
     DreamerV3ImaginationActor,
     DreamerV3ImaginationConfig,
@@ -93,6 +99,10 @@ class WorldModelTrainPreviewResult:
     imagination_preview: dict[str, Any]
     evaluation_report: dict[str, Any]
     checkpoint_tensors: dict[str, torch.Tensor]
+    checkpoint_architecture: DreamerCheckpointArchitecture
+    inference_probe_sha256: str
+    heldout_inference_sha256: str
+    parity_batch: dict[str, torch.Tensor]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -132,6 +142,9 @@ class WorldModelTrainPreviewResult:
             "imagination_preview": self.imagination_preview,
             "evaluation_report": self.evaluation_report,
             "checkpoint_tensor_names": sorted(self.checkpoint_tensors),
+            "checkpoint_architecture": self.checkpoint_architecture.to_dict(),
+            "inference_probe_sha256": self.inference_probe_sha256,
+            "heldout_inference_sha256": self.heldout_inference_sha256,
         }
 
 
@@ -275,6 +288,27 @@ def run_fixed_cadence_world_model_train_preview(
             imagination_config=imagination_config,
         )
         checkpoint_tensors = _checkpoint_tensors(model, actor, critic)
+        checkpoint_architecture = checkpoint_architecture_from_models(
+            world_model=model,
+            actor=actor,
+            critic=critic,
+            observation_dim=int(train_tensors["observations"].shape[-1]),
+            behavior_dim=int(_behavior_tensor(train_tensors).shape[-1]),
+            static_dim=int(train_tensors["static_context"].shape[-1]),
+            dynamic_action_dim=int(train_tensors["dynamic_actions"].shape[-1]),
+        )
+        inference_probe_sha256 = dreamer_inference_probe_sha256(
+            world_model=model,
+            actor=actor,
+            critic=critic,
+            architecture=checkpoint_architecture,
+        )
+        heldout_inference_sha256 = dreamer_batch_inference_sha256(
+            world_model=model,
+            actor=actor,
+            critic=critic,
+            batch=validation_tensors,
+        )
     finally:
         torch.use_deterministic_algorithms(old_deterministic)
         torch.set_num_threads(old_threads)
@@ -291,6 +325,10 @@ def run_fixed_cadence_world_model_train_preview(
         imagination_preview=imagination_preview,
         evaluation_report=evaluation_report,
         checkpoint_tensors=checkpoint_tensors,
+        checkpoint_architecture=checkpoint_architecture,
+        inference_probe_sha256=inference_probe_sha256,
+        heldout_inference_sha256=heldout_inference_sha256,
+        parity_batch=validation_tensors,
     )
 
 

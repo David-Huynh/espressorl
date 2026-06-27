@@ -40,6 +40,10 @@ from espresso_rl.adapters.file_artifacts import LocalTextArtifactWriter
 from espresso_rl.adapters.local_model_store import LocalModelArtifactStore
 from espresso_rl.application.admin_pipeline import AdminPipelineService
 from espresso_rl.application.checkpoint_loading import CheckpointLoadError, load_verified_dreamer_checkpoint
+from espresso_rl.application.dreamer_shadow_inference import (
+    DreamerShadowInferenceError,
+    build_dreamer_shadow_inference_session,
+)
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.community_priors import CommunityPriorGenerationService
@@ -99,6 +103,16 @@ def main() -> None:
 
     shot_repo, recommendation_repo, upload_queue_repo, local_data_repo = open_repositories(config)
     verified_checkpoint, checkpoint_unavailable_reason = load_configured_dreamer_checkpoint(config)
+    checkpoint_inference_parity_verified = False
+    checkpoint_inference_parity_reason = None
+    dreamer_shadow_session = None
+    if verified_checkpoint is not None:
+        try:
+            dreamer_shadow_session = build_dreamer_shadow_inference_session(verified_checkpoint)
+            checkpoint_inference_parity_verified = dreamer_shadow_session.status.parity_verified
+        except DreamerShadowInferenceError as exc:
+            checkpoint_inference_parity_reason = str(exc)
+            logger.warning("DreamerV3 checkpoint inference parity failed: %s", exc)
     runtime_optimizer = RuntimeOptimizer(
         optimizer_mode=config.optimizer_mode,
         model_artifact_path=config.optimizer_model_artifact_path,
@@ -107,6 +121,8 @@ def main() -> None:
         model_artifact_max_bytes=config.optimizer_model_artifact_max_bytes,
         verified_checkpoint=verified_checkpoint,
         checkpoint_unavailable_reason=checkpoint_unavailable_reason,
+        checkpoint_inference_parity_verified=checkpoint_inference_parity_verified,
+        checkpoint_inference_parity_reason=checkpoint_inference_parity_reason,
     )
     service = EspressoRLService(
         shots=shot_repo,
@@ -642,7 +658,12 @@ def build_status_payload(
         "checkpoint_inference_ready": False,
         "checkpoint_tensor_count": 0,
         "checkpoint_component_names": [],
+        "checkpoint_architecture_sha256": None,
+        "checkpoint_inference_probe_sha256": None,
+        "checkpoint_heldout_inference_sha256": None,
         "checkpoint_unavailable_reason": "DreamerV3 checkpoint has not passed strict tensor verification.",
+        "checkpoint_inference_parity_verified": False,
+        "checkpoint_inference_parity_reason": "DreamerV3 checkpoint has not been materialized.",
         "dreamer_v3_available": config_dreamer_v3_available,
         "available_modes": [DEFAULT_OPTIMIZER_MODE]
         + ([OPTIMIZER_MODE_DREAMER_V3_SHADOW] if config_dreamer_v3_available else []),
@@ -702,7 +723,18 @@ def build_status_payload(
         "optimizer_checkpoint_inference_ready": bool(optimizer_status.get("checkpoint_inference_ready")),
         "optimizer_checkpoint_tensor_count": int(optimizer_status.get("checkpoint_tensor_count") or 0),
         "optimizer_checkpoint_component_names": optimizer_status.get("checkpoint_component_names") or [],
+        "optimizer_checkpoint_architecture_sha256": optimizer_status.get("checkpoint_architecture_sha256"),
+        "optimizer_checkpoint_inference_probe_sha256": optimizer_status.get("checkpoint_inference_probe_sha256"),
+        "optimizer_checkpoint_heldout_inference_sha256": optimizer_status.get(
+            "checkpoint_heldout_inference_sha256"
+        ),
         "optimizer_checkpoint_unavailable_reason": optimizer_status.get("checkpoint_unavailable_reason"),
+        "optimizer_checkpoint_inference_parity_verified": bool(
+            optimizer_status.get("checkpoint_inference_parity_verified")
+        ),
+        "optimizer_checkpoint_inference_parity_reason": optimizer_status.get(
+            "checkpoint_inference_parity_reason"
+        ),
         "optimizer_dreamer_v3_available": bool(optimizer_status.get("dreamer_v3_available")),
         "optimizer_available_modes": optimizer_status.get("available_modes") or [DEFAULT_OPTIMIZER_MODE],
         "optimizer_unavailable_modes": optimizer_status.get("unavailable_modes") or {},

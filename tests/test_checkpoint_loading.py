@@ -25,6 +25,16 @@ class MemoryModelArtifactStore:
         return payload
 
 
+class RecordingBOOptimizer:
+    def __init__(self) -> None:
+        self.result = object()
+        self.contexts = []
+
+    def recommend(self, context):
+        self.contexts.append(context)
+        return self.result
+
+
 class CheckpointLoadingTests(unittest.TestCase):
     def test_loads_authenticated_checkpoint_as_non_executable_typed_data(self) -> None:
         bundle = checkpoint_bundle()
@@ -96,6 +106,19 @@ class CheckpointLoadingTests(unittest.TestCase):
                 compatibility=DreamerCheckpointCompatibility(feature_layout_sha256="9" * 64),
             )
 
+    def test_rejects_invalid_authenticated_runtime_architecture(self) -> None:
+        bundle = checkpoint_bundle()
+        architecture = bundle["manifest"]["model_artifact"]["architecture"]
+        architecture["world_model"]["deter_dim"] = 0
+        architecture_sha256 = sha256_json(architecture)
+        bundle["manifest"]["model_artifact"]["architecture_sha256"] = architecture_sha256
+        header, data = split_safetensors(bundle["artifact"])
+        header["__metadata__"]["architecture_sha256"] = architecture_sha256
+        replace_artifact(bundle, encode_safetensors(header, data))
+
+        with self.assertRaisesRegex(CheckpointLoadError, "runtime architecture is invalid"):
+            load_bundle(bundle)
+
     def test_rejects_manifest_duplicate_fields(self) -> None:
         bundle = checkpoint_bundle()
         manifest_text = bundle["manifest_payload"].decode("utf-8")
@@ -127,12 +150,15 @@ class CheckpointLoadingTests(unittest.TestCase):
                 manifest_reference=str(manifest_path),
                 expected_artifact_sha256=bundle["artifact_sha256"],
             )
+            bo_optimizer = RecordingBOOptimizer()
             optimizer = RuntimeOptimizer(
                 optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_SHADOW,
                 model_artifact_path=str(artifact_path),
                 model_artifact_sha256=bundle["artifact_sha256"],
                 model_manifest_path=str(manifest_path),
                 verified_checkpoint=checkpoint,
+                checkpoint_inference_parity_verified=True,
+                bo_optimizer=bo_optimizer,
             )
 
         self.assertFalse(checkpoint.inference_ready)
@@ -140,7 +166,11 @@ class CheckpointLoadingTests(unittest.TestCase):
         self.assertFalse(optimizer.status().dreamer_v3_available)
         self.assertTrue(optimizer.status().checkpoint_verified)
         self.assertFalse(optimizer.status().checkpoint_inference_ready)
+        self.assertTrue(optimizer.status().checkpoint_inference_parity_verified)
         self.assertIn("not enabled", optimizer.status().checkpoint_unavailable_reason or "")
+        context = object()
+        self.assertIs(optimizer.recommend(context), bo_optimizer.result)
+        self.assertEqual(bo_optimizer.contexts, [context])
 
     def test_local_store_enforces_size_limit_and_reads_exact_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -213,9 +243,43 @@ def checkpoint_bundle() -> dict:
         "tensors": tensor_entries,
     }
     tensor_manifest_sha256 = sha256_json(tensor_manifest)
+    architecture = {
+        "format": "espresso_rl_dreamer_v3_checkpoint_architecture_v1",
+        "schema_version": 1,
+        "observation_dim": 5,
+        "behavior_dim": 39,
+        "static_dim": 18,
+        "dynamic_action_dim": 7,
+        "world_model": {
+            "model_preset": "espresso_debug",
+            "deter_dim": 32,
+            "hidden_dim": 32,
+            "stoch_size": 4,
+            "class_size": 4,
+            "action_embed_dim": 16,
+            "reward_bins": 41,
+            "unimix": 0.01,
+            "free_nats": 1.0,
+            "dyn_loss_scale": 1.0,
+            "rep_loss_scale": 0.1,
+            "observation_loss_scale": 1.0,
+            "reward_loss_scale": 1.0,
+            "continuation_loss_scale": 1.0,
+        },
+        "imagination": {
+            "horizon": 3,
+            "actor_hidden_dim": 32,
+            "critic_hidden_dim": 32,
+            "value_bins": 41,
+            "discount": 0.997,
+            "lambda_return": 0.95,
+            "actor_entropy_scale": 0.0003,
+        },
+    }
+    architecture_sha256 = sha256_json(architecture)
     metadata = {
-        "format": "espresso_rl_dreamer_v3_checkpoint_safetensors_v1",
-        "schema_version": "1",
+        "format": "espresso_rl_dreamer_v3_checkpoint_safetensors_v2",
+        "schema_version": "2",
         "model_family": "dreamer_v3",
         "artifact_stage": "world_model_train_preview",
         "inference_ready": "false",
@@ -225,6 +289,9 @@ def checkpoint_bundle() -> dict:
         "feature_layout_sha256": "5" * 64,
         "control_spec_sha256": "6" * 64,
         "tensor_manifest_sha256": tensor_manifest_sha256,
+        "architecture_sha256": architecture_sha256,
+        "inference_probe_sha256": "9" * 64,
+        "heldout_inference_sha256": "a" * 64,
         "evaluation_report_sha256": "7" * 64,
         "world_model_smoke_sha256": "",
         "world_model_train_preview_sha256": "8" * 64,
@@ -240,9 +307,13 @@ def checkpoint_bundle() -> dict:
         "model_artifact": {
             "format": "safetensors",
             "sha256": artifact_sha256,
-            "checkpoint_format": "espresso_rl_dreamer_v3_checkpoint_safetensors_v1",
-            "checkpoint_schema_version": 1,
+            "checkpoint_format": "espresso_rl_dreamer_v3_checkpoint_safetensors_v2",
+            "checkpoint_schema_version": 2,
             "tensor_manifest_sha256": tensor_manifest_sha256,
+            "architecture": architecture,
+            "architecture_sha256": architecture_sha256,
+            "inference_probe_sha256": "9" * 64,
+            "heldout_inference_sha256": "a" * 64,
             "evaluation_report_sha256": "7" * 64,
             "tensor_manifest": tensor_manifest,
             "tensor_count": 3,

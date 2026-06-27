@@ -9,6 +9,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from espresso_rl.application.checkpoint_loading import load_verified_dreamer_checkpoint
+from espresso_rl.application.dreamer_shadow_inference import build_dreamer_shadow_inference_session
 from espresso_rl.application.trainer_artifacts import (
     AUDIT_REPORT_FILENAME,
     CHECKPOINT_ARTIFACT_FORMAT,
@@ -297,6 +298,14 @@ class TrainerArtifactTests(unittest.TestCase):
             manifest["model_artifact"]["evaluation_report_sha256"],
             model_metadata["evaluation_report_sha256"],
         )
+        self.assertEqual(
+            manifest["model_artifact"]["inference_probe_sha256"],
+            model_metadata["inference_probe_sha256"],
+        )
+        self.assertEqual(
+            manifest["model_artifact"]["heldout_inference_sha256"],
+            model_metadata["heldout_inference_sha256"],
+        )
         validate_dreamer_checkpoint_safetensors(first_files[MODEL_FILENAME].content, manifest)
         self.assertEqual(preview["seed"], 17)
         self.assertEqual(preview["epochs_requested"], 2)
@@ -321,6 +330,11 @@ class TrainerArtifactTests(unittest.TestCase):
         evaluation = preview["evaluation_report"]
         evaluation_sha = hashlib.sha256(canonical_json(evaluation).encode("utf-8")).hexdigest()
         self.assertEqual(audit["evaluation_report_sha256"], evaluation_sha)
+        self.assertEqual(
+            audit["heldout_inference_sha256"],
+            manifest["model_artifact"]["heldout_inference_sha256"],
+        )
+        self.assertTrue(audit["zero_trust"]["heldout_inference_parity_verified"])
         self.assertEqual(manifest["model_artifact"]["evaluation_report_sha256"], evaluation_sha)
         self.assertFalse(evaluation["inference_ready"])
         self.assertIn("evaluation_passed", evaluation["gates"])
@@ -348,6 +362,22 @@ class TrainerArtifactTests(unittest.TestCase):
         )
         self.assertEqual(loaded.component_names, ("actor", "critic", "world_model"))
         self.assertGreater(len(loaded.tensors), 0)
+        shadow_session = build_dreamer_shadow_inference_session(loaded)
+        self.assertTrue(shadow_session.status.parity_verified)
+        self.assertFalse(shadow_session.status.inference_ready)
+        self.assertFalse(shadow_session.status.recommendation_enabled)
+        self.assertFalse(shadow_session.status.machine_control_enabled)
+        self.assertEqual(
+            shadow_session.status.inference_probe_sha256,
+            manifest["model_artifact"]["inference_probe_sha256"],
+        )
+        self.assertEqual(
+            shadow_session.status.heldout_inference_sha256,
+            manifest["model_artifact"]["heldout_inference_sha256"],
+        )
+        self.assertTrue(
+            all(not parameter.requires_grad for parameter in shadow_session.models.world_model.parameters())
+        )
 
     def test_checkpoint_safetensors_validation_rejects_manifest_tampering(self) -> None:
         dataset_text, manifest_text = dataset_export_text(

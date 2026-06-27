@@ -356,6 +356,8 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         "checkpoint_tensor_count": 3,
                         "checkpoint_component_names": ["actor", "critic", "world_model"],
                         "checkpoint_unavailable_reason": "Runtime inference is not enabled.",
+                        "checkpoint_inference_parity_verified": True,
+                        "checkpoint_inference_parity_reason": None,
                         "dreamer_v3_available": False,
                         "available_modes": ["bayesian_optimization"],
                         "unavailable_modes": {"dreamer_v3_shadow": "Runtime inference is not enabled."},
@@ -370,6 +372,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertFalse(status["optimizer_checkpoint_inference_ready"])
             self.assertEqual(status["optimizer_checkpoint_tensor_count"], 3)
             self.assertEqual(status["optimizer_checkpoint_component_names"], ["actor", "critic", "world_model"])
+            self.assertTrue(status["optimizer_checkpoint_inference_parity_verified"])
             self.assertEqual(status["optimizer_model_artifact_path"], "models/dreamer.pt")
             self.assertEqual(status["optimizer_model_artifact_actual_sha256"], "a" * 64)
             self.assertTrue(status["optimizer_model_artifact_verified"])

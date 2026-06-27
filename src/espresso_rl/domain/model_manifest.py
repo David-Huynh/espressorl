@@ -11,8 +11,8 @@ MODEL_MANIFEST_FORMAT = "espresso_rl_model_manifest_v1"
 MODEL_MANIFEST_SCHEMA_VERSION = 1
 MODEL_FAMILY_DREAMER_V3 = "dreamer_v3"
 MODEL_ARTIFACT_FORMAT_SAFETENSORS = "safetensors"
-CHECKPOINT_ARTIFACT_FORMAT = "espresso_rl_dreamer_v3_checkpoint_safetensors_v1"
-CHECKPOINT_ARTIFACT_SCHEMA_VERSION = 1
+CHECKPOINT_ARTIFACT_FORMAT = "espresso_rl_dreamer_v3_checkpoint_safetensors_v2"
+CHECKPOINT_ARTIFACT_SCHEMA_VERSION = 2
 CHECKPOINT_TENSOR_MANIFEST_FORMAT = "espresso_rl_checkpoint_tensor_manifest_v1"
 CHECKPOINT_TENSOR_MANIFEST_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 1
@@ -47,6 +47,9 @@ class ModelManifestValidation:
     control_spec_sha256: str | None = None
     evaluation_report_sha256: str | None = None
     inference_ready: bool | None = None
+    architecture_sha256: str | None = None
+    inference_probe_sha256: str | None = None
+    heldout_inference_sha256: str | None = None
 
 
 def validate_model_manifest(
@@ -144,6 +147,9 @@ def validate_model_manifest(
     control_spec_sha256 = _sha256(artifact.get("control_spec_sha256"))
     evaluation_report_value = artifact.get("evaluation_report_sha256")
     evaluation_report_sha256 = _sha256(evaluation_report_value) if evaluation_report_value else None
+    architecture_sha256 = _sha256(artifact.get("architecture_sha256"))
+    inference_probe_sha256 = _sha256(artifact.get("inference_probe_sha256"))
+    heldout_inference_sha256 = _sha256(artifact.get("heldout_inference_sha256"))
 
     return ModelManifestValidation(
         verified=True,
@@ -165,6 +171,9 @@ def validate_model_manifest(
         control_spec_sha256=control_spec_sha256,
         evaluation_report_sha256=evaluation_report_sha256,
         inference_ready=inference_ready,
+        architecture_sha256=architecture_sha256,
+        inference_probe_sha256=inference_probe_sha256,
+        heldout_inference_sha256=heldout_inference_sha256,
     )
 
 
@@ -190,6 +199,10 @@ def _validate_checkpoint_artifact_metadata(artifact: dict[str, Any], *, required
         return "DreamerV3 model manifest feature_layout_sha256 is invalid."
     if _sha256(artifact.get("control_spec_sha256")) is None:
         return "DreamerV3 model manifest control_spec_sha256 is invalid."
+    if _sha256(artifact.get("architecture_sha256")) is None:
+        return "DreamerV3 model manifest architecture_sha256 is invalid."
+    if not isinstance(artifact.get("architecture"), dict):
+        return "DreamerV3 model manifest architecture is missing."
     evaluation_report_sha256 = artifact.get("evaluation_report_sha256", "")
     if evaluation_report_sha256 != "" and _sha256(evaluation_report_sha256) is None:
         return "DreamerV3 model manifest evaluation_report_sha256 is invalid."
@@ -206,6 +219,17 @@ def _validate_checkpoint_artifact_metadata(artifact: dict[str, Any], *, required
         return "DreamerV3 model manifest tensor_count is invalid."
     if component_count is None or component_count != _nonnegative_int(tensor_manifest.get("component_count")):
         return "DreamerV3 model manifest component_count is invalid."
+    inference_probe_sha256 = artifact.get("inference_probe_sha256")
+    heldout_inference_sha256 = artifact.get("heldout_inference_sha256")
+    if tensor_count > 0:
+        if not artifact["architecture"]:
+            return "DreamerV3 model manifest architecture is missing."
+        if _sha256(inference_probe_sha256) is None:
+            return "DreamerV3 model manifest inference_probe_sha256 is invalid."
+        if _sha256(heldout_inference_sha256) is None:
+            return "DreamerV3 model manifest heldout_inference_sha256 is invalid."
+    elif artifact["architecture"] or inference_probe_sha256 != "" or heldout_inference_sha256 != "":
+        return "DreamerV3 empty checkpoint must not declare runtime architecture or inference probe."
     component_names = artifact.get("component_names")
     if not isinstance(component_names, list) or component_names != tensor_manifest.get("component_names"):
         return "DreamerV3 model manifest component_names are invalid."

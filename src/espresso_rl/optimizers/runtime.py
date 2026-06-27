@@ -83,7 +83,12 @@ class RuntimeOptimizerStatus:
     checkpoint_inference_ready: bool = False
     checkpoint_tensor_count: int = 0
     checkpoint_component_names: tuple[str, ...] = ()
+    checkpoint_architecture_sha256: str | None = None
+    checkpoint_inference_probe_sha256: str | None = None
+    checkpoint_heldout_inference_sha256: str | None = None
     checkpoint_unavailable_reason: str | None = None
+    checkpoint_inference_parity_verified: bool = False
+    checkpoint_inference_parity_reason: str | None = None
     dreamer_v3_available: bool = False
     available_modes: tuple[str, ...] = (DEFAULT_OPTIMIZER_MODE,)
     unavailable_modes: dict[str, str] | None = None
@@ -117,7 +122,12 @@ class RuntimeOptimizerStatus:
             "checkpoint_inference_ready": self.checkpoint_inference_ready,
             "checkpoint_tensor_count": self.checkpoint_tensor_count,
             "checkpoint_component_names": list(self.checkpoint_component_names),
+            "checkpoint_architecture_sha256": self.checkpoint_architecture_sha256,
+            "checkpoint_inference_probe_sha256": self.checkpoint_inference_probe_sha256,
+            "checkpoint_heldout_inference_sha256": self.checkpoint_heldout_inference_sha256,
             "checkpoint_unavailable_reason": self.checkpoint_unavailable_reason,
+            "checkpoint_inference_parity_verified": self.checkpoint_inference_parity_verified,
+            "checkpoint_inference_parity_reason": self.checkpoint_inference_parity_reason,
             "dreamer_v3_available": self.dreamer_v3_available,
             "available_modes": list(self.available_modes),
             "unavailable_modes": dict(self.unavailable_modes or {}),
@@ -138,6 +148,8 @@ class RuntimeOptimizer:
         model_artifact_max_bytes: int = 512 * 1024 * 1024,
         verified_checkpoint: VerifiedDreamerCheckpoint | None = None,
         checkpoint_unavailable_reason: str | None = None,
+        checkpoint_inference_parity_verified: bool = False,
+        checkpoint_inference_parity_reason: str | None = None,
         bo_optimizer: Optimizer | None = None,
     ) -> None:
         if model_artifact_max_bytes <= 0:
@@ -147,6 +159,8 @@ class RuntimeOptimizer:
         self._model_artifact_max_bytes = model_artifact_max_bytes
         self._verified_checkpoint = verified_checkpoint
         self._checkpoint_unavailable_reason = _clean_optional_text(checkpoint_unavailable_reason)
+        self._checkpoint_inference_parity_verified = bool(checkpoint_inference_parity_verified)
+        self._checkpoint_inference_parity_reason = _clean_optional_text(checkpoint_inference_parity_reason)
         self._status = self.configure(
             optimizer_mode=optimizer_mode,
             model_artifact_path=model_artifact_path,
@@ -254,7 +268,20 @@ class RuntimeOptimizer:
             checkpoint_inference_ready=checkpoint_inference_ready,
             checkpoint_tensor_count=len(checkpoint.tensors) if checkpoint_verified and checkpoint else 0,
             checkpoint_component_names=checkpoint.component_names if checkpoint_verified and checkpoint else (),
+            checkpoint_architecture_sha256=(
+                checkpoint.architecture_sha256 if checkpoint_verified and checkpoint else None
+            ),
+            checkpoint_inference_probe_sha256=(
+                checkpoint.inference_probe_sha256 if checkpoint_verified and checkpoint else None
+            ),
+            checkpoint_heldout_inference_sha256=(
+                checkpoint.heldout_inference_sha256 if checkpoint_verified and checkpoint else None
+            ),
             checkpoint_unavailable_reason=checkpoint_reason,
+            checkpoint_inference_parity_verified=(
+                checkpoint_verified and self._checkpoint_inference_parity_verified
+            ),
+            checkpoint_inference_parity_reason=self._checkpoint_inference_parity_reason,
             dreamer_v3_available=dreamer_v3_available,
             available_modes=available_modes,
             unavailable_modes=unavailable_modes,

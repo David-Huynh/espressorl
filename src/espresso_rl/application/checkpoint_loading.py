@@ -7,8 +7,13 @@ import re
 from typing import Any
 
 from espresso_rl.domain.model_checkpoint import (
+    DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT,
+    DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION,
+    DreamerCheckpointArchitecture,
     DreamerCheckpointCompatibility,
     DreamerCheckpointTensor,
+    DreamerImaginationArchitecture,
+    DreamerWorldModelArchitecture,
     VerifiedDreamerCheckpoint,
 )
 from espresso_rl.domain.model_manifest import (
@@ -66,6 +71,10 @@ _ARTIFACT_FIELDS = frozenset(
         "dreamer_tensor_contract_sha256",
         "feature_layout_sha256",
         "control_spec_sha256",
+        "architecture",
+        "architecture_sha256",
+        "inference_probe_sha256",
+        "heldout_inference_sha256",
     }
 )
 _METADATA_FIELDS = frozenset(
@@ -81,6 +90,9 @@ _METADATA_FIELDS = frozenset(
         "feature_layout_sha256",
         "control_spec_sha256",
         "tensor_manifest_sha256",
+        "architecture_sha256",
+        "inference_probe_sha256",
+        "heldout_inference_sha256",
         "evaluation_report_sha256",
         "world_model_smoke_sha256",
         "world_model_train_preview_sha256",
@@ -180,6 +192,26 @@ def load_verified_dreamer_checkpoint(
         data_start=data_start,
         artifact_stage=artifact_stage,
     )
+    architecture_payload = _require_object(artifact.get("architecture"), "checkpoint runtime architecture")
+    architecture_sha256 = _require_sha256(
+        artifact.get("architecture_sha256"),
+        "checkpoint runtime architecture SHA-256",
+    )
+    if _sha256_json(architecture_payload) != architecture_sha256:
+        raise CheckpointLoadError("checkpoint runtime architecture SHA-256 does not match its content")
+    architecture = _parse_architecture(architecture_payload) if tensors else None
+    inference_probe_sha256 = _optional_sha256(
+        artifact.get("inference_probe_sha256"),
+        "checkpoint inference probe SHA-256",
+    )
+    if tensors and inference_probe_sha256 is None:
+        raise CheckpointLoadError("checkpoint inference probe SHA-256 is missing")
+    heldout_inference_sha256 = _optional_sha256(
+        artifact.get("heldout_inference_sha256"),
+        "checkpoint heldout inference SHA-256",
+    )
+    if tensors and heldout_inference_sha256 is None:
+        raise CheckpointLoadError("checkpoint heldout inference SHA-256 is missing")
     _validate_compatibility(artifact, compatibility or DreamerCheckpointCompatibility())
 
     return VerifiedDreamerCheckpoint(
@@ -212,6 +244,10 @@ def load_verified_dreamer_checkpoint(
             artifact.get("evaluation_report_sha256"),
             "checkpoint evaluation report SHA-256",
         ),
+        architecture_sha256=architecture_sha256,
+        inference_probe_sha256=inference_probe_sha256,
+        heldout_inference_sha256=heldout_inference_sha256,
+        architecture=architecture,
         artifact_stage=artifact_stage,
         inference_ready=False,
         tensors=tensors,
@@ -302,6 +338,9 @@ def _validate_metadata(
         "feature_layout_sha256": artifact["feature_layout_sha256"],
         "control_spec_sha256": artifact["control_spec_sha256"],
         "tensor_manifest_sha256": tensor_manifest_sha256,
+        "architecture_sha256": artifact["architecture_sha256"],
+        "inference_probe_sha256": artifact["inference_probe_sha256"],
+        "heldout_inference_sha256": artifact["heldout_inference_sha256"],
         "evaluation_report_sha256": artifact["evaluation_report_sha256"],
         "artifact_stage": trainer["artifact_stage"],
     }
@@ -436,6 +475,81 @@ def _validate_compatibility(artifact: dict[str, Any], compatibility: DreamerChec
     for manifest_key, expected, label in checks:
         if expected is not None and artifact.get(manifest_key) != expected:
             raise CheckpointLoadError(f"checkpoint {label} is incompatible with this runtime")
+
+
+def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
+    _require_exact_fields(
+        value,
+        frozenset(
+            {
+                "format",
+                "schema_version",
+                "observation_dim",
+                "behavior_dim",
+                "static_dim",
+                "dynamic_action_dim",
+                "world_model",
+                "imagination",
+            }
+        ),
+        "checkpoint runtime architecture",
+    )
+    if value.get("format") != DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT:
+        raise CheckpointLoadError("checkpoint runtime architecture format is unsupported")
+    if value.get("schema_version") != DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION:
+        raise CheckpointLoadError("checkpoint runtime architecture schema version is unsupported")
+    world_model = _require_object(value.get("world_model"), "checkpoint world-model architecture")
+    _require_exact_fields(
+        world_model,
+        frozenset(
+            {
+                "model_preset",
+                "deter_dim",
+                "hidden_dim",
+                "stoch_size",
+                "class_size",
+                "action_embed_dim",
+                "reward_bins",
+                "unimix",
+                "free_nats",
+                "dyn_loss_scale",
+                "rep_loss_scale",
+                "observation_loss_scale",
+                "reward_loss_scale",
+                "continuation_loss_scale",
+            }
+        ),
+        "checkpoint world-model architecture",
+    )
+    imagination = _require_object(value.get("imagination"), "checkpoint imagination architecture")
+    _require_exact_fields(
+        imagination,
+        frozenset(
+            {
+                "horizon",
+                "actor_hidden_dim",
+                "critic_hidden_dim",
+                "value_bins",
+                "discount",
+                "lambda_return",
+                "actor_entropy_scale",
+            }
+        ),
+        "checkpoint imagination architecture",
+    )
+    try:
+        return DreamerCheckpointArchitecture(
+            format=value["format"],
+            schema_version=value["schema_version"],
+            observation_dim=value["observation_dim"],
+            behavior_dim=value["behavior_dim"],
+            static_dim=value["static_dim"],
+            dynamic_action_dim=value["dynamic_action_dim"],
+            world_model=DreamerWorldModelArchitecture(**world_model),
+            imagination=DreamerImaginationArchitecture(**imagination),
+        )
+    except (TypeError, ValueError) as exc:
+        raise CheckpointLoadError(f"checkpoint runtime architecture is invalid: {exc}") from exc
 
 
 def _tensor_shape(value: object, name: str) -> tuple[int, ...]:
