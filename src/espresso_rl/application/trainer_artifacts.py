@@ -6,6 +6,8 @@ import struct
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from espresso_rl.domain.dreamer_control import DreamerControlSpec
+from espresso_rl.domain.dreamer_episodes import DREAMER_EPISODE_FORMAT, DREAMER_EPISODE_SCHEMA_VERSION
 from espresso_rl.domain.model_manifest import (
     ACTION_SCHEMA_VERSION,
     MODEL_ARTIFACT_FORMAT_SAFETENSORS,
@@ -23,6 +25,11 @@ from espresso_rl.domain.trainer_artifacts import (
     validate_training_config,
 )
 from espresso_rl.domain.training import TRAINING_DATASET_FORMAT, TRAINING_SCHEMA_VERSION, TRAINING_TRANSITION_FORMAT, validate_training_transition
+from espresso_rl.dreamer.dataset import (
+    DreamerEpisodeDatasetError,
+    build_dreamer_episode_batch,
+    build_dreamer_episodes_from_training_rows,
+)
 
 MODEL_FILENAME = "dreamer_v3.safetensors"
 MODEL_MANIFEST_FILENAME = "dreamer_v3_manifest.json"
@@ -33,6 +40,25 @@ AUDIT_REPORT_FILENAME = "audit_report.json"
 DEFAULT_MAX_DATASET_BYTES = 8 * 1024 * 1024 * 1024
 _MAX_DATASET_MANIFEST_BYTES = 256 * 1024
 _MAX_TRAINING_CONFIG_BYTES = 128 * 1024
+_DREAMER_TENSOR_KEYS = (
+    "observations",
+    "observed_profile_targets",
+    "observed_profile_target_mask",
+    "dynamic_actions",
+    "dynamic_action_mask",
+    "control_action_mask",
+    "constraints",
+    "decision_step_mask",
+    "elapsed_seconds",
+    "step_duration_seconds",
+    "step_mask",
+    "continuations",
+    "rewards",
+    "static_context",
+    "terminal",
+    "episode_weights",
+    "source_training_row_ids",
+)
 
 
 @dataclass(frozen=True)
@@ -103,12 +129,15 @@ def build_dreamer_trainer_artifacts(
     dataset_manifest = _parse_json_object(training_dataset_manifest_json, "training dataset manifest")
     dataset_sha256 = _sha256_bytes(dataset_payload)
     dataset_manifest_sha256 = _sha256_bytes(dataset_manifest_payload)
-    row_count = _validate_dataset(training_rows_jsonl, dataset_manifest, expected_dataset_sha256=dataset_sha256)
+    training_rows = _validate_dataset(training_rows_jsonl, dataset_manifest, expected_dataset_sha256=dataset_sha256)
+    row_count = len(training_rows)
 
     training_config = _parse_json_object(training_config_json, "training config")
     config_errors = validate_training_config(training_config)
     if config_errors:
         raise TrainerArtifactError("; ".join(config_errors[:10]))
+    control_spec = DreamerControlSpec.from_dict(training_config["dreamer_control_spec"])
+    dreamer_tensor_contract = _dreamer_tensor_contract(training_rows, control_spec=control_spec)
     canonical_training_config_text = _canonical_json(training_config) + "\n"
     canonical_training_config_payload = canonical_training_config_text.encode("utf-8")
     training_config_sha256 = _sha256_bytes(canonical_training_config_payload)
@@ -116,6 +145,7 @@ def build_dreamer_trainer_artifacts(
     model_payload = _placeholder_safetensors(
         dataset_sha256=dataset_sha256,
         training_config_sha256=training_config_sha256,
+        dreamer_tensor_contract_sha256=dreamer_tensor_contract["tensor_contract_sha256"],
         row_count=row_count,
         created_at=created_at,
     )
@@ -141,6 +171,7 @@ def build_dreamer_trainer_artifacts(
                 model_artifact_sha256=model_sha256,
                 model_manifest_sha256=model_manifest_sha256,
                 trainer_git_sha=trainer_git_sha,
+                dreamer_tensor_contract=dreamer_tensor_contract,
             )
         )
         + "\n"
@@ -181,7 +212,7 @@ def _validate_dataset(
     dataset_manifest: dict[str, Any],
     *,
     expected_dataset_sha256: str,
-) -> int:
+) -> list[dict[str, Any]]:
     if dataset_manifest.get("format") != TRAINING_DATASET_FORMAT:
         raise TrainerArtifactError("training dataset manifest format is unsupported")
     if dataset_manifest.get("schema_version") != TRAINING_SCHEMA_VERSION:
@@ -210,7 +241,70 @@ def _validate_dataset(
         if row_id <= previous_id:
             raise TrainerArtifactError("training rows must be strictly ordered by training_row_id")
         previous_id = row_id
-    return len(rows)
+    return [row for _, row in rows]
+
+
+def _dreamer_tensor_contract(
+    training_rows: list[dict[str, Any]],
+    *,
+    control_spec: DreamerControlSpec,
+) -> dict[str, Any]:
+    try:
+        episodes = build_dreamer_episodes_from_training_rows(training_rows)
+        batch = build_dreamer_episode_batch(episodes, control_spec=control_spec)
+    except DreamerEpisodeDatasetError as exc:
+        raise TrainerArtifactError(f"Dreamer tensor contract validation failed: {exc}") from exc
+
+    lengths = [len(episode["steps"]) for episode in episodes]
+    feature_names = _feature_names(batch)
+    control_spec_dict = control_spec.to_dict()
+    feature_layout = {
+        "episode_format": DREAMER_EPISODE_FORMAT,
+        "episode_schema_version": DREAMER_EPISODE_SCHEMA_VERSION,
+        "feature_names": feature_names,
+    }
+    control_spec_sha256 = _sha256_json(control_spec_dict)
+    feature_layout_sha256 = _sha256_json(feature_layout)
+    tensor_contract_base = {
+        "episode_format": DREAMER_EPISODE_FORMAT,
+        "episode_schema_version": DREAMER_EPISODE_SCHEMA_VERSION,
+        "episode_count": len(episodes),
+        "episode_length_steps": {
+            "min": min(lengths),
+            "max": max(lengths),
+            "avg": round(sum(lengths) / len(lengths), 4),
+        },
+        "observation_interval_ms": control_spec.observation_interval_ms,
+        "decision_interval_ms": control_spec.decision_interval_ms,
+        "decision_step_count": control_spec.decision_step_count,
+        "tensor_shapes": _tensor_shapes(batch),
+        "feature_names": feature_names,
+        "feature_layout_sha256": feature_layout_sha256,
+        "control_spec_sha256": control_spec_sha256,
+        "control_spec": control_spec_dict,
+    }
+    return {
+        **tensor_contract_base,
+        "tensor_contract_sha256": _sha256_json(tensor_contract_base),
+    }
+
+
+def _feature_names(batch: dict[str, Any]) -> dict[str, list[str]]:
+    names = batch.get("feature_names")
+    if not isinstance(names, dict):
+        raise TrainerArtifactError("Dreamer tensor contract validation failed: missing feature names")
+    return {str(key): [str(item) for item in value] for key, value in sorted(names.items())}
+
+
+def _tensor_shapes(batch: dict[str, Any]) -> dict[str, list[int]]:
+    shapes: dict[str, list[int]] = {}
+    for key in _DREAMER_TENSOR_KEYS:
+        tensor = batch.get(key)
+        shape = getattr(tensor, "shape", None)
+        if shape is None:
+            raise TrainerArtifactError(f"Dreamer tensor contract validation failed: missing tensor {key}")
+        shapes[key] = [int(dimension) for dimension in shape]
+    return shapes
 
 
 def _parse_training_rows(training_rows_jsonl: str) -> list[tuple[int, dict[str, Any]]]:
@@ -277,6 +371,7 @@ def _audit_report(
     model_artifact_sha256: str,
     model_manifest_sha256: str,
     trainer_git_sha: str,
+    dreamer_tensor_contract: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "format": TRAINER_AUDIT_REPORT_FORMAT,
@@ -292,9 +387,11 @@ def _audit_report(
         "model_artifact_sha256": model_artifact_sha256,
         "model_manifest_sha256": model_manifest_sha256,
         "trainer_git_sha": trainer_git_sha,
+        "dreamer_tensor_contract": dreamer_tensor_contract,
         "zero_trust": {
             "dataset_manifest_hash_verified": True,
             "training_rows_revalidated": True,
+            "dreamer_tensors_revalidated": True,
             "absolute_grinder_fields_allowed": False,
             "pickle_outputs_allowed": False,
             "runtime_inference_enabled": False,
@@ -306,6 +403,7 @@ def _placeholder_safetensors(
     *,
     dataset_sha256: str,
     training_config_sha256: str,
+    dreamer_tensor_contract_sha256: str,
     row_count: int,
     created_at: int,
 ) -> bytes:
@@ -317,6 +415,7 @@ def _placeholder_safetensors(
             "inference_ready": "false",
             "dataset_sha256": dataset_sha256,
             "training_config_sha256": training_config_sha256,
+            "dreamer_tensor_contract_sha256": dreamer_tensor_contract_sha256,
             "row_count": str(row_count),
             "created_at": str(int(created_at)),
         }
@@ -386,3 +485,7 @@ def _canonical_json(value: Any) -> str:
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_json(value: Any) -> str:
+    return _sha256_bytes(_canonical_json(value).encode("utf-8"))

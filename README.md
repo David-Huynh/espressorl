@@ -542,7 +542,10 @@ uv run espresso-rl-build-dreamer-artifacts \
 ```
 
 It validates the dataset hash, revalidates every JSONL transition, rejects
-absolute grinder fields, writes only fixed safe filenames, and produces:
+absolute grinder fields, builds `espresso_rl_dreamer_episode_v2` episodes,
+constructs deterministic Dreamer tensors under the configured control spec,
+writes tensor feature/cadence hashes into the audit report, writes only fixed
+safe filenames, and produces:
 
 - `dreamer_v3.safetensors`
 - `dreamer_v3_manifest.json`

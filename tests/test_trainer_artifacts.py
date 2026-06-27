@@ -66,6 +66,22 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertIn("not inference-ready", manifest_validation.unavailable_reason or "")
         audit = json.loads(files[AUDIT_REPORT_FILENAME].content.decode("utf-8"))
         self.assertFalse(audit["inference_ready"])
+        self.assertTrue(audit["zero_trust"]["dreamer_tensors_revalidated"])
+        tensor_contract = audit["dreamer_tensor_contract"]
+        self.assertEqual(tensor_contract["episode_format"], "espresso_rl_dreamer_episode_v2")
+        self.assertEqual(tensor_contract["episode_schema_version"], 2)
+        self.assertEqual(tensor_contract["episode_count"], 1)
+        self.assertEqual(tensor_contract["episode_length_steps"], {"avg": 4.0, "max": 4, "min": 4})
+        self.assertEqual(tensor_contract["observation_interval_ms"], 250)
+        self.assertEqual(tensor_contract["decision_interval_ms"], 1000)
+        self.assertEqual(tensor_contract["decision_step_count"], 4)
+        self.assertEqual(tensor_contract["tensor_shapes"]["observations"], [1, 4, 5])
+        self.assertEqual(tensor_contract["tensor_shapes"]["dynamic_actions"], [1, 4, 7])
+        self.assertIn("temperature_c", tensor_contract["feature_names"]["observations"])
+        self.assertIn("yield_stop_target_g", tensor_contract["feature_names"]["dynamic_actions"])
+        self.assertEqual(len(tensor_contract["feature_layout_sha256"]), 64)
+        self.assertEqual(len(tensor_contract["control_spec_sha256"]), 64)
+        self.assertEqual(len(tensor_contract["tensor_contract_sha256"]), 64)
         self.assertIn(f"{files[MODEL_FILENAME].sha256}  {MODEL_FILENAME}", files[CHECKSUMS_FILENAME].content.decode("utf-8"))
 
     def test_rejects_dataset_manifest_hash_mismatch(self) -> None:
@@ -105,6 +121,40 @@ class TrainerArtifactTests(unittest.TestCase):
                 trainer_git_sha="trainerabc",
                 model_filename="dreamer_v3.pt",
             )
+
+    def test_rejects_dataset_that_cannot_build_dreamer_tensors(self) -> None:
+        row = training_row(1)
+        row["observation"].pop("fixed_cadence_sequence")
+        dataset_text, manifest_text = dataset_export_text([row])
+
+        with self.assertRaisesRegex(TrainerArtifactError, "Dreamer tensor contract"):
+            build_dreamer_trainer_artifacts(
+                training_rows_jsonl=dataset_text,
+                training_dataset_manifest_json=manifest_text,
+                training_config_json=canonical_json(default_training_config()) + "\n",
+                trainer_git_sha="trainerabc",
+            )
+
+    def test_training_config_control_spec_changes_tensor_audit(self) -> None:
+        dataset_text, manifest_text = dataset_export_text([training_row(1)])
+        config = default_training_config()
+        config["dreamer_control_spec"]["decision_interval_ms"] = 500
+        config["dreamer_control_spec"]["dynamic_control_enabled"] = True
+        config["dreamer_control_spec"]["pressure_control_allowed"] = True
+
+        result = build_dreamer_trainer_artifacts(
+            training_rows_jsonl=dataset_text,
+            training_dataset_manifest_json=manifest_text,
+            training_config_json=canonical_json(config) + "\n",
+            trainer_git_sha="trainerabc",
+        )
+
+        files = {file.relative_path: file for file in result.files}
+        audit = json.loads(files[AUDIT_REPORT_FILENAME].content.decode("utf-8"))
+        tensor_contract = audit["dreamer_tensor_contract"]
+        self.assertEqual(tensor_contract["decision_interval_ms"], 500)
+        self.assertEqual(tensor_contract["decision_step_count"], 2)
+        self.assertTrue(tensor_contract["control_spec"]["pressure_control_allowed"])
 
     def test_rejects_training_config_with_non_dreamer_adaptive_control(self) -> None:
         dataset_text, manifest_text = dataset_export_text([training_row(1)])
@@ -232,10 +282,20 @@ def training_row(row_id: int) -> dict:
             "beverage_out_g": 36.0,
             "brew_ratio": 2.0,
             "shot_time_s": 30.0,
+            "profile_resampled": profile(),
+            "raw_profile_available": True,
             "profile_flow_valid": True,
             "profile_flow_masked": False,
+            "profile_id": "classic_9_bar",
+            "profile_type": "static",
+            "profile_phase_count": 2,
             "profile_temperature_c": 93.0,
             "final_phase_temperature_c": 92.5,
+            "beverage_flow_profile": [round(0.1 + index * 0.1, 4) for index in range(100)],
+            "temperature_profile": [93.0 for _ in range(100)],
+            "target_temperature_profile": [92.5 for _ in range(100)],
+            "pump_target_mode_profile": [1 for _ in range(100)],
+            "fixed_cadence_sequence": fixed_cadence_sequence(),
         },
         "reward": {
             "human_rating": 4,
@@ -245,6 +305,32 @@ def training_row(row_id: int) -> dict:
             "feedback_recorded": True,
             "optimization_weight": 1.0,
         },
+    }
+
+
+def profile() -> list[list[float]]:
+    return [
+        [round(1.0 + index * 0.1, 4) for index in range(100)],
+        [8.0 for _ in range(100)],
+        [round(1.0 + index * 0.02, 4) for index in range(100)],
+        [2.4 for _ in range(100)],
+        [round(index * 0.36, 4) for index in range(100)],
+    ]
+
+
+def fixed_cadence_sequence(step_count: int = 4) -> dict:
+    return {
+        "sample_interval_ms": 250,
+        "pressure_bar": [float(index + 1) for index in range(step_count)],
+        "pressure_target_bar": [8.0 for _ in range(step_count)],
+        "pump_flow_ml_s": [round(1.0 + index * 0.02, 4) for index in range(step_count)],
+        "pump_flow_target_ml_s": [2.4 for _ in range(step_count)],
+        "beverage_flow_g_s": [round(0.1 + index * 0.1, 4) for index in range(step_count)],
+        "weight_g": [round(index * 0.36, 4) for index in range(step_count)],
+        "temperature_c": [93.0 for _ in range(step_count)],
+        "temperature_target_c": [92.5 for _ in range(step_count)],
+        "pump_target_mode": [1 for _ in range(step_count)],
+        "valve_open": [True for _ in range(step_count)],
     }
 
 
