@@ -268,6 +268,10 @@ class TrainerArtifactTests(unittest.TestCase):
             manifest["model_artifact"]["tensor_manifest_sha256"],
             model_metadata["tensor_manifest_sha256"],
         )
+        self.assertEqual(
+            manifest["model_artifact"]["evaluation_report_sha256"],
+            model_metadata["evaluation_report_sha256"],
+        )
         validate_dreamer_checkpoint_safetensors(first_files[MODEL_FILENAME].content, manifest)
         self.assertEqual(preview["seed"], 17)
         self.assertEqual(preview["epochs_requested"], 2)
@@ -289,6 +293,14 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertIn("actor_loss", preview["actor_critic_train_curve"][0])
         self.assertIn("critic_loss", preview["actor_critic_train_curve"][0])
         self.assertIn("imagined_return_mean", preview["actor_critic_train_curve"][0])
+        evaluation = preview["evaluation_report"]
+        evaluation_sha = hashlib.sha256(canonical_json(evaluation).encode("utf-8")).hexdigest()
+        self.assertEqual(audit["evaluation_report_sha256"], evaluation_sha)
+        self.assertEqual(manifest["model_artifact"]["evaluation_report_sha256"], evaluation_sha)
+        self.assertFalse(evaluation["inference_ready"])
+        self.assertIn("evaluation_passed", evaluation["gates"])
+        self.assertTrue(evaluation["gates"]["action_mask_ok"])
+        self.assertEqual(evaluation["actor"]["unsupported_dynamic_action_abs_max"], 0.0)
         self.assertIn("loss_dyn", preview["train_loss_curve"][0])
         self.assertIn("loss_rep", preview["validation_loss_curve"][0])
         self.assertFalse(preview["imagination_preview"]["inference_ready"])

@@ -26,6 +26,12 @@ WORLD_MODEL_SMOKE_FORMAT = "espresso_rl_world_model_smoke_v1"
 WORLD_MODEL_SMOKE_SCHEMA_VERSION = 1
 WORLD_MODEL_TRAIN_PREVIEW_FORMAT = "espresso_rl_world_model_train_preview_v1"
 WORLD_MODEL_TRAIN_PREVIEW_SCHEMA_VERSION = 1
+DREAMER_V3_EVALUATION_REPORT_FORMAT = "espresso_rl_dreamer_v3_offline_evaluation_report_v1"
+DREAMER_V3_EVALUATION_REPORT_SCHEMA_VERSION = 1
+_EVAL_WORLD_MODEL_LOSS_MAX = 1_000_000.0
+_EVAL_REWARD_RMSE_MAX = 10.0
+_EVAL_CRITIC_VALUE_RMSE_MAX = 10.0
+_EVAL_UNSUPPORTED_DYNAMIC_ACTION_MAX = 0.0
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,7 @@ class WorldModelTrainPreviewResult:
     early_stopped: bool
     actor_critic_train_curve: tuple[dict[str, float], ...]
     imagination_preview: dict[str, Any]
+    evaluation_report: dict[str, Any]
     checkpoint_tensors: dict[str, torch.Tensor]
 
     def to_dict(self) -> dict[str, Any]:
@@ -123,6 +130,7 @@ class WorldModelTrainPreviewResult:
             "validation_loss_curve": list(self.validation_loss_curve),
             "actor_critic_train_curve": list(self.actor_critic_train_curve),
             "imagination_preview": self.imagination_preview,
+            "evaluation_report": self.evaluation_report,
             "checkpoint_tensor_names": sorted(self.checkpoint_tensors),
         }
 
@@ -258,6 +266,14 @@ def run_fixed_cadence_world_model_train_preview(
             actor=actor,
             critic=critic,
         )
+        evaluation_report = _offline_evaluation_report(
+            world_model=model,
+            actor=actor,
+            critic=critic,
+            batch=validation_tensors,
+            config=config,
+            imagination_config=imagination_config,
+        )
         checkpoint_tensors = _checkpoint_tensors(model, actor, critic)
     finally:
         torch.use_deterministic_algorithms(old_deterministic)
@@ -273,6 +289,7 @@ def run_fixed_cadence_world_model_train_preview(
         early_stopped=early_stopped,
         actor_critic_train_curve=tuple(actor_critic_curve),
         imagination_preview=imagination_preview,
+        evaluation_report=evaluation_report,
         checkpoint_tensors=checkpoint_tensors,
     )
 
@@ -487,6 +504,105 @@ def _train_actor_critic(
     return curve
 
 
+@torch.no_grad()
+def _offline_evaluation_report(
+    *,
+    world_model: DreamerV3VectorWorldModel,
+    actor: DreamerV3ImaginationActor,
+    critic: DreamerV3ImaginationCritic,
+    batch: dict[str, torch.Tensor],
+    config: WorldModelTrainPreviewConfig,
+    imagination_config: DreamerV3ImaginationConfig,
+) -> dict[str, Any]:
+    world_model.eval()
+    actor.eval()
+    critic.eval()
+    validation_losses = _evaluate(world_model, batch)
+    observed = world_model.observe(batch, sample=False)
+    step_mask = batch["step_mask"]
+    valid_count = step_mask.sum().clamp_min(1.0)
+    features = observed["features"]
+    reward_prediction = world_model.reward_prediction(features)
+    reward_error = (reward_prediction - batch["rewards"]) * step_mask
+    reward_mae = reward_error.abs().sum() / valid_count
+    reward_rmse = torch.sqrt((reward_error.square().sum() / valid_count).clamp_min(0.0))
+    continuation_prediction = world_model.continuation_probability(features)
+    continuation_error = (continuation_prediction - batch["continuations"]) * step_mask
+    continuation_mae = continuation_error.abs().sum() / valid_count
+    continuation_rmse = torch.sqrt((continuation_error.square().sum() / valid_count).clamp_min(0.0))
+
+    rollout = dreamer_v3_imagination_rollout(
+        world_model=world_model,
+        batch=batch,
+        config=imagination_config,
+        actor=actor,
+        critic=critic,
+    )
+    critic_error = rollout["values"][:, :-1] - rollout["lambda_returns"]
+    critic_value_mae = critic_error.abs().mean()
+    critic_value_rmse = torch.sqrt(critic_error.square().mean().clamp_min(0.0))
+    dynamic_actions = rollout["dynamic_actions"]
+    control_mask = rollout["control_action_mask"]
+    unsupported_dynamic = dynamic_actions * (1.0 - control_mask.unsqueeze(1))
+    unsupported_abs_max = unsupported_dynamic.abs().max()
+    imagined_returns = rollout["lambda_returns"]
+
+    world_model_loss_ok = _finite_bounded(validation_losses["loss_total"], _EVAL_WORLD_MODEL_LOSS_MAX)
+    reward_calibration_ok = _finite_bounded(reward_rmse, _EVAL_REWARD_RMSE_MAX)
+    critic_value_ok = _finite_bounded(critic_value_rmse, _EVAL_CRITIC_VALUE_RMSE_MAX)
+    action_mask_ok = bool(unsupported_abs_max.item() <= _EVAL_UNSUPPORTED_DYNAMIC_ACTION_MAX)
+
+    return {
+        "format": DREAMER_V3_EVALUATION_REPORT_FORMAT,
+        "schema_version": DREAMER_V3_EVALUATION_REPORT_SCHEMA_VERSION,
+        "inference_ready": False,
+        "contract_only": True,
+        "device": "cpu",
+        "dtype": "float32",
+        "seed": config.seed,
+        "validation_batch_size": int(batch["observations"].shape[0]),
+        "imagination_horizon": config.imagination_horizon,
+        "world_model_validation": validation_losses,
+        "reward_prediction": {
+            "mae": _rounded_scalar(reward_mae),
+            "rmse": _rounded_scalar(reward_rmse),
+        },
+        "continuation_prediction": {
+            "mae": _rounded_scalar(continuation_mae),
+            "rmse": _rounded_scalar(continuation_rmse),
+        },
+        "critic_value": {
+            "mae": _rounded_scalar(critic_value_mae),
+            "rmse": _rounded_scalar(critic_value_rmse),
+        },
+        "actor": {
+            "entropy_mean": _rounded_scalar(rollout["entropy"].mean()),
+            "imagined_return_mean": _rounded_scalar(imagined_returns.mean()),
+            "imagined_return_std": _rounded_scalar(imagined_returns.std(unbiased=False)),
+            "supported_dynamic_action_count": _rounded_scalar(control_mask.sum()),
+            "unsupported_dynamic_action_abs_max": _rounded_scalar(unsupported_abs_max),
+        },
+        "gates": {
+            "world_model_loss_ok": world_model_loss_ok,
+            "reward_calibration_ok": reward_calibration_ok,
+            "critic_value_ok": critic_value_ok,
+            "action_mask_ok": action_mask_ok,
+            "evaluation_passed": (
+                world_model_loss_ok
+                and reward_calibration_ok
+                and critic_value_ok
+                and action_mask_ok
+            ),
+        },
+        "thresholds": {
+            "world_model_loss_total_max": _EVAL_WORLD_MODEL_LOSS_MAX,
+            "reward_rmse_max": _EVAL_REWARD_RMSE_MAX,
+            "critic_value_rmse_max": _EVAL_CRITIC_VALUE_RMSE_MAX,
+            "unsupported_dynamic_action_abs_max": _EVAL_UNSUPPORTED_DYNAMIC_ACTION_MAX,
+        },
+    }
+
+
 def _train_critic_step(
     *,
     world_model: DreamerV3VectorWorldModel,
@@ -582,6 +698,11 @@ def _cyclic_batch(batch: dict[str, torch.Tensor], *, start: int, batch_size: int
 
 def _rounded_scalar(value: torch.Tensor) -> float:
     return round(float(value.detach().cpu().item()), 8)
+
+
+def _finite_bounded(value: float | torch.Tensor, maximum: float) -> bool:
+    parsed = float(value.detach().cpu().item()) if isinstance(value, torch.Tensor) else float(value)
+    return math.isfinite(parsed) and parsed <= maximum
 
 
 def _checkpoint_tensors(

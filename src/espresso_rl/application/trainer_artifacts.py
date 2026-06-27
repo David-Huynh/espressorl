@@ -166,6 +166,9 @@ def build_dreamer_trainer_artifacts(
     world_model_train_preview = (
         world_model_train_preview_result["metrics"] if world_model_train_preview_result is not None else None
     )
+    evaluation_report = (
+        world_model_train_preview.get("evaluation_report") if world_model_train_preview is not None else None
+    )
     checkpoint_tensors = (
         world_model_train_preview_result["checkpoint_tensors"] if world_model_train_preview_result is not None else {}
     )
@@ -177,6 +180,7 @@ def build_dreamer_trainer_artifacts(
     world_model_train_preview_sha256 = (
         _sha256_json(world_model_train_preview) if world_model_train_preview is not None else None
     )
+    evaluation_report_sha256 = _sha256_json(evaluation_report) if evaluation_report is not None else None
     checkpoint_tensor_manifest = _checkpoint_tensor_manifest(checkpoint_tensors)
     checkpoint_tensor_manifest_sha256 = _sha256_json(checkpoint_tensor_manifest)
     checkpoint_metadata = _checkpoint_metadata(
@@ -186,6 +190,7 @@ def build_dreamer_trainer_artifacts(
         feature_layout_sha256=dreamer_tensor_contract["feature_layout_sha256"],
         control_spec_sha256=dreamer_tensor_contract["control_spec_sha256"],
         checkpoint_tensor_manifest_sha256=checkpoint_tensor_manifest_sha256,
+        evaluation_report_sha256=evaluation_report_sha256,
         world_model_smoke_sha256=world_model_smoke_sha256,
         world_model_train_preview_sha256=world_model_train_preview_sha256,
         artifact_stage=artifact_stage,
@@ -203,6 +208,7 @@ def build_dreamer_trainer_artifacts(
         artifact_stage=artifact_stage,
         checkpoint_tensor_manifest=checkpoint_tensor_manifest,
         checkpoint_tensor_manifest_sha256=checkpoint_tensor_manifest_sha256,
+        evaluation_report_sha256=evaluation_report_sha256,
         dreamer_tensor_contract=dreamer_tensor_contract,
     )
     validate_dreamer_checkpoint_safetensors(model_payload, model_manifest)
@@ -222,6 +228,7 @@ def build_dreamer_trainer_artifacts(
                 trainer_git_sha=trainer_git_sha,
                 dreamer_tensor_contract=dreamer_tensor_contract,
                 checkpoint_tensor_manifest_sha256=checkpoint_tensor_manifest_sha256,
+                evaluation_report_sha256=evaluation_report_sha256,
                 world_model_smoke=world_model_smoke,
                 world_model_train_preview=world_model_train_preview,
                 artifact_stage=artifact_stage,
@@ -506,6 +513,7 @@ def _model_manifest(
     artifact_stage: str,
     checkpoint_tensor_manifest: dict[str, Any],
     checkpoint_tensor_manifest_sha256: str,
+    evaluation_report_sha256: str | None,
     dreamer_tensor_contract: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -518,6 +526,7 @@ def _model_manifest(
             "checkpoint_format": CHECKPOINT_ARTIFACT_FORMAT,
             "checkpoint_schema_version": CHECKPOINT_ARTIFACT_SCHEMA_VERSION,
             "tensor_manifest_sha256": checkpoint_tensor_manifest_sha256,
+            "evaluation_report_sha256": evaluation_report_sha256 or "",
             "tensor_manifest": checkpoint_tensor_manifest,
             "tensor_count": checkpoint_tensor_manifest["tensor_count"],
             "component_count": checkpoint_tensor_manifest["component_count"],
@@ -561,6 +570,7 @@ def _audit_report(
     trainer_git_sha: str,
     dreamer_tensor_contract: dict[str, Any],
     checkpoint_tensor_manifest_sha256: str,
+    evaluation_report_sha256: str | None,
     world_model_smoke: dict[str, Any] | None,
     world_model_train_preview: dict[str, Any] | None,
     artifact_stage: str,
@@ -581,6 +591,7 @@ def _audit_report(
         "trainer_git_sha": trainer_git_sha,
         "dreamer_tensor_contract": dreamer_tensor_contract,
         "checkpoint_tensor_manifest_sha256": checkpoint_tensor_manifest_sha256,
+        "evaluation_report_sha256": evaluation_report_sha256,
         "world_model_smoke": world_model_smoke,
         "world_model_train_preview": world_model_train_preview,
         "zero_trust": {
@@ -605,6 +616,7 @@ def _checkpoint_metadata(
     feature_layout_sha256: str,
     control_spec_sha256: str,
     checkpoint_tensor_manifest_sha256: str,
+    evaluation_report_sha256: str | None,
     world_model_smoke_sha256: str | None,
     world_model_train_preview_sha256: str | None,
     artifact_stage: str,
@@ -623,6 +635,7 @@ def _checkpoint_metadata(
         "feature_layout_sha256": feature_layout_sha256,
         "control_spec_sha256": control_spec_sha256,
         "tensor_manifest_sha256": checkpoint_tensor_manifest_sha256,
+        "evaluation_report_sha256": evaluation_report_sha256 or "",
         "world_model_smoke_sha256": world_model_smoke_sha256 or "",
         "world_model_train_preview_sha256": world_model_train_preview_sha256 or "",
         "row_count": str(row_count),
@@ -707,6 +720,7 @@ def validate_dreamer_checkpoint_safetensors(payload: bytes, model_manifest: dict
     _require_metadata(metadata, "model_family", MODEL_FAMILY_DREAMER_V3)
     _require_metadata(metadata, "inference_ready", "false")
     _require_metadata(metadata, "tensor_manifest_sha256", expected_manifest_sha)
+    _require_metadata(metadata, "evaluation_report_sha256", artifact.get("evaluation_report_sha256", ""))
     for key in ("dreamer_tensor_contract_sha256", "feature_layout_sha256", "control_spec_sha256"):
         _require_metadata(metadata, key, artifact.get(key))
 

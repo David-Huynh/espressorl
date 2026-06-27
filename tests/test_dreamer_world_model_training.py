@@ -81,6 +81,15 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         self.assertIn("actor_loss", first["actor_critic_train_curve"][0])
         self.assertIn("critic_loss", first["actor_critic_train_curve"][0])
         self.assertIn("imagined_return_mean", first["actor_critic_train_curve"][0])
+        evaluation = first["evaluation_report"]
+        self.assertEqual(evaluation["format"], "espresso_rl_dreamer_v3_offline_evaluation_report_v1")
+        self.assertFalse(evaluation["inference_ready"])
+        self.assertIn("loss_total", evaluation["world_model_validation"])
+        self.assertIn("rmse", evaluation["reward_prediction"])
+        self.assertIn("rmse", evaluation["continuation_prediction"])
+        self.assertIn("rmse", evaluation["critic_value"])
+        self.assertIn("imagined_return_mean", evaluation["actor"])
+        self.assertIn("evaluation_passed", evaluation["gates"])
         self.assertIn("loss_dyn", first["train_loss_curve"][0])
         self.assertIn("loss_rep", first["validation_loss_curve"][0])
         self.assertEqual(first["dataset_split"]["validation_source_training_row_ids"], [3])
@@ -125,6 +134,9 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         self.assertEqual(curve[0]["supported_dynamic_action_count"], 4.0)
         self.assertEqual(curve[0]["unsupported_dynamic_action_abs_max"], 0.0)
         self.assertGreater(curve[0]["actor_entropy_mean"], 0.0)
+        evaluation = result["evaluation_report"]
+        self.assertTrue(evaluation["gates"]["action_mask_ok"])
+        self.assertEqual(evaluation["actor"]["unsupported_dynamic_action_abs_max"], 0.0)
 
 
 def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:

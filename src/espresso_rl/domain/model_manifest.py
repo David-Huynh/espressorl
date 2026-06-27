@@ -158,6 +158,9 @@ def _validate_checkpoint_artifact_metadata(artifact: dict[str, Any]) -> str | No
         return "DreamerV3 model manifest feature_layout_sha256 is invalid."
     if _sha256(artifact.get("control_spec_sha256")) is None:
         return "DreamerV3 model manifest control_spec_sha256 is invalid."
+    evaluation_report_sha256 = artifact.get("evaluation_report_sha256", "")
+    if evaluation_report_sha256 != "" and _sha256(evaluation_report_sha256) is None:
+        return "DreamerV3 model manifest evaluation_report_sha256 is invalid."
     tensor_manifest = artifact.get("tensor_manifest")
     if not isinstance(tensor_manifest, dict):
         return "DreamerV3 model manifest tensor_manifest is missing."

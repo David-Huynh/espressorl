@@ -565,7 +565,10 @@ actor heads for static recipe deltas and dynamic controls plus a symlog/two-hot
 critic and lambda-return targets. The preview stage now performs a bounded
 deterministic actor/critic training loop in latent imagination and records
 actor loss, critic loss, entropy, imagined return, and dynamic-control mask
-metrics in the audit report.
+metrics in the audit report. After training, it writes a deterministic offline
+evaluation report covering world-model validation loss, reward/continuation
+calibration, critic value error, actor entropy, imagined-return stability, and
+dynamic-action mask conformance.
 
 It produces:
 
@@ -583,12 +586,13 @@ DreamerV3 model. The
 same reference-aligned categorical RSSM path used by the preview trainer and
 records initial/final losses in `audit_report.json`; `world_model_train_preview`
 extends that to deterministic train/validation curves plus actor/critic
-training curves from latent imagination. Neither stage produces a useful
-runtime model artifact. The train-preview stage serializes its deterministic
-RSSM, trained actor-head, and trained critic-head tensors with explicit tensor
-names, shapes, component metadata, feature-layout hash, control-spec hash, and
-tensor-manifest hash; runtime compatibility should only be set after inference
-is safe. The command has a configurable `--max-dataset-bytes` resource
+training curves from latent imagination and an offline evaluation report.
+Neither stage produces a useful runtime model artifact. The train-preview stage
+serializes its deterministic RSSM, trained actor-head, and trained critic-head
+tensors with explicit tensor names, shapes, component metadata, feature-layout
+hash, control-spec hash, tensor-manifest hash, and evaluation-report hash;
+runtime compatibility should only be set after inference is safe. The command
+has a configurable `--max-dataset-bytes` resource
 guard, defaulting to 8 GiB, because this skeleton validates JSONL in-process.
 That guard is not a training policy; real large-scale Dreamer training should
 use streaming or sharded dataset loading so the corpus can grow beyond one
