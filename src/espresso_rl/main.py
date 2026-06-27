@@ -37,7 +37,9 @@ from espresso_rl.adapters.supabase_credentials import (
     SupabaseCredentialRegistrarConfig,
 )
 from espresso_rl.adapters.file_artifacts import LocalTextArtifactWriter
+from espresso_rl.adapters.local_model_store import LocalModelArtifactStore
 from espresso_rl.application.admin_pipeline import AdminPipelineService
+from espresso_rl.application.checkpoint_loading import CheckpointLoadError, load_verified_dreamer_checkpoint
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.community_priors import CommunityPriorGenerationService
@@ -64,6 +66,7 @@ from espresso_rl.domain.events import (
     UploadQueueMaintenanceEvent,
 )
 from espresso_rl.domain.models import Recipe, SafetyBounds, UploadQueueStatus
+from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
@@ -95,12 +98,15 @@ def main() -> None:
         )
 
     shot_repo, recommendation_repo, upload_queue_repo, local_data_repo = open_repositories(config)
+    verified_checkpoint, checkpoint_unavailable_reason = load_configured_dreamer_checkpoint(config)
     runtime_optimizer = RuntimeOptimizer(
         optimizer_mode=config.optimizer_mode,
         model_artifact_path=config.optimizer_model_artifact_path,
         model_artifact_sha256=config.optimizer_model_artifact_sha256,
         model_manifest_path=config.optimizer_model_manifest_path,
         model_artifact_max_bytes=config.optimizer_model_artifact_max_bytes,
+        verified_checkpoint=verified_checkpoint,
+        checkpoint_unavailable_reason=checkpoint_unavailable_reason,
     )
     service = EspressoRLService(
         shots=shot_repo,
@@ -600,7 +606,10 @@ def build_status_payload(
             model_manifest_status.model_artifact_sha256,
             max_bytes=config.optimizer_model_artifact_max_bytes,
         )
-    config_dreamer_v3_available = model_artifact_status.verified and model_manifest_status.verified
+    # Status construction must not promote files that have only passed the legacy
+    # outer hash/manifest checks. Runtime availability requires the typed loader
+    # result supplied through optimizer_status.
+    config_dreamer_v3_available = False
     config_optimizer_mode = (
         config.optimizer_mode
         if config.optimizer_mode == DEFAULT_OPTIMIZER_MODE or config_dreamer_v3_available
@@ -629,6 +638,11 @@ def build_status_payload(
         "model_manifest_state_schema_version": model_manifest_status.state_schema_version,
         "model_manifest_action_schema_version": model_manifest_status.action_schema_version,
         "model_manifest_reward_schema_version": model_manifest_status.reward_schema_version,
+        "checkpoint_verified": False,
+        "checkpoint_inference_ready": False,
+        "checkpoint_tensor_count": 0,
+        "checkpoint_component_names": [],
+        "checkpoint_unavailable_reason": "DreamerV3 checkpoint has not passed strict tensor verification.",
         "dreamer_v3_available": config_dreamer_v3_available,
         "available_modes": [DEFAULT_OPTIMIZER_MODE]
         + ([OPTIMIZER_MODE_DREAMER_V3_SHADOW] if config_dreamer_v3_available else []),
@@ -684,6 +698,11 @@ def build_status_payload(
         "optimizer_model_manifest_state_schema_version": optimizer_status.get("model_manifest_state_schema_version"),
         "optimizer_model_manifest_action_schema_version": optimizer_status.get("model_manifest_action_schema_version"),
         "optimizer_model_manifest_reward_schema_version": optimizer_status.get("model_manifest_reward_schema_version"),
+        "optimizer_checkpoint_verified": bool(optimizer_status.get("checkpoint_verified")),
+        "optimizer_checkpoint_inference_ready": bool(optimizer_status.get("checkpoint_inference_ready")),
+        "optimizer_checkpoint_tensor_count": int(optimizer_status.get("checkpoint_tensor_count") or 0),
+        "optimizer_checkpoint_component_names": optimizer_status.get("checkpoint_component_names") or [],
+        "optimizer_checkpoint_unavailable_reason": optimizer_status.get("checkpoint_unavailable_reason"),
         "optimizer_dreamer_v3_available": bool(optimizer_status.get("dreamer_v3_available")),
         "optimizer_available_modes": optimizer_status.get("available_modes") or [DEFAULT_OPTIMIZER_MODE],
         "optimizer_unavailable_modes": optimizer_status.get("unavailable_modes") or {},
@@ -908,6 +927,29 @@ def _apply_upload_credentials(
     config.upload_token_id = credentials.upload_token_id
     config.upload_secret = credentials.upload_secret
     return credentials
+
+
+def load_configured_dreamer_checkpoint(
+    config: Config,
+) -> tuple[VerifiedDreamerCheckpoint | None, str | None]:
+    if not config.optimizer_model_artifact_path:
+        return None, "DreamerV3 checkpoint artifact path is not configured."
+    if not config.optimizer_model_manifest_path:
+        return None, "DreamerV3 checkpoint manifest path is not configured."
+    if not config.optimizer_model_artifact_sha256:
+        return None, "DreamerV3 checkpoint artifact SHA-256 is not configured."
+    try:
+        checkpoint = load_verified_dreamer_checkpoint(
+            LocalModelArtifactStore(),
+            artifact_reference=config.optimizer_model_artifact_path,
+            manifest_reference=config.optimizer_model_manifest_path,
+            expected_artifact_sha256=config.optimizer_model_artifact_sha256,
+            max_checkpoint_bytes=config.optimizer_model_artifact_max_bytes,
+        )
+    except CheckpointLoadError as exc:
+        logger.warning("DreamerV3 checkpoint verification failed: %s", exc)
+        return None, str(exc)
+    return checkpoint, None
 
 
 def maybe_start_admin_collector_worker(

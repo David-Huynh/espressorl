@@ -44,7 +44,7 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertFalse(status.model_manifest_verified)
         self.assertFalse(status.dreamer_v3_available)
 
-    def test_dreamer_mode_with_verified_manifest_falls_back_to_bo_until_inference_exists(self) -> None:
+    def test_dreamer_mode_with_manifest_only_falls_back_to_bo_until_checkpoint_is_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             model_path = Path(tmp) / "dreamer.pt"
             model_path.write_bytes(b"verified model")
@@ -60,17 +60,18 @@ class RuntimeOptimizerTests(unittest.TestCase):
 
             status = optimizer.status()
 
-        self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
+        self.assertEqual(status.configured_mode, DEFAULT_OPTIMIZER_MODE)
         self.assertEqual(status.effective_mode, DEFAULT_OPTIMIZER_MODE)
-        self.assertTrue(status.dreamer_v3_available)
+        self.assertFalse(status.dreamer_v3_available)
         self.assertTrue(status.model_artifact_verified)
         self.assertTrue(status.model_manifest_verified)
+        self.assertFalse(status.checkpoint_verified)
         self.assertEqual(status.model_artifact_actual_sha256, digest)
         self.assertEqual(status.model_manifest_dataset_sha256, "b" * 64)
         self.assertEqual(status.model_manifest_trainer_git_sha, "trainerabc")
         self.assertEqual(status.model_manifest_artifact_format, "safetensors")
-        self.assertIn(OPTIMIZER_MODE_DREAMER_V3_SHADOW, status.available_modes)
-        self.assertIn("Bayesian Optimization", status.fallback_reason or "")
+        self.assertNotIn(OPTIMIZER_MODE_DREAMER_V3_SHADOW, status.available_modes)
+        self.assertIn("tensor verification", status.checkpoint_unavailable_reason or "")
 
     def test_optimizer_settings_preserve_configured_model_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -91,8 +92,9 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertEqual(status.model_artifact_path, str(model_path))
         self.assertEqual(status.model_artifact_sha256, digest)
         self.assertEqual(status.model_manifest_path, str(manifest_path))
-        self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
+        self.assertEqual(status.configured_mode, DEFAULT_OPTIMIZER_MODE)
         self.assertTrue(status.model_manifest_verified)
+        self.assertFalse(status.checkpoint_verified)
 
     def test_model_artifact_hash_mismatch_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,6 +259,7 @@ def write_manifest(
         "runtime_compatibility": {
             "optimizer_mode": "dreamer_v3_shadow",
             "espresso_rl_runtime_schema_version": 1,
+            "inference_ready": True,
         },
     }
     if overrides:

@@ -39,12 +39,22 @@ class ModelManifestValidation:
     state_schema_version: int | None = None
     action_schema_version: int | None = None
     reward_schema_version: int | None = None
+    checkpoint_format: str | None = None
+    checkpoint_schema_version: int | None = None
+    tensor_manifest_sha256: str | None = None
+    dreamer_tensor_contract_sha256: str | None = None
+    feature_layout_sha256: str | None = None
+    control_spec_sha256: str | None = None
+    evaluation_report_sha256: str | None = None
+    inference_ready: bool | None = None
 
 
 def validate_model_manifest(
     manifest: Any,
     *,
     expected_model_sha256: str | None = None,
+    require_checkpoint_metadata: bool = False,
+    require_inference_ready: bool = True,
 ) -> ModelManifestValidation:
     if not isinstance(manifest, dict):
         return _invalid("DreamerV3 model manifest must be a JSON object.")
@@ -67,7 +77,10 @@ def validate_model_manifest(
     model_artifact_sha256 = _sha256(artifact.get("sha256"))
     if model_artifact_sha256 is None:
         return _invalid("DreamerV3 model manifest model_artifact.sha256 is invalid.")
-    checkpoint_validation = _validate_checkpoint_artifact_metadata(artifact)
+    checkpoint_validation = _validate_checkpoint_artifact_metadata(
+        artifact,
+        required=require_checkpoint_metadata,
+    )
     if checkpoint_validation is not None:
         return _invalid(checkpoint_validation)
 
@@ -118,10 +131,19 @@ def validate_model_manifest(
     if _int_value(runtime.get("espresso_rl_runtime_schema_version")) != RUNTIME_SCHEMA_VERSION:
         return _invalid("DreamerV3 model manifest runtime schema is incompatible.")
     inference_ready = runtime.get("inference_ready")
-    if inference_ready is False:
-        return _invalid("DreamerV3 model manifest marks artifact as not inference-ready.")
-    if inference_ready is not None and inference_ready is not True:
+    if not isinstance(inference_ready, bool):
         return _invalid("DreamerV3 model manifest inference_ready is invalid.")
+    if require_inference_ready and inference_ready is False:
+        return _invalid("DreamerV3 model manifest marks artifact as not inference-ready.")
+
+    checkpoint_format = artifact.get("checkpoint_format")
+    checkpoint_schema_version = _int_value(artifact.get("checkpoint_schema_version"))
+    tensor_manifest_sha256 = _sha256(artifact.get("tensor_manifest_sha256"))
+    dreamer_tensor_contract_sha256 = _sha256(artifact.get("dreamer_tensor_contract_sha256"))
+    feature_layout_sha256 = _sha256(artifact.get("feature_layout_sha256"))
+    control_spec_sha256 = _sha256(artifact.get("control_spec_sha256"))
+    evaluation_report_value = artifact.get("evaluation_report_sha256")
+    evaluation_report_sha256 = _sha256(evaluation_report_value) if evaluation_report_value else None
 
     return ModelManifestValidation(
         verified=True,
@@ -135,6 +157,14 @@ def validate_model_manifest(
         state_schema_version=state_schema_version,
         action_schema_version=action_schema_version,
         reward_schema_version=reward_schema_version,
+        checkpoint_format=checkpoint_format,
+        checkpoint_schema_version=checkpoint_schema_version,
+        tensor_manifest_sha256=tensor_manifest_sha256,
+        dreamer_tensor_contract_sha256=dreamer_tensor_contract_sha256,
+        feature_layout_sha256=feature_layout_sha256,
+        control_spec_sha256=control_spec_sha256,
+        evaluation_report_sha256=evaluation_report_sha256,
+        inference_ready=inference_ready,
     )
 
 
@@ -142,8 +172,10 @@ def _invalid(reason: str) -> ModelManifestValidation:
     return ModelManifestValidation(verified=False, unavailable_reason=reason)
 
 
-def _validate_checkpoint_artifact_metadata(artifact: dict[str, Any]) -> str | None:
+def _validate_checkpoint_artifact_metadata(artifact: dict[str, Any], *, required: bool) -> str | None:
     if "checkpoint_format" not in artifact:
+        if required:
+            return "DreamerV3 model manifest checkpoint metadata is missing."
         return None
     if artifact.get("checkpoint_format") != CHECKPOINT_ARTIFACT_FORMAT:
         return "DreamerV3 model manifest checkpoint_format is unsupported."

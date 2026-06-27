@@ -8,6 +8,7 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
+from espresso_rl.application.checkpoint_loading import load_verified_dreamer_checkpoint
 from espresso_rl.application.trainer_artifacts import (
     AUDIT_REPORT_FILENAME,
     CHECKPOINT_ARTIFACT_FORMAT,
@@ -27,6 +28,17 @@ from espresso_rl.domain.trainer_artifacts import (
     default_training_config,
 )
 from espresso_rl.trainer_cli import main as trainer_cli_main
+
+
+class MemoryArtifactStore:
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        self._payloads = payloads
+
+    def read_bytes(self, reference: str, *, max_bytes: int) -> bytes:
+        payload = self._payloads[reference]
+        if len(payload) > max_bytes:
+            raise ValueError("artifact exceeds limit")
+        return payload
 
 
 class TrainerArtifactTests(unittest.TestCase):
@@ -96,6 +108,19 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(len(tensor_contract["tensor_contract_sha256"]), 64)
         self.assertTrue(audit["zero_trust"]["checkpoint_safetensors_validated"])
         self.assertIn(f"{files[MODEL_FILENAME].sha256}  {MODEL_FILENAME}", files[CHECKSUMS_FILENAME].content.decode("utf-8"))
+        loaded = load_verified_dreamer_checkpoint(
+            MemoryArtifactStore(
+                {
+                    MODEL_FILENAME: files[MODEL_FILENAME].content,
+                    MODEL_MANIFEST_FILENAME: files[MODEL_MANIFEST_FILENAME].content,
+                }
+            ),
+            artifact_reference=MODEL_FILENAME,
+            manifest_reference=MODEL_MANIFEST_FILENAME,
+            expected_artifact_sha256=files[MODEL_FILENAME].sha256,
+        )
+        self.assertFalse(loaded.inference_ready)
+        self.assertEqual(loaded.tensors, ())
 
     def test_rejects_dataset_manifest_hash_mismatch(self) -> None:
         dataset_text, manifest_text = dataset_export_text([training_row(1)])
@@ -310,6 +335,19 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(preview["dataset_split"]["train_source_training_row_ids"], [1, 2, 3])
         self.assertEqual(preview["dataset_split"]["validation_source_training_row_ids"], [4])
         self.assertEqual(preview["dataset_split_sha256"], preview["dataset_split"]["dataset_split_sha256"])
+        loaded = load_verified_dreamer_checkpoint(
+            MemoryArtifactStore(
+                {
+                    MODEL_FILENAME: first_files[MODEL_FILENAME].content,
+                    MODEL_MANIFEST_FILENAME: first_files[MODEL_MANIFEST_FILENAME].content,
+                }
+            ),
+            artifact_reference=MODEL_FILENAME,
+            manifest_reference=MODEL_MANIFEST_FILENAME,
+            expected_artifact_sha256=first_files[MODEL_FILENAME].sha256,
+        )
+        self.assertEqual(loaded.component_names, ("actor", "critic", "world_model"))
+        self.assertGreater(len(loaded.tensors), 0)
 
     def test_checkpoint_safetensors_validation_rejects_manifest_tampering(self) -> None:
         dataset_text, manifest_text = dataset_export_text(

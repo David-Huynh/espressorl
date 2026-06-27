@@ -329,7 +329,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                     machine_id="machine_1",
                     bean_context_id=None,
                     optimizer_status={
-                        "configured_mode": "dreamer_v3_shadow",
+                        "configured_mode": "bayesian_optimization",
                         "effective_mode": "bayesian_optimization",
                         "model_artifact_path": "models/dreamer.pt",
                         "model_artifact_sha256": "a" * 64,
@@ -351,16 +351,25 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         "model_manifest_state_schema_version": 1,
                         "model_manifest_action_schema_version": 1,
                         "model_manifest_reward_schema_version": 1,
-                        "dreamer_v3_available": True,
-                        "available_modes": ["bayesian_optimization", "dreamer_v3_shadow"],
-                        "unavailable_modes": {},
-                        "fallback_reason": "Bayesian Optimization is serving recommendations.",
+                        "checkpoint_verified": True,
+                        "checkpoint_inference_ready": False,
+                        "checkpoint_tensor_count": 3,
+                        "checkpoint_component_names": ["actor", "critic", "world_model"],
+                        "checkpoint_unavailable_reason": "Runtime inference is not enabled.",
+                        "dreamer_v3_available": False,
+                        "available_modes": ["bayesian_optimization"],
+                        "unavailable_modes": {"dreamer_v3_shadow": "Runtime inference is not enabled."},
+                        "fallback_reason": None,
                     },
                 )
 
-            self.assertEqual(status["optimizer_configured_mode"], "dreamer_v3_shadow")
+            self.assertEqual(status["optimizer_configured_mode"], "bayesian_optimization")
             self.assertEqual(status["optimizer_effective_mode"], "bayesian_optimization")
-            self.assertTrue(status["optimizer_dreamer_v3_available"])
+            self.assertFalse(status["optimizer_dreamer_v3_available"])
+            self.assertTrue(status["optimizer_checkpoint_verified"])
+            self.assertFalse(status["optimizer_checkpoint_inference_ready"])
+            self.assertEqual(status["optimizer_checkpoint_tensor_count"], 3)
+            self.assertEqual(status["optimizer_checkpoint_component_names"], ["actor", "critic", "world_model"])
             self.assertEqual(status["optimizer_model_artifact_path"], "models/dreamer.pt")
             self.assertEqual(status["optimizer_model_artifact_actual_sha256"], "a" * 64)
             self.assertTrue(status["optimizer_model_artifact_verified"])
@@ -370,8 +379,8 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(status["optimizer_model_manifest_artifact_format"], "safetensors")
             self.assertEqual(status["optimizer_model_manifest_dataset_sha256"], "c" * 64)
             self.assertEqual(status["optimizer_model_manifest_trainer_git_sha"], "trainerabc")
-            self.assertIn("dreamer_v3_shadow", status["optimizer_available_modes"])
-            self.assertIn("Bayesian Optimization", status["optimizer_fallback_reason"])
+            self.assertNotIn("dreamer_v3_shadow", status["optimizer_available_modes"])
+            self.assertIn("not enabled", status["optimizer_checkpoint_unavailable_reason"])
 
     def test_status_payload_derives_grinder_catalog_search_url_from_supabase_function_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

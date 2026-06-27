@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
+from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
 from espresso_rl.domain.model_manifest import ModelManifestValidation, validate_model_manifest
 from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
@@ -78,6 +79,11 @@ class RuntimeOptimizerStatus:
     model_manifest_state_schema_version: int | None = None
     model_manifest_action_schema_version: int | None = None
     model_manifest_reward_schema_version: int | None = None
+    checkpoint_verified: bool = False
+    checkpoint_inference_ready: bool = False
+    checkpoint_tensor_count: int = 0
+    checkpoint_component_names: tuple[str, ...] = ()
+    checkpoint_unavailable_reason: str | None = None
     dreamer_v3_available: bool = False
     available_modes: tuple[str, ...] = (DEFAULT_OPTIMIZER_MODE,)
     unavailable_modes: dict[str, str] | None = None
@@ -107,6 +113,11 @@ class RuntimeOptimizerStatus:
             "model_manifest_state_schema_version": self.model_manifest_state_schema_version,
             "model_manifest_action_schema_version": self.model_manifest_action_schema_version,
             "model_manifest_reward_schema_version": self.model_manifest_reward_schema_version,
+            "checkpoint_verified": self.checkpoint_verified,
+            "checkpoint_inference_ready": self.checkpoint_inference_ready,
+            "checkpoint_tensor_count": self.checkpoint_tensor_count,
+            "checkpoint_component_names": list(self.checkpoint_component_names),
+            "checkpoint_unavailable_reason": self.checkpoint_unavailable_reason,
             "dreamer_v3_available": self.dreamer_v3_available,
             "available_modes": list(self.available_modes),
             "unavailable_modes": dict(self.unavailable_modes or {}),
@@ -125,6 +136,8 @@ class RuntimeOptimizer:
         model_artifact_sha256: str | None = None,
         model_manifest_path: str | None = None,
         model_artifact_max_bytes: int = 512 * 1024 * 1024,
+        verified_checkpoint: VerifiedDreamerCheckpoint | None = None,
+        checkpoint_unavailable_reason: str | None = None,
         bo_optimizer: Optimizer | None = None,
     ) -> None:
         if model_artifact_max_bytes <= 0:
@@ -132,6 +145,8 @@ class RuntimeOptimizer:
         self._lock = RLock()
         self._bo_optimizer = bo_optimizer or ConservativeBOOptimizer()
         self._model_artifact_max_bytes = model_artifact_max_bytes
+        self._verified_checkpoint = verified_checkpoint
+        self._checkpoint_unavailable_reason = _clean_optional_text(checkpoint_unavailable_reason)
         self._status = self.configure(
             optimizer_mode=optimizer_mode,
             model_artifact_path=model_artifact_path,
@@ -173,7 +188,22 @@ class RuntimeOptimizer:
             artifact_sha256 or manifest_status.model_artifact_sha256,
             max_bytes=max_bytes,
         )
-        dreamer_v3_available = artifact_status.verified and manifest_status.verified
+        checkpoint = self._verified_checkpoint
+        checkpoint_verified = bool(
+            checkpoint is not None
+            and artifact_status.verified
+            and checkpoint.artifact_reference == artifact_status.path
+            and checkpoint.manifest_reference == manifest_status.path
+            and checkpoint.artifact_sha256 == artifact_status.actual_sha256
+            and checkpoint.manifest_sha256 == manifest_status.actual_sha256
+        )
+        checkpoint_inference_ready = bool(checkpoint_verified and checkpoint and checkpoint.inference_ready)
+        checkpoint_reason = self._checkpoint_unavailable_reason
+        if checkpoint_verified and not checkpoint_inference_ready:
+            checkpoint_reason = "DreamerV3 checkpoint is verified but runtime inference is not enabled."
+        elif not checkpoint_verified and checkpoint_reason is None:
+            checkpoint_reason = "DreamerV3 checkpoint has not passed strict tensor verification."
+        dreamer_v3_available = checkpoint_verified and checkpoint_inference_ready
         available_modes = (
             (DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
             if dreamer_v3_available
@@ -185,6 +215,7 @@ class RuntimeOptimizer:
             else {
                 OPTIMIZER_MODE_DREAMER_V3_SHADOW: manifest_status.unavailable_reason
                 or artifact_status.unavailable_reason
+                or checkpoint_reason
                 or "DreamerV3 model artifact is not verified."
             }
         )
@@ -219,6 +250,11 @@ class RuntimeOptimizer:
             model_manifest_state_schema_version=manifest_status.state_schema_version,
             model_manifest_action_schema_version=manifest_status.action_schema_version,
             model_manifest_reward_schema_version=manifest_status.reward_schema_version,
+            checkpoint_verified=checkpoint_verified,
+            checkpoint_inference_ready=checkpoint_inference_ready,
+            checkpoint_tensor_count=len(checkpoint.tensors) if checkpoint_verified and checkpoint else 0,
+            checkpoint_component_names=checkpoint.component_names if checkpoint_verified and checkpoint else (),
+            checkpoint_unavailable_reason=checkpoint_reason,
             dreamer_v3_available=dreamer_v3_available,
             available_modes=available_modes,
             unavailable_modes=unavailable_modes,

@@ -598,6 +598,21 @@ That guard is not a training policy; real large-scale Dreamer training should
 use streaming or sharded dataset loading so the corpus can grow beyond one
 in-memory JSONL file.
 
+The runtime checkpoint loader reads model bundle members through the
+`ModelArtifactStore` port. The local filesystem implementation is an adapter;
+checkpoint validation remains in the application/domain layers. Loading is
+strict and non-executable: it accepts only the checkpoint safetensors contract,
+rejects duplicate/unknown JSON fields, verifies the configured artifact hash,
+manifest and schema versions, safetensors metadata, tensor names/shapes/offsets,
+per-tensor hashes, component totals, and optional runtime-owned feature-layout,
+control-spec, and tensor-contract hashes. It never calls `torch.load` or any
+pickle loader.
+
+A successfully loaded preview is reported as `checkpoint_verified=true` and
+`checkpoint_inference_ready=false`. That distinction is intentional: verified
+bytes are not an executable policy, DreamerV3 is not added to the available
+optimizer modes, and Bayesian Optimization remains active.
+
 ## Warm-Started BO Priors
 
 Runtime recommendation generation can consume canonical `PriorPoint` values
