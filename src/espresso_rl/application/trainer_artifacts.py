@@ -31,6 +31,7 @@ from espresso_rl.dreamer.dataset import (
     build_dreamer_episode_batch,
     build_dreamer_episodes_from_training_rows,
 )
+from espresso_rl.dreamer.reference_world_model import DreamerV3WorldModelConfig
 from espresso_rl.dreamer.world_model_training import (
     FixedCadenceWorldModelTrainingError,
     WorldModelTrainPreviewConfig,
@@ -360,8 +361,23 @@ def _world_model_train_preview_metrics(
                 epochs=int(training_config["world_model_preview_epochs"]),
                 batch_size=int(training_config["world_model_preview_batch_size"]),
                 learning_rate=float(training_config["world_model_preview_learning_rate"]),
-                hidden_dim=int(training_config["world_model_preview_hidden_dim"]),
-                latent_dim=int(training_config["world_model_preview_latent_dim"]),
+                gradient_steps_per_epoch=int(training_config["world_model_preview_gradient_steps_per_epoch"]),
+                model=DreamerV3WorldModelConfig(
+                    model_preset=str(training_config["world_model_preview_model_preset"]),
+                    deter_dim=int(training_config["world_model_preview_deter_dim"]),
+                    hidden_dim=int(training_config["world_model_preview_hidden_dim"]),
+                    stoch_size=int(training_config["world_model_preview_stoch_size"]),
+                    class_size=int(training_config["world_model_preview_class_size"]),
+                    action_embed_dim=int(training_config["world_model_preview_action_embed_dim"]),
+                    reward_bins=int(training_config["world_model_preview_reward_bins"]),
+                    unimix=float(training_config["world_model_preview_unimix"]),
+                    free_nats=float(training_config["world_model_preview_free_nats"]),
+                    dyn_loss_scale=1.0,
+                    rep_loss_scale=0.1,
+                    observation_loss_scale=1.0,
+                    reward_loss_scale=1.0,
+                    continuation_loss_scale=1.0,
+                ),
                 validation_split=float(training_config["world_model_preview_validation_split"]),
                 early_stop_patience=int(training_config["world_model_preview_early_stop_patience"]),
             ),

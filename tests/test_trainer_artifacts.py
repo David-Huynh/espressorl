@@ -209,8 +209,11 @@ class TrainerArtifactTests(unittest.TestCase):
         config = default_training_config(seed=17, artifact_stage=TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
         config["world_model_preview_epochs"] = 2
         config["world_model_preview_batch_size"] = 2
-        config["world_model_preview_hidden_dim"] = 8
-        config["world_model_preview_latent_dim"] = 4
+        config["world_model_preview_deter_dim"] = 16
+        config["world_model_preview_hidden_dim"] = 16
+        config["world_model_preview_stoch_size"] = 2
+        config["world_model_preview_class_size"] = 4
+        config["world_model_preview_action_embed_dim"] = 8
         config_text = canonical_json(config) + "\n"
 
         first = build_dreamer_trainer_artifacts(
@@ -247,10 +250,15 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(preview["epochs_requested"], 2)
         self.assertEqual(preview["epochs_completed"], 2)
         self.assertEqual(preview["batch_size"], 2)
-        self.assertEqual(preview["hidden_dim"], 8)
-        self.assertEqual(preview["latent_dim"], 4)
+        self.assertEqual(preview["gradient_steps_per_epoch"], 1)
+        self.assertEqual(preview["model_config"]["deter_dim"], 16)
+        self.assertEqual(preview["model_config"]["hidden_dim"], 16)
+        self.assertEqual(preview["model_config"]["stoch_size"], 2)
+        self.assertEqual(preview["model_config"]["class_size"], 4)
         self.assertEqual(len(preview["train_loss_curve"]), 2)
         self.assertEqual(len(preview["validation_loss_curve"]), 2)
+        self.assertIn("loss_dyn", preview["train_loss_curve"][0])
+        self.assertIn("loss_rep", preview["validation_loss_curve"][0])
         self.assertEqual(preview["dataset_split"]["train_source_training_row_ids"], [1, 2, 3])
         self.assertEqual(preview["dataset_split"]["validation_source_training_row_ids"], [4])
         self.assertEqual(preview["dataset_split_sha256"], preview["dataset_split"]["dataset_split_sha256"])
@@ -377,6 +385,8 @@ class TrainerArtifactTests(unittest.TestCase):
             self.assertEqual(config["seed"], 19)
             self.assertEqual(config["world_model_preview_epochs"], 3)
             self.assertEqual(config["world_model_preview_batch_size"], 4)
+            self.assertEqual(config["world_model_preview_model_preset"], "espresso_debug")
+            self.assertEqual(config["world_model_preview_stoch_size"], 4)
 
 
 def dataset_export_text(rows: list[dict]) -> tuple[str, str]:

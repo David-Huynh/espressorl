@@ -32,10 +32,11 @@ from espresso_rl.domain.dreamer_episodes import (
 from espresso_rl.domain.training import validate_training_transition
 
 from ..models import ShotRecord
-from .actor import FactoredCategoricalActor
 
 SEQ_LEN = 8
 MIN_SHOTS = 4
+GRIND_BINS = 11
+DOSE_BINS = 11
 
 _PUMP_TARGET_MODE_PRESSURE = 1
 _PUMP_TARGET_MODE_FLOW = 2
@@ -105,8 +106,8 @@ class DreamerEpisodeDatasetError(ValueError):
 def _encode_action(shot: ShotRecord) -> tuple[int, int]:
     """Convert a ShotRecord's stored action back to discrete indices."""
     delta_steps = shot.action_grind_delta_um_from_current / max(shot.microns_per_step, 1e-6)
-    grind_idx = FactoredCategoricalActor.encode_grind(round(delta_steps))
-    dose_idx = FactoredCategoricalActor.encode_dose(shot.action_dose_g)
+    grind_idx = max(0, min(GRIND_BINS - 1, round(delta_steps) + (GRIND_BINS // 2)))
+    dose_idx = max(0, min(DOSE_BINS - 1, round((shot.action_dose_g - 15.0) / 0.5)))
     return grind_idx, dose_idx
 
 
@@ -127,9 +128,9 @@ def sample_batch(
     """
     Sample a random batch of contiguous historical shot sequences.
 
-    This is the existing batch format used by the current Dreamer prototype.
-    It treats each completed shot as one sequence element. New offline RSSM
-    training should consume the canonical episode loader instead.
+    This is a legacy completed-shot sequence helper. It treats each completed
+    shot as one sequence element. Offline RSSM training should consume the
+    canonical episode loader instead.
     """
     if len(shots) < MIN_SHOTS:
         return None

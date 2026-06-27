@@ -553,12 +553,13 @@ It validates the dataset hash, revalidates every JSONL transition, rejects
 absolute grinder fields, builds `espresso_rl_dreamer_episode_v2` episodes,
 constructs deterministic Dreamer tensors under the configured control spec,
 writes tensor feature/cadence hashes into the audit report, optionally runs a
-deterministic CPU-only `world_model_smoke` recurrent training step, and writes
-only fixed safe filenames.
+deterministic CPU-only `world_model_smoke` step through the reference-aligned
+categorical RSSM world model, and writes only fixed safe filenames.
 For a larger offline-loop preview, `world_model_train_preview` deterministically
 splits episodes into train/validation sets, runs a bounded CPU-only
 fixed-cadence recurrent world-model training loop, and records train/validation
-loss curves, best epoch, split hash, and hyperparameters in `audit_report.json`.
+loss curves, dyn/rep KL losses, best epoch, split hash, model-size fields, and
+hyperparameters in `audit_report.json`.
 
 It produces:
 
@@ -571,16 +572,17 @@ It produces:
 This command is intentionally an artifact pipeline skeleton. The generated
 `.safetensors` file remains a placeholder and `inference_ready=false`, so the
 runtime verifier will not expose it as an active DreamerV3 model. The
-`world_model_smoke` stage proves that the exported tensors can run through a
-tiny deterministic encoder/RSSM/decoder gradient loop and records initial/final
-losses in `audit_report.json`; `world_model_train_preview` extends that to
-deterministic train/validation curves. Neither stage produces a useful runtime
-model artifact. A real offline trainer must replace that placeholder with
-trained tensors and set runtime compatibility only after inference is safe. The
-command has a configurable `--max-dataset-bytes` resource guard, defaulting to
-8 GiB, because this skeleton validates JSONL in-process. That guard is not a
-training policy; real large-scale Dreamer training should use streaming or
-sharded dataset loading so the corpus can grow beyond one in-memory JSONL file.
+`world_model_smoke` stage proves that the exported tensors can run through the
+same reference-aligned categorical RSSM path used by the preview trainer and
+records initial/final losses in `audit_report.json`; `world_model_train_preview`
+extends that to deterministic train/validation curves. Neither stage produces a
+useful runtime model artifact. A real offline trainer must replace that
+placeholder with trained tensors and set runtime compatibility only after
+inference is safe. The command has a configurable `--max-dataset-bytes` resource
+guard, defaulting to 8 GiB, because this skeleton validates JSONL in-process.
+That guard is not a training policy; real large-scale Dreamer training should
+use streaming or sharded dataset loading so the corpus can grow beyond one
+in-memory JSONL file.
 
 ## Warm-Started BO Priors
 

@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from espresso_rl.dreamer.reference_world_model import default_world_model_config
 from espresso_rl.dreamer.world_model_training import (
     FixedCadenceWorldModelTrainingError,
     WorldModelTrainPreviewConfig,
@@ -21,6 +22,9 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         self.assertEqual(first["format"], "espresso_rl_world_model_smoke_v1")
         self.assertEqual(first["device"], "cpu")
         self.assertEqual(first["dtype"], "float32")
+        self.assertEqual(first["model_config"]["model_preset"], "espresso_debug")
+        self.assertIn("loss_dyn", first["final"])
+        self.assertIn("loss_rep", first["final"])
         self.assertLess(first["final"]["loss_total"], first["initial"]["loss_total"])
 
     def test_smoke_training_rejects_invalid_tensor_shapes(self) -> None:
@@ -36,8 +40,8 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
             epochs=2,
             batch_size=1,
             learning_rate=0.001,
-            hidden_dim=8,
-            latent_dim=4,
+            gradient_steps_per_epoch=1,
+            model=default_world_model_config("espresso_debug"),
             validation_split=0.25,
             early_stop_patience=2,
         )
@@ -65,9 +69,13 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(first["format"], "espresso_rl_world_model_train_preview_v1")
+        self.assertEqual(first["model_config"]["stoch_size"], 4)
+        self.assertEqual(first["model_config"]["class_size"], 4)
         self.assertEqual(first["epochs_completed"], 2)
         self.assertEqual(len(first["train_loss_curve"]), 2)
         self.assertEqual(len(first["validation_loss_curve"]), 2)
+        self.assertIn("loss_dyn", first["train_loss_curve"][0])
+        self.assertIn("loss_rep", first["validation_loss_curve"][0])
         self.assertEqual(first["dataset_split"]["validation_source_training_row_ids"], [3])
         self.assertEqual(len(first["dataset_split_sha256"]), 64)
 

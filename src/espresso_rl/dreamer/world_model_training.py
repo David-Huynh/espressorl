@@ -8,7 +8,12 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from espresso_rl.dreamer.reference_world_model import (
+    DreamerV3VectorWorldModel,
+    DreamerV3WorldModelConfig,
+    default_world_model_config,
+)
 
 WORLD_MODEL_SMOKE_FORMAT = "espresso_rl_world_model_smoke_v1"
 WORLD_MODEL_SMOKE_SCHEMA_VERSION = 1
@@ -20,6 +25,7 @@ WORLD_MODEL_TRAIN_PREVIEW_SCHEMA_VERSION = 1
 class WorldModelSmokeResult:
     seed: int
     train_steps: int
+    model: DreamerV3WorldModelConfig
     initial: dict[str, float]
     final: dict[str, float]
 
@@ -31,6 +37,7 @@ class WorldModelSmokeResult:
             "train_steps": self.train_steps,
             "device": "cpu",
             "dtype": "float32",
+            "model_config": self.model.to_dict(),
             "initial": self.initial,
             "final": self.final,
             "loss_delta_total": round(self.initial["loss_total"] - self.final["loss_total"], 8),
@@ -43,8 +50,8 @@ class WorldModelTrainPreviewConfig:
     epochs: int
     batch_size: int
     learning_rate: float
-    hidden_dim: int
-    latent_dim: int
+    gradient_steps_per_epoch: int
+    model: DreamerV3WorldModelConfig
     validation_split: float
     early_stop_patience: int
 
@@ -70,8 +77,8 @@ class WorldModelTrainPreviewResult:
             "epochs_completed": self.epochs_completed,
             "batch_size": self.config.batch_size,
             "learning_rate": self.config.learning_rate,
-            "hidden_dim": self.config.hidden_dim,
-            "latent_dim": self.config.latent_dim,
+            "gradient_steps_per_epoch": self.config.gradient_steps_per_epoch,
+            "model_config": self.config.model.to_dict(),
             "validation_split": self.config.validation_split,
             "early_stop_patience": self.config.early_stop_patience,
             "best_epoch": self.best_epoch,
@@ -92,100 +99,21 @@ class FixedCadenceWorldModelTrainingError(ValueError):
 FixedCadenceWorldModelSmokeError = FixedCadenceWorldModelTrainingError
 
 
-class _FixedCadenceTrainingWorldModel(nn.Module):
-    def __init__(
-        self,
-        *,
-        observation_dim: int,
-        behavior_dim: int,
-        static_dim: int,
-        hidden_dim: int = 32,
-        latent_dim: int = 16,
-    ) -> None:
-        super().__init__()
-        self.observation_encoder = nn.Sequential(
-            nn.Linear(observation_dim + static_dim, hidden_dim),
-            nn.ELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ELU(),
-        )
-        self.behavior_encoder = nn.Sequential(nn.Linear(behavior_dim, 16), nn.ELU())
-        self.gru = nn.GRUCell(latent_dim + 16, hidden_dim)
-        self.prior = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ELU(), nn.Linear(hidden_dim, latent_dim))
-        self.posterior = nn.Sequential(
-            nn.Linear(hidden_dim + hidden_dim, hidden_dim),
-            nn.ELU(),
-            nn.Linear(hidden_dim, latent_dim),
-        )
-        self.observation_decoder = nn.Sequential(
-            nn.Linear(hidden_dim + latent_dim, hidden_dim),
-            nn.ELU(),
-            nn.Linear(hidden_dim, observation_dim),
-        )
-        self.reward_decoder = nn.Sequential(nn.Linear(hidden_dim + latent_dim, hidden_dim), nn.ELU(), nn.Linear(hidden_dim, 1))
-        self.continuation_decoder = nn.Sequential(
-            nn.Linear(hidden_dim + latent_dim, hidden_dim),
-            nn.ELU(),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        observations = batch["observations"]
-        behavior = _behavior_tensor(batch)
-        static_context = batch["static_context"]
-        batch_size, step_count, _ = observations.shape
-        h = observations.new_zeros(batch_size, self.gru.hidden_size)
-        z = observations.new_zeros(batch_size, self.prior[-1].out_features)
-        observation_predictions: list[torch.Tensor] = []
-        reward_predictions: list[torch.Tensor] = []
-        continuation_logits: list[torch.Tensor] = []
-        prior_states: list[torch.Tensor] = []
-        posterior_states: list[torch.Tensor] = []
-
-        for step_index in range(step_count):
-            behavior_embed = self.behavior_encoder(behavior[:, step_index])
-            h = self.gru(torch.cat([z, behavior_embed], dim=-1), h)
-            prior_state = self.prior(h)
-            observation_embed = self.observation_encoder(
-                torch.cat([observations[:, step_index], static_context], dim=-1)
-            )
-            posterior_state = self.posterior(torch.cat([h, observation_embed], dim=-1))
-            z = torch.tanh(posterior_state)
-            state = torch.cat([h, z], dim=-1)
-            observation_predictions.append(self.observation_decoder(state))
-            reward_predictions.append(self.reward_decoder(state).squeeze(-1))
-            continuation_logits.append(self.continuation_decoder(state).squeeze(-1))
-            prior_states.append(prior_state)
-            posterior_states.append(posterior_state)
-
-        return {
-            "observations": torch.stack(observation_predictions, dim=1),
-            "rewards": torch.stack(reward_predictions, dim=1),
-            "continuation_logits": torch.stack(continuation_logits, dim=1),
-            "prior_states": torch.stack(prior_states, dim=1),
-            "posterior_states": torch.stack(posterior_states, dim=1),
-        }
-
-
 def run_fixed_cadence_world_model_smoke_train(
     batch: dict[str, Any],
     *,
     seed: int,
     train_steps: int,
-    hidden_dim: int = 32,
-    latent_dim: int = 16,
     learning_rate: float = 1e-3,
+    model_config: DreamerV3WorldModelConfig | None = None,
 ) -> WorldModelSmokeResult:
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1:
         raise FixedCadenceWorldModelTrainingError("world model smoke seed must be a uint32 integer")
     if isinstance(train_steps, bool) or not isinstance(train_steps, int) or not 1 <= train_steps <= 20:
         raise FixedCadenceWorldModelTrainingError("world model smoke train_steps must be 1..20")
-    _validate_model_hyperparameters(
-        hidden_dim=hidden_dim,
-        latent_dim=latent_dim,
-        learning_rate=learning_rate,
-        label="world model smoke",
-    )
+    _validate_learning_rate(learning_rate, "world model smoke")
+    model_config = model_config or default_world_model_config("espresso_debug")
+    _validate_reference_model_config(model_config)
 
     old_threads = torch.get_num_threads()
     old_deterministic = torch.are_deterministic_algorithms_enabled()
@@ -195,26 +123,21 @@ def run_fixed_cadence_world_model_smoke_train(
         torch.manual_seed(seed)
         tensors = _cpu_float_batch(batch)
         _validate_batch_shapes(tensors)
-        model = _FixedCadenceTrainingWorldModel(
+        model = DreamerV3VectorWorldModel(
             observation_dim=tensors["observations"].shape[-1],
             behavior_dim=_behavior_tensor(tensors).shape[-1],
             static_dim=tensors["static_context"].shape[-1],
-            hidden_dim=hidden_dim,
-            latent_dim=latent_dim,
+            config=model_config,
         )
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         initial = _evaluate(model, tensors)
         for _ in range(train_steps):
-            optimizer.zero_grad()
-            losses = _losses(model, tensors)
-            losses["loss_total"].backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 10.0)
-            optimizer.step()
+            _train_epoch(model, optimizer, tensors, batch_size=tensors["observations"].shape[0])
         final = _evaluate(model, tensors)
     finally:
         torch.use_deterministic_algorithms(old_deterministic)
         torch.set_num_threads(old_threads)
-    return WorldModelSmokeResult(seed=seed, train_steps=train_steps, initial=initial, final=final)
+    return WorldModelSmokeResult(seed=seed, train_steps=train_steps, model=model_config, initial=initial, final=final)
 
 
 def run_fixed_cadence_world_model_train_preview(
@@ -235,12 +158,11 @@ def run_fixed_cadence_world_model_train_preview(
         validation_tensors = _cpu_float_batch(validation_batch)
         _validate_batch_shapes(train_tensors)
         _validate_batch_shapes(validation_tensors)
-        model = _FixedCadenceTrainingWorldModel(
+        model = DreamerV3VectorWorldModel(
             observation_dim=train_tensors["observations"].shape[-1],
             behavior_dim=_behavior_tensor(train_tensors).shape[-1],
             static_dim=train_tensors["static_context"].shape[-1],
-            hidden_dim=config.hidden_dim,
-            latent_dim=config.latent_dim,
+            config=config.model,
         )
         optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
         train_curve: list[dict[str, float]] = []
@@ -251,12 +173,11 @@ def run_fixed_cadence_world_model_train_preview(
         early_stopped = False
 
         for epoch_index in range(1, config.epochs + 1):
-            epoch_losses = _train_epoch(
-                model,
-                optimizer,
-                train_tensors,
-                batch_size=config.batch_size,
-            )
+            repeated_losses = [
+                _train_epoch(model, optimizer, train_tensors, batch_size=config.batch_size)
+                for _ in range(config.gradient_steps_per_epoch)
+            ]
+            epoch_losses = _mean_loss_dicts(repeated_losses)
             validation_losses = _evaluate(model, validation_tensors)
             train_curve.append({"epoch": epoch_index, **epoch_losses})
             validation_curve.append({"epoch": epoch_index, **validation_losses})
@@ -341,26 +262,6 @@ def _validate_batch_shapes(batch: dict[str, torch.Tensor]) -> None:
         raise FixedCadenceWorldModelTrainingError("world model training batch must contain at least two valid steps")
 
 
-def _validate_model_hyperparameters(
-    *,
-    hidden_dim: int,
-    latent_dim: int,
-    learning_rate: float,
-    label: str,
-) -> None:
-    if isinstance(hidden_dim, bool) or not isinstance(hidden_dim, int) or not 8 <= hidden_dim <= 512:
-        raise FixedCadenceWorldModelTrainingError(f"{label} hidden_dim is invalid")
-    if isinstance(latent_dim, bool) or not isinstance(latent_dim, int) or not 4 <= latent_dim <= 256:
-        raise FixedCadenceWorldModelTrainingError(f"{label} latent_dim is invalid")
-    if (
-        isinstance(learning_rate, bool)
-        or not isinstance(learning_rate, (int, float))
-        or not math.isfinite(float(learning_rate))
-        or not 1e-6 <= float(learning_rate) <= 0.1
-    ):
-        raise FixedCadenceWorldModelTrainingError(f"{label} learning_rate is invalid")
-
-
 def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
     if isinstance(config.seed, bool) or not isinstance(config.seed, int) or not 0 <= config.seed <= 2**32 - 1:
         raise FixedCadenceWorldModelTrainingError("world model preview seed must be a uint32 integer")
@@ -368,6 +269,12 @@ def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
         raise FixedCadenceWorldModelTrainingError("world model preview epochs must be 1..50")
     if isinstance(config.batch_size, bool) or not isinstance(config.batch_size, int) or not 1 <= config.batch_size <= 128:
         raise FixedCadenceWorldModelTrainingError("world model preview batch_size must be 1..128")
+    if (
+        isinstance(config.gradient_steps_per_epoch, bool)
+        or not isinstance(config.gradient_steps_per_epoch, int)
+        or not 1 <= config.gradient_steps_per_epoch <= 32
+    ):
+        raise FixedCadenceWorldModelTrainingError("world model preview gradient_steps_per_epoch must be 1..32")
     if (
         isinstance(config.validation_split, bool)
         or not isinstance(config.validation_split, (int, float))
@@ -381,12 +288,8 @@ def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
         or not 1 <= config.early_stop_patience <= 20
     ):
         raise FixedCadenceWorldModelTrainingError("world model preview early_stop_patience must be 1..20")
-    _validate_model_hyperparameters(
-        hidden_dim=config.hidden_dim,
-        latent_dim=config.latent_dim,
-        learning_rate=config.learning_rate,
-        label="world model preview",
-    )
+    _validate_reference_model_config(config.model)
+    _validate_learning_rate(config.learning_rate, "world model preview")
 
 
 def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -404,32 +307,8 @@ def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
     )
 
 
-def _losses(model: _FixedCadenceTrainingWorldModel, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    output = model(batch)
-    step_mask = batch["step_mask"]
-    observation_weight = step_mask.unsqueeze(-1)
-    valid_count = step_mask.sum().clamp_min(1.0)
-    observation_loss = (
-        ((output["observations"] - batch["observations"]) ** 2) * observation_weight
-    ).sum() / (valid_count * batch["observations"].shape[-1])
-    reward_loss = (((output["rewards"] - batch["rewards"]) ** 2) * step_mask).sum() / valid_count
-    continuation_loss = (
-        F.binary_cross_entropy_with_logits(output["continuation_logits"], batch["continuations"], reduction="none")
-        * step_mask
-    ).sum() / valid_count
-    kl_loss = (((output["posterior_states"] - output["prior_states"]) ** 2).mean(dim=-1) * step_mask).sum() / valid_count
-    total = observation_loss + reward_loss + continuation_loss + 0.1 * kl_loss
-    return {
-        "loss_total": total,
-        "loss_observation": observation_loss,
-        "loss_reward": reward_loss,
-        "loss_continuation": continuation_loss,
-        "loss_kl": kl_loss,
-    }
-
-
 def _train_epoch(
-    model: _FixedCadenceTrainingWorldModel,
+    model: DreamerV3VectorWorldModel,
     optimizer: torch.optim.Optimizer,
     batch: dict[str, torch.Tensor],
     *,
@@ -437,23 +316,18 @@ def _train_epoch(
 ) -> dict[str, float]:
     model.train()
     batch_count = batch["observations"].shape[0]
-    accumulated: dict[str, float] = {
-        "loss_total": 0.0,
-        "loss_observation": 0.0,
-        "loss_reward": 0.0,
-        "loss_continuation": 0.0,
-        "loss_kl": 0.0,
-    }
+    accumulated: dict[str, float] = {}
     minibatches = 0
     for start in range(0, batch_count, batch_size):
         end = min(start + batch_size, batch_count)
         minibatch = _slice_batch(batch, start, end)
         optimizer.zero_grad()
-        losses = _losses(model, minibatch)
+        losses = model.losses(minibatch)
         losses["loss_total"].backward()
         nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         optimizer.step()
-        for key in accumulated:
+        for key in losses:
+            accumulated.setdefault(key, 0.0)
             accumulated[key] += float(losses[key].item())
         minibatches += 1
     return {key: round(value / max(minibatches, 1), 8) for key, value in accumulated.items()}
@@ -464,11 +338,61 @@ def _slice_batch(batch: dict[str, torch.Tensor], start: int, end: int) -> dict[s
 
 
 @torch.no_grad()
-def _evaluate(model: _FixedCadenceTrainingWorldModel, batch: dict[str, torch.Tensor]) -> dict[str, float]:
+def _evaluate(model: DreamerV3VectorWorldModel, batch: dict[str, torch.Tensor]) -> dict[str, float]:
     model.eval()
-    losses = _losses(model, batch)
+    losses = model.losses(batch, sample=False)
     model.train()
     return {key: round(float(value.item()), 8) for key, value in losses.items()}
+
+
+def _mean_loss_dicts(losses: list[dict[str, float]]) -> dict[str, float]:
+    keys = sorted({key for item in losses for key in item})
+    return {key: round(sum(item[key] for item in losses) / len(losses), 8) for key in keys}
+
+
+def _validate_reference_model_config(config: DreamerV3WorldModelConfig) -> None:
+    if not isinstance(config, DreamerV3WorldModelConfig):
+        raise FixedCadenceWorldModelTrainingError("world model preview model config is invalid")
+    _range_int(config.deter_dim, "deter_dim", 8, 2048)
+    _range_int(config.hidden_dim, "hidden_dim", 8, 2048)
+    _range_int(config.stoch_size, "stoch_size", 2, 64)
+    _range_int(config.class_size, "class_size", 2, 128)
+    _range_int(config.action_embed_dim, "action_embed_dim", 4, 256)
+    _range_int(config.reward_bins, "reward_bins", 3, 255)
+    if config.reward_bins % 2 == 0:
+        raise FixedCadenceWorldModelTrainingError("world model preview reward_bins must be odd")
+    _range_float(config.unimix, "unimix", 0.0, 0.2)
+    _range_float(config.free_nats, "free_nats", 0.0, 10.0)
+    _range_float(config.dyn_loss_scale, "dyn_loss_scale", 0.0, 10.0)
+    _range_float(config.rep_loss_scale, "rep_loss_scale", 0.0, 10.0)
+    _range_float(config.observation_loss_scale, "observation_loss_scale", 0.0, 10.0)
+    _range_float(config.reward_loss_scale, "reward_loss_scale", 0.0, 10.0)
+    _range_float(config.continuation_loss_scale, "continuation_loss_scale", 0.0, 10.0)
+
+
+def _validate_learning_rate(value: object, label: str) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not 1e-6 <= float(value) <= 0.1
+    ):
+        raise FixedCadenceWorldModelTrainingError(f"{label} learning_rate is invalid")
+
+
+def _range_int(value: object, label: str, minimum: int, maximum: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise FixedCadenceWorldModelTrainingError(f"world model preview {label} is invalid")
+
+
+def _range_float(value: object, label: str, minimum: float, maximum: float) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not minimum <= float(value) <= maximum
+    ):
+        raise FixedCadenceWorldModelTrainingError(f"world model preview {label} is invalid")
 
 
 def _sha256_json(value: Any) -> str:
