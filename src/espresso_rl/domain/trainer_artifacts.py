@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC, DreamerControlSpec
@@ -10,10 +11,12 @@ TRAINING_CONFIG_SCHEMA_VERSION = 1
 TRAINER_AUDIT_REPORT_FORMAT = "espresso_rl_trainer_audit_report_v1"
 TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY = "artifact_contract_only"
 TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE = "world_model_smoke"
+TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW = "world_model_train_preview"
 TRAINER_ARTIFACT_STAGES = frozenset(
     {
         TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
         TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
+        TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
     }
 )
 
@@ -25,6 +28,13 @@ _TRAINING_CONFIG_FIELDS = frozenset(
         "artifact_stage",
         "dreamer_control_spec",
         "world_model_smoke_steps",
+        "world_model_preview_epochs",
+        "world_model_preview_batch_size",
+        "world_model_preview_learning_rate",
+        "world_model_preview_hidden_dim",
+        "world_model_preview_latent_dim",
+        "world_model_preview_validation_split",
+        "world_model_preview_early_stop_patience",
         "seed",
         "notes",
     }
@@ -53,6 +63,7 @@ def validate_training_config(config: dict[str, Any]) -> list[str]:
         or not 1 <= smoke_steps <= 20
     ):
         errors.append("training config world_model_smoke_steps is invalid")
+    _validate_preview_config(config, artifact_stage, errors)
     try:
         DreamerControlSpec.from_dict(config.get("dreamer_control_spec"))
     except ValueError as exc:
@@ -81,10 +92,73 @@ def default_training_config(
     }
     if artifact_stage == TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE:
         config["world_model_smoke_steps"] = 2
+    if artifact_stage == TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
+        config.update(
+            {
+                "world_model_preview_epochs": 3,
+                "world_model_preview_batch_size": 4,
+                "world_model_preview_learning_rate": 0.001,
+                "world_model_preview_hidden_dim": 32,
+                "world_model_preview_latent_dim": 16,
+                "world_model_preview_validation_split": 0.25,
+                "world_model_preview_early_stop_patience": 2,
+            }
+        )
     errors = validate_training_config(config)
     if errors:
         raise ValueError("; ".join(errors[:10]))
     return config
+
+
+def _validate_preview_config(config: dict[str, Any], artifact_stage: object, errors: list[str]) -> None:
+    preview_keys = {
+        "world_model_preview_epochs",
+        "world_model_preview_batch_size",
+        "world_model_preview_learning_rate",
+        "world_model_preview_hidden_dim",
+        "world_model_preview_latent_dim",
+        "world_model_preview_validation_split",
+        "world_model_preview_early_stop_patience",
+    }
+    has_preview_fields = any(key in config for key in preview_keys)
+    if artifact_stage == TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
+        missing = sorted(key for key in preview_keys if key not in config)
+        if missing:
+            errors.append(f"training config missing preview fields: {', '.join(missing[:10])}")
+            return
+    if not has_preview_fields:
+        return
+    if artifact_stage != TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
+        errors.append("training config world_model_preview fields require world_model_train_preview")
+        return
+    _require_int_range(config.get("world_model_preview_epochs"), "world_model_preview_epochs", 1, 50, errors)
+    _require_int_range(config.get("world_model_preview_batch_size"), "world_model_preview_batch_size", 1, 128, errors)
+    _require_float_range(config.get("world_model_preview_learning_rate"), "world_model_preview_learning_rate", 1e-6, 0.1, errors)
+    _require_int_range(config.get("world_model_preview_hidden_dim"), "world_model_preview_hidden_dim", 8, 512, errors)
+    _require_int_range(config.get("world_model_preview_latent_dim"), "world_model_preview_latent_dim", 4, 256, errors)
+    _require_float_range(config.get("world_model_preview_validation_split"), "world_model_preview_validation_split", 0.05, 0.5, errors)
+    _require_int_range(
+        config.get("world_model_preview_early_stop_patience"),
+        "world_model_preview_early_stop_patience",
+        1,
+        20,
+        errors,
+    )
+
+
+def _require_int_range(value: object, label: str, minimum: int, maximum: int, errors: list[str]) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        errors.append(f"training config {label} is invalid")
+
+
+def _require_float_range(value: object, label: str, minimum: float, maximum: float, errors: list[str]) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not minimum <= float(value) <= maximum
+    ):
+        errors.append(f"training config {label} is invalid")
 
 
 def _reject_unknown_fields(value: dict[str, Any], allowed: frozenset[str], errors: list[str]) -> None:

@@ -4,8 +4,10 @@ import unittest
 
 import torch
 
-from espresso_rl.dreamer.world_model_smoke import (
-    FixedCadenceWorldModelSmokeError,
+from espresso_rl.dreamer.world_model_training import (
+    FixedCadenceWorldModelTrainingError,
+    WorldModelTrainPreviewConfig,
+    run_fixed_cadence_world_model_train_preview,
     run_fixed_cadence_world_model_smoke_train,
 )
 
@@ -25,11 +27,52 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         batch = smoke_batch()
         batch["observations"] = torch.zeros((1, 5), dtype=torch.float32)
 
-        with self.assertRaisesRegex(FixedCadenceWorldModelSmokeError, "observations"):
+        with self.assertRaisesRegex(FixedCadenceWorldModelTrainingError, "observations"):
             run_fixed_cadence_world_model_smoke_train(batch, seed=7, train_steps=2)
 
+    def test_train_preview_is_deterministic_and_reports_loss_curves(self) -> None:
+        config = WorldModelTrainPreviewConfig(
+            seed=11,
+            epochs=2,
+            batch_size=1,
+            learning_rate=0.001,
+            hidden_dim=8,
+            latent_dim=4,
+            validation_split=0.25,
+            early_stop_patience=2,
+        )
+        split = {
+            "strategy": "test",
+            "train_source_training_row_ids": [1, 2],
+            "validation_source_training_row_ids": [3],
+            "train_episode_count": 2,
+            "validation_episode_count": 1,
+            "validation_split": 0.25,
+        }
 
-def smoke_batch() -> dict[str, torch.Tensor]:
+        first = run_fixed_cadence_world_model_train_preview(
+            train_batch=smoke_batch(batch_size=2),
+            validation_batch=smoke_batch(batch_size=1),
+            config=config,
+            dataset_split=split,
+        ).to_dict()
+        second = run_fixed_cadence_world_model_train_preview(
+            train_batch=smoke_batch(batch_size=2),
+            validation_batch=smoke_batch(batch_size=1),
+            config=config,
+            dataset_split=split,
+        ).to_dict()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["format"], "espresso_rl_world_model_train_preview_v1")
+        self.assertEqual(first["epochs_completed"], 2)
+        self.assertEqual(len(first["train_loss_curve"]), 2)
+        self.assertEqual(len(first["validation_loss_curve"]), 2)
+        self.assertEqual(first["dataset_split"]["validation_source_training_row_ids"], [3])
+        self.assertEqual(len(first["dataset_split_sha256"]), 64)
+
+
+def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
     observations = torch.tensor(
         [
             [
@@ -52,7 +95,7 @@ def smoke_batch() -> dict[str, torch.Tensor]:
         ],
         dtype=torch.float32,
     )
-    return {
+    batch = {
         "observations": observations,
         "observed_profile_targets": observed_targets,
         "observed_profile_target_mask": torch.ones((1, 4, 5), dtype=torch.float32),
@@ -66,6 +109,9 @@ def smoke_batch() -> dict[str, torch.Tensor]:
         "step_mask": torch.ones((1, 4), dtype=torch.float32),
         "static_context": torch.zeros((1, 18), dtype=torch.float32),
     }
+    if batch_size == 1:
+        return batch
+    return {key: value.repeat(batch_size, *([1] * (value.ndim - 1))) for key, value in batch.items()}
 
 
 if __name__ == "__main__":

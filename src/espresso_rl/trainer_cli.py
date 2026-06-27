@@ -75,7 +75,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--artifact-stage",
         default="artifact_contract_only",
-        choices=("artifact_contract_only", "world_model_smoke"),
+        choices=("artifact_contract_only", "world_model_smoke", "world_model_train_preview"),
         help="Artifact stage used by --write-default-config",
     )
     return parser

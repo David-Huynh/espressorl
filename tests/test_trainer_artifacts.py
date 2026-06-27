@@ -20,6 +20,7 @@ from espresso_rl.application.trainer_artifacts import (
 )
 from espresso_rl.domain.model_manifest import validate_model_manifest
 from espresso_rl.domain.trainer_artifacts import (
+    TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
     default_training_config,
 )
@@ -201,6 +202,73 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(model_metadata["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
         self.assertEqual(len(model_metadata["world_model_smoke_sha256"]), 64)
 
+    def test_world_model_train_preview_stage_writes_split_and_loss_curves_without_inference_ready(self) -> None:
+        dataset_text, manifest_text = dataset_export_text(
+            [training_row(1), training_row(2), training_row(3), training_row(4)]
+        )
+        config = default_training_config(seed=17, artifact_stage=TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
+        config["world_model_preview_epochs"] = 2
+        config["world_model_preview_batch_size"] = 2
+        config["world_model_preview_hidden_dim"] = 8
+        config["world_model_preview_latent_dim"] = 4
+        config_text = canonical_json(config) + "\n"
+
+        first = build_dreamer_trainer_artifacts(
+            training_rows_jsonl=dataset_text,
+            training_dataset_manifest_json=manifest_text,
+            training_config_json=config_text,
+            trainer_git_sha="trainerabc",
+            created_at=1_800_000_000,
+        )
+        second = build_dreamer_trainer_artifacts(
+            training_rows_jsonl=dataset_text,
+            training_dataset_manifest_json=manifest_text,
+            training_config_json=config_text,
+            trainer_git_sha="trainerabc",
+            created_at=1_800_000_000,
+        )
+
+        first_files = {file.relative_path: file for file in first.files}
+        second_files = {file.relative_path: file for file in second.files}
+        self.assertEqual(first_files[AUDIT_REPORT_FILENAME].content, second_files[AUDIT_REPORT_FILENAME].content)
+        audit = json.loads(first_files[AUDIT_REPORT_FILENAME].content.decode("utf-8"))
+        manifest = json.loads(first_files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
+        model_metadata = placeholder_metadata(first_files[MODEL_FILENAME].content)
+        preview = audit["world_model_train_preview"]
+
+        self.assertEqual(audit["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
+        self.assertTrue(audit["zero_trust"]["world_model_train_preview_trained"])
+        self.assertFalse(audit["inference_ready"])
+        self.assertFalse(manifest["runtime_compatibility"]["inference_ready"])
+        self.assertEqual(manifest["trainer"]["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
+        self.assertEqual(model_metadata["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
+        self.assertEqual(len(model_metadata["world_model_train_preview_sha256"]), 64)
+        self.assertEqual(preview["seed"], 17)
+        self.assertEqual(preview["epochs_requested"], 2)
+        self.assertEqual(preview["epochs_completed"], 2)
+        self.assertEqual(preview["batch_size"], 2)
+        self.assertEqual(preview["hidden_dim"], 8)
+        self.assertEqual(preview["latent_dim"], 4)
+        self.assertEqual(len(preview["train_loss_curve"]), 2)
+        self.assertEqual(len(preview["validation_loss_curve"]), 2)
+        self.assertEqual(preview["dataset_split"]["train_source_training_row_ids"], [1, 2, 3])
+        self.assertEqual(preview["dataset_split"]["validation_source_training_row_ids"], [4])
+        self.assertEqual(preview["dataset_split_sha256"], preview["dataset_split"]["dataset_split_sha256"])
+
+    def test_world_model_train_preview_requires_enough_episodes_for_validation(self) -> None:
+        dataset_text, manifest_text = dataset_export_text([training_row(1)])
+        config_text = canonical_json(
+            default_training_config(seed=17, artifact_stage=TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
+        ) + "\n"
+
+        with self.assertRaisesRegex(TrainerArtifactError, "requires at least two episodes"):
+            build_dreamer_trainer_artifacts(
+                training_rows_jsonl=dataset_text,
+                training_dataset_manifest_json=manifest_text,
+                training_config_json=config_text,
+                trainer_git_sha="trainerabc",
+            )
+
     def test_rejects_training_config_with_non_dreamer_adaptive_control(self) -> None:
         dataset_text, manifest_text = dataset_export_text([training_row(1)])
         config = default_training_config()
@@ -286,6 +354,29 @@ class TrainerArtifactTests(unittest.TestCase):
             self.assertEqual(config["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
             self.assertEqual(config["seed"], 13)
             self.assertEqual(config["world_model_smoke_steps"], 2)
+
+    def test_cli_writes_world_model_train_preview_default_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "training_config.json"
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = trainer_cli_main(
+                    [
+                        "--write-default-config",
+                        str(config_path),
+                        "--artifact-stage",
+                        "world_model_train_preview",
+                        "--seed",
+                        "19",
+                    ]
+                )
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(config["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
+            self.assertEqual(config["seed"], 19)
+            self.assertEqual(config["world_model_preview_epochs"], 3)
+            self.assertEqual(config["world_model_preview_batch_size"], 4)
 
 
 def dataset_export_text(rows: list[dict]) -> tuple[str, str]:

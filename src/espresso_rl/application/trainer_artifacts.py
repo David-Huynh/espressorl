@@ -20,6 +20,7 @@ from espresso_rl.domain.model_manifest import (
 )
 from espresso_rl.domain.optimization import OPTIMIZER_MODE_DREAMER_V3_SHADOW
 from espresso_rl.domain.trainer_artifacts import (
+    TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
     TRAINER_AUDIT_REPORT_FORMAT,
     validate_training_config,
@@ -30,8 +31,10 @@ from espresso_rl.dreamer.dataset import (
     build_dreamer_episode_batch,
     build_dreamer_episodes_from_training_rows,
 )
-from espresso_rl.dreamer.world_model_smoke import (
-    FixedCadenceWorldModelSmokeError,
+from espresso_rl.dreamer.world_model_training import (
+    FixedCadenceWorldModelTrainingError,
+    WorldModelTrainPreviewConfig,
+    run_fixed_cadence_world_model_train_preview,
     run_fixed_cadence_world_model_smoke_train,
 )
 
@@ -148,6 +151,11 @@ def build_dreamer_trainer_artifacts(
         dreamer_tensor_build["batch"],
         training_config=training_config,
     )
+    world_model_train_preview = _world_model_train_preview_metrics(
+        dreamer_tensor_build["episodes"],
+        control_spec=control_spec,
+        training_config=training_config,
+    )
     canonical_training_config_text = _canonical_json(training_config) + "\n"
     canonical_training_config_payload = canonical_training_config_text.encode("utf-8")
     training_config_sha256 = _sha256_bytes(canonical_training_config_payload)
@@ -157,6 +165,9 @@ def build_dreamer_trainer_artifacts(
         training_config_sha256=training_config_sha256,
         dreamer_tensor_contract_sha256=dreamer_tensor_contract["tensor_contract_sha256"],
         world_model_smoke_sha256=_sha256_json(world_model_smoke) if world_model_smoke is not None else None,
+        world_model_train_preview_sha256=(
+            _sha256_json(world_model_train_preview) if world_model_train_preview is not None else None
+        ),
         artifact_stage=artifact_stage,
         row_count=row_count,
         created_at=created_at,
@@ -186,6 +197,7 @@ def build_dreamer_trainer_artifacts(
                 trainer_git_sha=trainer_git_sha,
                 dreamer_tensor_contract=dreamer_tensor_contract,
                 world_model_smoke=world_model_smoke,
+                world_model_train_preview=world_model_train_preview,
                 artifact_stage=artifact_stage,
             )
         )
@@ -304,6 +316,7 @@ def _dreamer_tensor_build(
             "tensor_contract_sha256": _sha256_json(tensor_contract_base),
         },
         "batch": batch,
+        "episodes": episodes,
     }
 
 
@@ -320,8 +333,70 @@ def _world_model_smoke_metrics(
             seed=int(training_config["seed"]),
             train_steps=int(training_config.get("world_model_smoke_steps", 2)),
         ).to_dict()
-    except FixedCadenceWorldModelSmokeError as exc:
+    except FixedCadenceWorldModelTrainingError as exc:
         raise TrainerArtifactError(f"Dreamer world-model smoke training failed: {exc}") from exc
+
+
+def _world_model_train_preview_metrics(
+    episodes: list[dict[str, Any]],
+    *,
+    control_spec: DreamerControlSpec,
+    training_config: dict[str, Any],
+) -> dict[str, Any] | None:
+    if training_config.get("artifact_stage") != TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
+        return None
+    split = _split_episodes_for_preview(
+        episodes,
+        validation_split=float(training_config["world_model_preview_validation_split"]),
+    )
+    train_batch = build_dreamer_episode_batch(split["train_episodes"], control_spec=control_spec)
+    validation_batch = build_dreamer_episode_batch(split["validation_episodes"], control_spec=control_spec)
+    try:
+        return run_fixed_cadence_world_model_train_preview(
+            train_batch=train_batch,
+            validation_batch=validation_batch,
+            config=WorldModelTrainPreviewConfig(
+                seed=int(training_config["seed"]),
+                epochs=int(training_config["world_model_preview_epochs"]),
+                batch_size=int(training_config["world_model_preview_batch_size"]),
+                learning_rate=float(training_config["world_model_preview_learning_rate"]),
+                hidden_dim=int(training_config["world_model_preview_hidden_dim"]),
+                latent_dim=int(training_config["world_model_preview_latent_dim"]),
+                validation_split=float(training_config["world_model_preview_validation_split"]),
+                early_stop_patience=int(training_config["world_model_preview_early_stop_patience"]),
+            ),
+            dataset_split=split["summary"],
+        ).to_dict()
+    except FixedCadenceWorldModelTrainingError as exc:
+        raise TrainerArtifactError(f"Dreamer world-model train preview failed: {exc}") from exc
+
+
+def _split_episodes_for_preview(
+    episodes: list[dict[str, Any]],
+    *,
+    validation_split: float,
+) -> dict[str, Any]:
+    if len(episodes) < 2:
+        raise TrainerArtifactError("Dreamer world-model train preview requires at least two episodes")
+    validation_count = max(1, min(len(episodes) - 1, round(len(episodes) * validation_split)))
+    train_episodes = episodes[:-validation_count]
+    validation_episodes = episodes[-validation_count:]
+    summary = {
+        "strategy": "sorted_context_time_tail_validation",
+        "validation_split": validation_split,
+        "train_episode_count": len(train_episodes),
+        "validation_episode_count": len(validation_episodes),
+        "train_source_training_row_ids": [int(episode["source_training_row_id"]) for episode in train_episodes],
+        "validation_source_training_row_ids": [
+            int(episode["source_training_row_id"]) for episode in validation_episodes
+        ],
+    }
+    summary["dataset_split_sha256"] = _sha256_json(summary)
+    return {
+        "train_episodes": train_episodes,
+        "validation_episodes": validation_episodes,
+        "summary": summary,
+    }
 
 
 def _feature_names(batch: dict[str, Any]) -> dict[str, list[str]]:
@@ -409,6 +484,7 @@ def _audit_report(
     trainer_git_sha: str,
     dreamer_tensor_contract: dict[str, Any],
     world_model_smoke: dict[str, Any] | None,
+    world_model_train_preview: dict[str, Any] | None,
     artifact_stage: str,
 ) -> dict[str, Any]:
     return {
@@ -427,11 +503,13 @@ def _audit_report(
         "trainer_git_sha": trainer_git_sha,
         "dreamer_tensor_contract": dreamer_tensor_contract,
         "world_model_smoke": world_model_smoke,
+        "world_model_train_preview": world_model_train_preview,
         "zero_trust": {
             "dataset_manifest_hash_verified": True,
             "training_rows_revalidated": True,
             "dreamer_tensors_revalidated": True,
             "world_model_smoke_trained": world_model_smoke is not None,
+            "world_model_train_preview_trained": world_model_train_preview is not None,
             "absolute_grinder_fields_allowed": False,
             "pickle_outputs_allowed": False,
             "runtime_inference_enabled": False,
@@ -445,6 +523,7 @@ def _placeholder_safetensors(
     training_config_sha256: str,
     dreamer_tensor_contract_sha256: str,
     world_model_smoke_sha256: str | None,
+    world_model_train_preview_sha256: str | None,
     artifact_stage: str,
     row_count: int,
     created_at: int,
@@ -459,6 +538,7 @@ def _placeholder_safetensors(
             "training_config_sha256": training_config_sha256,
             "dreamer_tensor_contract_sha256": dreamer_tensor_contract_sha256,
             "world_model_smoke_sha256": world_model_smoke_sha256 or "",
+            "world_model_train_preview_sha256": world_model_train_preview_sha256 or "",
             "row_count": str(row_count),
             "created_at": str(int(created_at)),
         }

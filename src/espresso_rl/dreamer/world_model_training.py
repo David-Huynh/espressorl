@@ -1,0 +1,477 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+WORLD_MODEL_SMOKE_FORMAT = "espresso_rl_world_model_smoke_v1"
+WORLD_MODEL_SMOKE_SCHEMA_VERSION = 1
+WORLD_MODEL_TRAIN_PREVIEW_FORMAT = "espresso_rl_world_model_train_preview_v1"
+WORLD_MODEL_TRAIN_PREVIEW_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class WorldModelSmokeResult:
+    seed: int
+    train_steps: int
+    initial: dict[str, float]
+    final: dict[str, float]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format": WORLD_MODEL_SMOKE_FORMAT,
+            "schema_version": WORLD_MODEL_SMOKE_SCHEMA_VERSION,
+            "seed": self.seed,
+            "train_steps": self.train_steps,
+            "device": "cpu",
+            "dtype": "float32",
+            "initial": self.initial,
+            "final": self.final,
+            "loss_delta_total": round(self.initial["loss_total"] - self.final["loss_total"], 8),
+        }
+
+
+@dataclass(frozen=True)
+class WorldModelTrainPreviewConfig:
+    seed: int
+    epochs: int
+    batch_size: int
+    learning_rate: float
+    hidden_dim: int
+    latent_dim: int
+    validation_split: float
+    early_stop_patience: int
+
+
+@dataclass(frozen=True)
+class WorldModelTrainPreviewResult:
+    config: WorldModelTrainPreviewConfig
+    dataset_split: dict[str, Any]
+    train_loss_curve: tuple[dict[str, float], ...]
+    validation_loss_curve: tuple[dict[str, float], ...]
+    best_epoch: int
+    epochs_completed: int
+    early_stopped: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format": WORLD_MODEL_TRAIN_PREVIEW_FORMAT,
+            "schema_version": WORLD_MODEL_TRAIN_PREVIEW_SCHEMA_VERSION,
+            "seed": self.config.seed,
+            "device": "cpu",
+            "dtype": "float32",
+            "epochs_requested": self.config.epochs,
+            "epochs_completed": self.epochs_completed,
+            "batch_size": self.config.batch_size,
+            "learning_rate": self.config.learning_rate,
+            "hidden_dim": self.config.hidden_dim,
+            "latent_dim": self.config.latent_dim,
+            "validation_split": self.config.validation_split,
+            "early_stop_patience": self.config.early_stop_patience,
+            "best_epoch": self.best_epoch,
+            "early_stopped": self.early_stopped,
+            "dataset_split": self.dataset_split,
+            "dataset_split_sha256": str(
+                self.dataset_split.get("dataset_split_sha256") or _sha256_json(self.dataset_split)
+            ),
+            "train_loss_curve": list(self.train_loss_curve),
+            "validation_loss_curve": list(self.validation_loss_curve),
+        }
+
+
+class FixedCadenceWorldModelTrainingError(ValueError):
+    pass
+
+
+FixedCadenceWorldModelSmokeError = FixedCadenceWorldModelTrainingError
+
+
+class _FixedCadenceTrainingWorldModel(nn.Module):
+    def __init__(
+        self,
+        *,
+        observation_dim: int,
+        behavior_dim: int,
+        static_dim: int,
+        hidden_dim: int = 32,
+        latent_dim: int = 16,
+    ) -> None:
+        super().__init__()
+        self.observation_encoder = nn.Sequential(
+            nn.Linear(observation_dim + static_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU(),
+        )
+        self.behavior_encoder = nn.Sequential(nn.Linear(behavior_dim, 16), nn.ELU())
+        self.gru = nn.GRUCell(latent_dim + 16, hidden_dim)
+        self.prior = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ELU(), nn.Linear(hidden_dim, latent_dim))
+        self.posterior = nn.Sequential(
+            nn.Linear(hidden_dim + hidden_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, latent_dim),
+        )
+        self.observation_decoder = nn.Sequential(
+            nn.Linear(hidden_dim + latent_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, observation_dim),
+        )
+        self.reward_decoder = nn.Sequential(nn.Linear(hidden_dim + latent_dim, hidden_dim), nn.ELU(), nn.Linear(hidden_dim, 1))
+        self.continuation_decoder = nn.Sequential(
+            nn.Linear(hidden_dim + latent_dim, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        observations = batch["observations"]
+        behavior = _behavior_tensor(batch)
+        static_context = batch["static_context"]
+        batch_size, step_count, _ = observations.shape
+        h = observations.new_zeros(batch_size, self.gru.hidden_size)
+        z = observations.new_zeros(batch_size, self.prior[-1].out_features)
+        observation_predictions: list[torch.Tensor] = []
+        reward_predictions: list[torch.Tensor] = []
+        continuation_logits: list[torch.Tensor] = []
+        prior_states: list[torch.Tensor] = []
+        posterior_states: list[torch.Tensor] = []
+
+        for step_index in range(step_count):
+            behavior_embed = self.behavior_encoder(behavior[:, step_index])
+            h = self.gru(torch.cat([z, behavior_embed], dim=-1), h)
+            prior_state = self.prior(h)
+            observation_embed = self.observation_encoder(
+                torch.cat([observations[:, step_index], static_context], dim=-1)
+            )
+            posterior_state = self.posterior(torch.cat([h, observation_embed], dim=-1))
+            z = torch.tanh(posterior_state)
+            state = torch.cat([h, z], dim=-1)
+            observation_predictions.append(self.observation_decoder(state))
+            reward_predictions.append(self.reward_decoder(state).squeeze(-1))
+            continuation_logits.append(self.continuation_decoder(state).squeeze(-1))
+            prior_states.append(prior_state)
+            posterior_states.append(posterior_state)
+
+        return {
+            "observations": torch.stack(observation_predictions, dim=1),
+            "rewards": torch.stack(reward_predictions, dim=1),
+            "continuation_logits": torch.stack(continuation_logits, dim=1),
+            "prior_states": torch.stack(prior_states, dim=1),
+            "posterior_states": torch.stack(posterior_states, dim=1),
+        }
+
+
+def run_fixed_cadence_world_model_smoke_train(
+    batch: dict[str, Any],
+    *,
+    seed: int,
+    train_steps: int,
+    hidden_dim: int = 32,
+    latent_dim: int = 16,
+    learning_rate: float = 1e-3,
+) -> WorldModelSmokeResult:
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1:
+        raise FixedCadenceWorldModelTrainingError("world model smoke seed must be a uint32 integer")
+    if isinstance(train_steps, bool) or not isinstance(train_steps, int) or not 1 <= train_steps <= 20:
+        raise FixedCadenceWorldModelTrainingError("world model smoke train_steps must be 1..20")
+    _validate_model_hyperparameters(
+        hidden_dim=hidden_dim,
+        latent_dim=latent_dim,
+        learning_rate=learning_rate,
+        label="world model smoke",
+    )
+
+    old_threads = torch.get_num_threads()
+    old_deterministic = torch.are_deterministic_algorithms_enabled()
+    try:
+        torch.set_num_threads(1)
+        torch.use_deterministic_algorithms(True)
+        torch.manual_seed(seed)
+        tensors = _cpu_float_batch(batch)
+        _validate_batch_shapes(tensors)
+        model = _FixedCadenceTrainingWorldModel(
+            observation_dim=tensors["observations"].shape[-1],
+            behavior_dim=_behavior_tensor(tensors).shape[-1],
+            static_dim=tensors["static_context"].shape[-1],
+            hidden_dim=hidden_dim,
+            latent_dim=latent_dim,
+        )
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        initial = _evaluate(model, tensors)
+        for _ in range(train_steps):
+            optimizer.zero_grad()
+            losses = _losses(model, tensors)
+            losses["loss_total"].backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+            optimizer.step()
+        final = _evaluate(model, tensors)
+    finally:
+        torch.use_deterministic_algorithms(old_deterministic)
+        torch.set_num_threads(old_threads)
+    return WorldModelSmokeResult(seed=seed, train_steps=train_steps, initial=initial, final=final)
+
+
+def run_fixed_cadence_world_model_train_preview(
+    *,
+    train_batch: dict[str, Any],
+    validation_batch: dict[str, Any],
+    config: WorldModelTrainPreviewConfig,
+    dataset_split: dict[str, Any],
+) -> WorldModelTrainPreviewResult:
+    _validate_preview_config(config)
+    old_threads = torch.get_num_threads()
+    old_deterministic = torch.are_deterministic_algorithms_enabled()
+    try:
+        torch.set_num_threads(1)
+        torch.use_deterministic_algorithms(True)
+        torch.manual_seed(config.seed)
+        train_tensors = _cpu_float_batch(train_batch)
+        validation_tensors = _cpu_float_batch(validation_batch)
+        _validate_batch_shapes(train_tensors)
+        _validate_batch_shapes(validation_tensors)
+        model = _FixedCadenceTrainingWorldModel(
+            observation_dim=train_tensors["observations"].shape[-1],
+            behavior_dim=_behavior_tensor(train_tensors).shape[-1],
+            static_dim=train_tensors["static_context"].shape[-1],
+            hidden_dim=config.hidden_dim,
+            latent_dim=config.latent_dim,
+        )
+        optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+        train_curve: list[dict[str, float]] = []
+        validation_curve: list[dict[str, float]] = []
+        best_epoch = 0
+        best_validation_loss = math.inf
+        epochs_without_improvement = 0
+        early_stopped = False
+
+        for epoch_index in range(1, config.epochs + 1):
+            epoch_losses = _train_epoch(
+                model,
+                optimizer,
+                train_tensors,
+                batch_size=config.batch_size,
+            )
+            validation_losses = _evaluate(model, validation_tensors)
+            train_curve.append({"epoch": epoch_index, **epoch_losses})
+            validation_curve.append({"epoch": epoch_index, **validation_losses})
+
+            validation_total = validation_losses["loss_total"]
+            if validation_total < best_validation_loss - 1e-8:
+                best_validation_loss = validation_total
+                best_epoch = epoch_index
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= config.early_stop_patience:
+                    early_stopped = True
+                    break
+    finally:
+        torch.use_deterministic_algorithms(old_deterministic)
+        torch.set_num_threads(old_threads)
+
+    return WorldModelTrainPreviewResult(
+        config=config,
+        dataset_split=dataset_split,
+        train_loss_curve=tuple(train_curve),
+        validation_loss_curve=tuple(validation_curve),
+        best_epoch=best_epoch,
+        epochs_completed=len(train_curve),
+        early_stopped=early_stopped,
+    )
+
+
+def _cpu_float_batch(batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+    required = (
+        "observations",
+        "observed_profile_targets",
+        "observed_profile_target_mask",
+        "dynamic_actions",
+        "dynamic_action_mask",
+        "control_action_mask",
+        "constraints",
+        "decision_step_mask",
+        "rewards",
+        "continuations",
+        "step_mask",
+        "static_context",
+    )
+    converted: dict[str, torch.Tensor] = {}
+    for key in required:
+        value = batch.get(key)
+        if not isinstance(value, torch.Tensor):
+            raise FixedCadenceWorldModelTrainingError(f"world model training batch is missing tensor {key}")
+        converted[key] = value.detach().to(device="cpu", dtype=torch.float32)
+    return converted
+
+
+def _validate_batch_shapes(batch: dict[str, torch.Tensor]) -> None:
+    observations = batch["observations"]
+    if observations.ndim != 3:
+        raise FixedCadenceWorldModelTrainingError(
+            "world model training observations must have shape (batch, steps, features)"
+        )
+    batch_size, step_count, _ = observations.shape
+    if batch_size <= 0 or step_count <= 1:
+        raise FixedCadenceWorldModelTrainingError("world model training batch must contain at least two valid steps")
+    for key in (
+        "observed_profile_targets",
+        "observed_profile_target_mask",
+        "dynamic_actions",
+        "dynamic_action_mask",
+        "control_action_mask",
+        "constraints",
+    ):
+        tensor = batch[key]
+        if tensor.ndim != 3 or tensor.shape[:2] != (batch_size, step_count):
+            raise FixedCadenceWorldModelTrainingError(f"world model training {key} shape is invalid")
+    for key in ("decision_step_mask", "rewards", "continuations", "step_mask"):
+        tensor = batch[key]
+        if tensor.ndim != 2 or tensor.shape != (batch_size, step_count):
+            raise FixedCadenceWorldModelTrainingError(f"world model training {key} shape is invalid")
+    static_context = batch["static_context"]
+    if static_context.ndim != 2 or static_context.shape[0] != batch_size:
+        raise FixedCadenceWorldModelTrainingError("world model training static_context shape is invalid")
+    if float(batch["step_mask"].sum().item()) < 2.0:
+        raise FixedCadenceWorldModelTrainingError("world model training batch must contain at least two valid steps")
+
+
+def _validate_model_hyperparameters(
+    *,
+    hidden_dim: int,
+    latent_dim: int,
+    learning_rate: float,
+    label: str,
+) -> None:
+    if isinstance(hidden_dim, bool) or not isinstance(hidden_dim, int) or not 8 <= hidden_dim <= 512:
+        raise FixedCadenceWorldModelTrainingError(f"{label} hidden_dim is invalid")
+    if isinstance(latent_dim, bool) or not isinstance(latent_dim, int) or not 4 <= latent_dim <= 256:
+        raise FixedCadenceWorldModelTrainingError(f"{label} latent_dim is invalid")
+    if (
+        isinstance(learning_rate, bool)
+        or not isinstance(learning_rate, (int, float))
+        or not math.isfinite(float(learning_rate))
+        or not 1e-6 <= float(learning_rate) <= 0.1
+    ):
+        raise FixedCadenceWorldModelTrainingError(f"{label} learning_rate is invalid")
+
+
+def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
+    if isinstance(config.seed, bool) or not isinstance(config.seed, int) or not 0 <= config.seed <= 2**32 - 1:
+        raise FixedCadenceWorldModelTrainingError("world model preview seed must be a uint32 integer")
+    if isinstance(config.epochs, bool) or not isinstance(config.epochs, int) or not 1 <= config.epochs <= 50:
+        raise FixedCadenceWorldModelTrainingError("world model preview epochs must be 1..50")
+    if isinstance(config.batch_size, bool) or not isinstance(config.batch_size, int) or not 1 <= config.batch_size <= 128:
+        raise FixedCadenceWorldModelTrainingError("world model preview batch_size must be 1..128")
+    if (
+        isinstance(config.validation_split, bool)
+        or not isinstance(config.validation_split, (int, float))
+        or not math.isfinite(float(config.validation_split))
+        or not 0.05 <= float(config.validation_split) <= 0.5
+    ):
+        raise FixedCadenceWorldModelTrainingError("world model preview validation_split must be 0.05..0.5")
+    if (
+        isinstance(config.early_stop_patience, bool)
+        or not isinstance(config.early_stop_patience, int)
+        or not 1 <= config.early_stop_patience <= 20
+    ):
+        raise FixedCadenceWorldModelTrainingError("world model preview early_stop_patience must be 1..20")
+    _validate_model_hyperparameters(
+        hidden_dim=config.hidden_dim,
+        latent_dim=config.latent_dim,
+        learning_rate=config.learning_rate,
+        label="world model preview",
+    )
+
+
+def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    return torch.cat(
+        [
+            batch["observed_profile_targets"],
+            batch["observed_profile_target_mask"],
+            batch["dynamic_actions"],
+            batch["dynamic_action_mask"],
+            batch["control_action_mask"],
+            batch["constraints"],
+            batch["decision_step_mask"].unsqueeze(-1),
+        ],
+        dim=-1,
+    )
+
+
+def _losses(model: _FixedCadenceTrainingWorldModel, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    output = model(batch)
+    step_mask = batch["step_mask"]
+    observation_weight = step_mask.unsqueeze(-1)
+    valid_count = step_mask.sum().clamp_min(1.0)
+    observation_loss = (
+        ((output["observations"] - batch["observations"]) ** 2) * observation_weight
+    ).sum() / (valid_count * batch["observations"].shape[-1])
+    reward_loss = (((output["rewards"] - batch["rewards"]) ** 2) * step_mask).sum() / valid_count
+    continuation_loss = (
+        F.binary_cross_entropy_with_logits(output["continuation_logits"], batch["continuations"], reduction="none")
+        * step_mask
+    ).sum() / valid_count
+    kl_loss = (((output["posterior_states"] - output["prior_states"]) ** 2).mean(dim=-1) * step_mask).sum() / valid_count
+    total = observation_loss + reward_loss + continuation_loss + 0.1 * kl_loss
+    return {
+        "loss_total": total,
+        "loss_observation": observation_loss,
+        "loss_reward": reward_loss,
+        "loss_continuation": continuation_loss,
+        "loss_kl": kl_loss,
+    }
+
+
+def _train_epoch(
+    model: _FixedCadenceTrainingWorldModel,
+    optimizer: torch.optim.Optimizer,
+    batch: dict[str, torch.Tensor],
+    *,
+    batch_size: int,
+) -> dict[str, float]:
+    model.train()
+    batch_count = batch["observations"].shape[0]
+    accumulated: dict[str, float] = {
+        "loss_total": 0.0,
+        "loss_observation": 0.0,
+        "loss_reward": 0.0,
+        "loss_continuation": 0.0,
+        "loss_kl": 0.0,
+    }
+    minibatches = 0
+    for start in range(0, batch_count, batch_size):
+        end = min(start + batch_size, batch_count)
+        minibatch = _slice_batch(batch, start, end)
+        optimizer.zero_grad()
+        losses = _losses(model, minibatch)
+        losses["loss_total"].backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+        optimizer.step()
+        for key in accumulated:
+            accumulated[key] += float(losses[key].item())
+        minibatches += 1
+    return {key: round(value / max(minibatches, 1), 8) for key, value in accumulated.items()}
+
+
+def _slice_batch(batch: dict[str, torch.Tensor], start: int, end: int) -> dict[str, torch.Tensor]:
+    return {key: value[start:end] for key, value in batch.items()}
+
+
+@torch.no_grad()
+def _evaluate(model: _FixedCadenceTrainingWorldModel, batch: dict[str, torch.Tensor]) -> dict[str, float]:
+    model.eval()
+    losses = _losses(model, batch)
+    model.train()
+    return {key: round(float(value.item()), 8) for key, value in losses.items()}
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    ).hexdigest()
