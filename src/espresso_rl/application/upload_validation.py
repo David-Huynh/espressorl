@@ -115,6 +115,8 @@ RECOMMENDATION_RECORD_FIELDS = frozenset(
         "machine_id",
         "bean_context_id",
         "grinder_context_id",
+        "profile_id",
+        "raw_profile_hash",
         "grind_delta_steps_from_current",
         "grind_delta_um_from_current",
         "projected_relative_step_from_reference",
@@ -396,6 +398,8 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
     _require_identifier(payload, "machine_id", errors)
     _optional_identifier(payload, "bean_context_id", errors)
     _optional_string(payload, "grinder_context_id", 120, errors)
+    _optional_string(payload, "profile_id", 120, errors)
+    _optional_hash(payload, "raw_profile_hash", errors)
     _optional_enum(
         payload,
         "grinder_calibration_mode",

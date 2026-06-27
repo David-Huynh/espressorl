@@ -123,6 +123,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     machine_id TEXT NOT NULL,
     bean_context_id TEXT,
     grinder_context_id TEXT,
+    profile_id TEXT,
+    raw_profile_hash TEXT,
     grind_delta_steps_from_current INTEGER NOT NULL,
     grind_delta_um_from_current DOUBLE PRECISION NOT NULL,
     projected_relative_step_from_reference DOUBLE PRECISION NOT NULL,
@@ -159,6 +161,12 @@ CREATE INDEX IF NOT EXISTS idx_recommendations_current
 
 ALTER TABLE recommendations
     ADD COLUMN IF NOT EXISTS grinder_context_id TEXT;
+
+ALTER TABLE recommendations
+    ADD COLUMN IF NOT EXISTS profile_id TEXT;
+
+ALTER TABLE recommendations
+    ADD COLUMN IF NOT EXISTS raw_profile_hash TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_recommendations_context_grinder_time
     ON recommendations (install_id, machine_id, bean_context_id, grinder_context_id, created_at DESC);
@@ -288,6 +296,7 @@ CREATE TABLE IF NOT EXISTS community_grinder_catalog (
     manufacturer TEXT,
     model TEXT,
     microns_per_step DOUBLE PRECISION,
+    min_steps INTEGER,
     max_steps INTEGER,
     step_direction TEXT,
     source TEXT NOT NULL DEFAULT 'community',
@@ -296,10 +305,15 @@ CREATE TABLE IF NOT EXISTS community_grinder_catalog (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (microns_per_step IS NULL OR microns_per_step > 0),
+    CHECK (min_steps IS NULL OR min_steps >= 0),
     CHECK (max_steps IS NULL OR max_steps > 0),
+    CHECK (min_steps IS NULL OR max_steps IS NULL OR min_steps < max_steps),
     CHECK (step_direction IS NULL OR step_direction IN ('higher_is_finer', 'higher_is_coarser')),
     CHECK (confidence >= 0.0 AND confidence <= 1.0)
 );
+
+ALTER TABLE community_grinder_catalog
+    ADD COLUMN IF NOT EXISTS min_steps INTEGER;
 
 CREATE TABLE IF NOT EXISTS community_grinder_aliases (
     alias_id BIGSERIAL PRIMARY KEY,

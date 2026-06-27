@@ -170,3 +170,12 @@ class LocalDataRepository(Protocol):
         grinder_context_id: str | None = None,
     ) -> dict[str, int]:
         ...
+
+    def reset_all(
+        self,
+        install_id: str,
+        machine_id: str,
+        *,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        ...

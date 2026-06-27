@@ -3,13 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Callable
 
-from espresso_rl.domain.models import (
-    FollowThroughState,
-    RecommendationDecision,
-    ShotRecord,
-    ShotType,
-    now_ts,
-)
+from espresso_rl.domain.models import ShotRecord, ShotType, now_ts
 from espresso_rl.ports.repositories import LocalDataRepository
 
 
@@ -153,6 +147,21 @@ class LocalDataService:
             ],
         )
 
+    def reset_all(self, *, dry_run: bool = False) -> LocalDataActionResult:
+        counts = self._repository.reset_all(
+            self._install_id,
+            self._machine_id,
+            dry_run=dry_run,
+        )
+        return LocalDataActionResult(
+            action="reset_all",
+            dry_run=dry_run,
+            counts=counts,
+            warnings=[
+                "deletes all local shots, recommendations, queued uploads, and shadow evaluations for this machine"
+            ],
+        )
+
 
 def _context_summaries(shots: list[ShotRecord]) -> list[LocalContextSummary]:
     grouped: dict[tuple[str | None, str | None], list[ShotRecord]] = {}
@@ -205,9 +214,6 @@ def _included_in_optimizer(shot: ShotRecord) -> bool:
         and shot.optimization_weight > 0.0
         and shot.feedback_recorded
         and shot.reward is not None
-        and shot.recommendation_decision
-        not in {RecommendationDecision.IGNORED, RecommendationDecision.DISMISSED}
-        and shot.recommendation_followed != FollowThroughState.NOT_FOLLOWED
     )
 
 

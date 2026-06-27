@@ -9,7 +9,7 @@ from espresso_rl.application.community_priors import (
     MAX_COMMUNITY_PRIOR_CONFIDENCE,
     community_prior_context_key,
 )
-from espresso_rl.domain.models import FollowThroughState, RecommendationDecision, ShotRecord, ShotType
+from espresso_rl.domain.models import ShotRecord, ShotType
 from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
 from espresso_rl.ports.community import CommunityWarehouseRepository
 from espresso_rl.ports.optimizers import PriorProvider
@@ -175,10 +175,6 @@ def _shot_is_usable_local_prior(shot: ShotRecord) -> bool:
     if shot.exclude_from_local_optimization or shot.optimization_weight <= 0:
         return False
     if shot.reward is None:
-        return False
-    if shot.recommendation_decision in {RecommendationDecision.IGNORED, RecommendationDecision.DISMISSED}:
-        return False
-    if shot.recommendation_followed == FollowThroughState.NOT_FOLLOWED:
         return False
     return True
 

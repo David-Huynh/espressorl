@@ -811,6 +811,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("UNIQUE (source_validation_id)", schema)
         self.assertIn("idx_community_priors_context_key", schema)
         self.assertIn("microns_per_step DOUBLE PRECISION", schema)
+        self.assertIn("min_steps INTEGER", schema)
         self.assertIn("max_steps INTEGER", schema)
         self.assertIn("normalized_alias TEXT NOT NULL", schema)
         self.assertIn("feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE", schema)

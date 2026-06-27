@@ -114,9 +114,6 @@ def _is_optimizer_observation(shot: ShotRecord) -> bool:
         and shot.optimization_weight > 0.0
         and shot.feedback_recorded
         and shot.reward is not None
-        and shot.recommendation_decision
-        not in {RecommendationDecision.IGNORED, RecommendationDecision.DISMISSED}
-        and shot.recommendation_followed != FollowThroughState.NOT_FOLLOWED
     )
 
 
@@ -128,6 +125,35 @@ def _normal_context_key(value: str | None) -> str:
     if not value:
         return ""
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _profile_scope_key(*, profile_id: str | None, raw_profile_hash: str | None) -> tuple[str, str] | None:
+    if profile_id:
+        return ("id", _normal_context_key(profile_id))
+    if raw_profile_hash:
+        return ("hash", raw_profile_hash)
+    return None
+
+
+def _shot_matches_profile_scope(shot: ShotRecord, scope: tuple[str, str] | None) -> bool:
+    if scope is None:
+        return True
+    kind, value = scope
+    if kind == "hash":
+        return shot.raw_profile_hash == value
+    return _normal_context_key(shot.profile_id) == value
+
+
+def _recommendation_matches_profile_scope(
+    recommendation: Recommendation,
+    scope: tuple[str, str] | None,
+) -> bool:
+    if scope is None:
+        return True
+    kind, value = scope
+    if kind == "hash":
+        return recommendation.raw_profile_hash == value
+    return _normal_context_key(recommendation.profile_id) == value
 
 
 def _bean_context_key(bean_context_name: str | None, bean_context_id: str | None) -> str:
@@ -260,11 +286,12 @@ class EspressoRLService:
                 else f"not_locally_optimizable:{classification.shot_type.value}"
             )
             return IngestResult(shot=None, recommendation=None, dropped_reason=reason)
-        recommendation = self._recommendation_for_event(event, now)
         profile_quality = resample_profile_with_quality(event)
         shot_metadata = resample_shot_metadata(event)
         fixed_cadence_sequence = build_fixed_cadence_sequence(event)
         profile = profile_quality.profile
+        raw_profile_hash = profile_hash(profile)
+        recommendation = self._recommendation_for_event(event, now)
         mse = profile_mse(profile)
         score = profile_score(profile)
 
@@ -291,7 +318,7 @@ class EspressoRLService:
             absolute_reference_step=event.absolute_reference_step,
             recommendation_id=recommendation.recommendation_id if recommendation else event.recommendation_id,
             raw_profile_available=len(event.time_ms) >= 2,
-            raw_profile_hash=profile_hash(profile),
+            raw_profile_hash=raw_profile_hash,
             profile_mse=mse,
             profile_score=score,
             shot_type=classification.shot_type,
@@ -364,13 +391,14 @@ class EspressoRLService:
             bean_context_id=shot.bean_context_id,
             bean_context_name=shot.bean_context_name,
             grinder_context_id=shot.grinder_context_id,
-            current_recipe=shot.to_recipe(),
+            current_recipe=self._current_recipe_for_shot(shot),
             now=now,
             grinder_calibration_mode=shot.grinder_calibration_mode,
             grinder_step_direction=shot.grinder_step_direction,
             grinder_reference_label=shot.grinder_reference_label,
             current_absolute_step=shot.current_absolute_step,
             absolute_reference_step=shot.absolute_reference_step,
+            profile_id=shot.profile_id,
         )
         return IngestResult(shot=shot, recommendation=recommendation)
 
@@ -439,13 +467,14 @@ class EspressoRLService:
             bean_context_id=shot.bean_context_id,
             bean_context_name=shot.bean_context_name,
             grinder_context_id=shot.grinder_context_id,
-            current_recipe=shot.to_recipe(),
+            current_recipe=self._current_recipe_for_shot(shot),
             now=now,
             grinder_calibration_mode=shot.grinder_calibration_mode,
             grinder_step_direction=shot.grinder_step_direction,
             grinder_reference_label=shot.grinder_reference_label,
             current_absolute_step=shot.current_absolute_step,
             absolute_reference_step=shot.absolute_reference_step,
+            profile_id=shot.profile_id,
         )
         return FeedbackResult(shot=shot, recommendation=recommendation)
 
@@ -608,13 +637,15 @@ class EspressoRLService:
 
         now = self._clock()
         current_recipe = event.current_recipe()
-        recent = self._shots.list_recent(
+        profile_scope = _profile_scope_key(profile_id=event.profile_id, raw_profile_hash=event.raw_profile_hash)
+        all_recent = self._shots.list_recent(
             install_id=event.install_id,
             machine_id=event.machine_id,
             bean_context_id=event.bean_context_id,
             grinder_context_id=event.grinder_context_id,
             limit=200,
         )
+        recent = [shot for shot in all_recent if _shot_matches_profile_scope(shot, profile_scope)]
         if recent and recent[-1].rating_prompt_allowed and not recent[-1].feedback_recorded:
             return None
         current = self._recommendations.get_current(
@@ -624,6 +655,9 @@ class EspressoRLService:
             now=now,
             grinder_context_id=event.grinder_context_id,
         )
+        if current is not None and not _recommendation_matches_profile_scope(current, profile_scope):
+            self._expire_recommendation(current, now)
+            current = None
         if current is not None:
             stale = check_recommendation_staleness(
                 current,
@@ -657,6 +691,8 @@ class EspressoRLService:
             grinder_reference_label=event.grinder_reference_label,
             current_absolute_step=event.current_absolute_step,
             absolute_reference_step=event.absolute_reference_step,
+            profile_id=event.profile_id,
+            raw_profile_hash=event.raw_profile_hash,
         )
         return self._mark_recommendation_shown(recommendation, now)
 
@@ -674,18 +710,22 @@ class EspressoRLService:
         grinder_reference_label: str = "reference",
         current_absolute_step: float | None = None,
         absolute_reference_step: float | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation:
         timestamp = self._clock() if now is None else now
-        recent = self._shots.list_recent(
+        profile_scope = _profile_scope_key(profile_id=profile_id, raw_profile_hash=raw_profile_hash)
+        all_recent = self._shots.list_recent(
             install_id=install_id,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             grinder_context_id=grinder_context_id,
             limit=200,
         )
-        machine_adapter = recent[-1].machine_adapter if recent else None
+        recent = [shot for shot in all_recent if _shot_matches_profile_scope(shot, profile_scope)]
+        machine_adapter = recent[-1].machine_adapter if recent else (all_recent[-1].machine_adapter if all_recent else None)
         current_bean_context_name = bean_context_name or next(
-            (shot.bean_context_name for shot in reversed(recent) if shot.bean_context_name),
+            (shot.bean_context_name for shot in reversed(recent or all_recent) if shot.bean_context_name),
             None,
         )
         last_recommendation = self._recommendations.get_current(
@@ -700,6 +740,11 @@ class EspressoRLService:
             bean_context_id=bean_context_id,
             grinder_context_id=grinder_context_id,
         )
+        if last_recommendation is not None and not _recommendation_matches_profile_scope(
+            last_recommendation,
+            profile_scope,
+        ):
+            last_recommendation = None
         context = OptimizationContext(
             install_id=install_id,
             machine_id=machine_id,
@@ -720,11 +765,15 @@ class EspressoRLService:
                     current_bean_context_id=bean_context_id,
                     current_bean_context_name=current_bean_context_name,
                     grinder_context_id=grinder_context_id,
-                    history=self._shots.list_machine_shots(
-                        install_id=install_id,
-                        machine_id=machine_id,
-                        limit=LOCAL_BEAN_HISTORY_LOOKBACK,
-                    ),
+                    history=[
+                        shot
+                        for shot in self._shots.list_machine_shots(
+                            install_id=install_id,
+                            machine_id=machine_id,
+                            limit=LOCAL_BEAN_HISTORY_LOOKBACK,
+                        )
+                        if _shot_matches_profile_scope(shot, profile_scope)
+                    ],
                 )
             )
             if self._prior_provider is not None:
@@ -744,6 +793,8 @@ class EspressoRLService:
                 prior_points=tuple(prior_points),
             )
         recommendation = self._optimizer.recommend(context)
+        recommendation.profile_id = profile_id
+        recommendation.raw_profile_hash = raw_profile_hash
         self._apply_grinder_display_metadata(
             recommendation,
             grinder_calibration_mode=grinder_calibration_mode,
@@ -797,7 +848,10 @@ class EspressoRLService:
         self,
         event: ShotProfileEvent,
         now: int,
+        *,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
+        profile_scope = _profile_scope_key(profile_id=event.profile_id, raw_profile_hash=raw_profile_hash)
         current_recipe = None
         if event.relative_grind_steps_from_reference is not None:
             current_recipe = Recipe(
@@ -809,13 +863,17 @@ class EspressoRLService:
             )
         if event.recommendation_id:
             recommendation = self._recommendations.get(event.recommendation_id)
-            if recommendation is not None and not check_recommendation_staleness(
-                recommendation,
-                now=now,
-                bean_context_id=event.bean_context_id,
-                grinder_context_id=event.grinder_context_id,
-                current_recipe=current_recipe,
-            ).stale:
+            if (
+                recommendation is not None
+                and _recommendation_matches_profile_scope(recommendation, profile_scope)
+                and not check_recommendation_staleness(
+                    recommendation,
+                    now=now,
+                    bean_context_id=event.bean_context_id,
+                    grinder_context_id=event.grinder_context_id,
+                    current_recipe=current_recipe,
+                ).stale
+            ):
                 return recommendation
         recommendation = self._recommendations.get_current(
             install_id=event.install_id,
@@ -826,6 +884,8 @@ class EspressoRLService:
         )
         if recommendation is None:
             return None
+        if not _recommendation_matches_profile_scope(recommendation, profile_scope):
+            return None
         if check_recommendation_staleness(
             recommendation,
             now=now,
@@ -835,6 +895,34 @@ class EspressoRLService:
         ).stale:
             return None
         return recommendation
+
+    def _current_recipe_for_shot(self, shot: ShotRecord) -> Recipe:
+        if shot.relative_grind_steps_from_reference is not None:
+            return shot.to_recipe()
+        profile_scope = _profile_scope_key(profile_id=shot.profile_id, raw_profile_hash=None)
+        recent = self._shots.list_recent(
+            install_id=shot.install_id,
+            machine_id=shot.machine_id,
+            bean_context_id=shot.bean_context_id,
+            grinder_context_id=shot.grinder_context_id,
+            limit=50,
+        )
+        relative_steps = next(
+            (
+                candidate.relative_grind_steps_from_reference
+                for candidate in reversed(recent)
+                if candidate.relative_grind_steps_from_reference is not None
+                and _shot_matches_profile_scope(candidate, profile_scope)
+            ),
+            0.0,
+        )
+        return Recipe(
+            relative_grind_steps_from_reference=relative_steps,
+            microns_per_step=shot.microns_per_step,
+            dose_g=shot.dose_in_g,
+            target_yield_g=shot.target_yield_g,
+            grinder_step_direction=shot.grinder_step_direction,
+        )
 
     def _decision_from_recommendation(
         self,

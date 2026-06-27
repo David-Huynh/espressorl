@@ -99,6 +99,8 @@ class PostgresStore:
             self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
         self.conn.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS grinder_context_id TEXT")
         for column, definition in {
+            "profile_id": "TEXT",
+            "raw_profile_hash": "TEXT",
             "grinder_calibration_mode": "TEXT NOT NULL DEFAULT 'relative_calibrated'",
             "grinder_step_direction": "TEXT NOT NULL DEFAULT 'higher_is_finer'",
             "grinder_reference_label": "TEXT NOT NULL DEFAULT 'reference'",
@@ -423,6 +425,80 @@ class PostgresLocalDataRepository:
             )
             self._store.conn.commit()
             return {"shots": shot_count, "recommendations": recommendation_count}
+        except Exception:
+            self._store.conn.rollback()
+            raise
+
+    def reset_all(
+        self,
+        install_id: str,
+        machine_id: str,
+        *,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        try:
+            shot_rows = self._store.conn.execute(
+                """
+                SELECT shot_id FROM shots
+                WHERE install_id=%s AND machine_id=%s
+                """,
+                (install_id, machine_id),
+            ).fetchall()
+            recommendation_rows = self._store.conn.execute(
+                """
+                SELECT recommendation_id FROM recommendations
+                WHERE install_id=%s AND machine_id=%s
+                """,
+                (install_id, machine_id),
+            ).fetchall()
+            shot_ids = [row["shot_id"] for row in shot_rows]
+            recommendation_ids = [row["recommendation_id"] for row in recommendation_rows]
+            upload_count = _count_upload_queue_for_records_postgres(
+                self._store.conn,
+                shot_ids=shot_ids,
+                recommendation_ids=recommendation_ids,
+            )
+            shadow_count = int(
+                self._store.conn.execute(
+                    """
+                    SELECT COUNT(*) AS count FROM dreamer_shadow_evaluations
+                    WHERE install_id=%s AND machine_id=%s
+                    """,
+                    (install_id, machine_id),
+                ).fetchone()["count"]
+            )
+            counts = {
+                "shots": len(shot_ids),
+                "recommendations": len(recommendation_ids),
+                "upload_queue": upload_count,
+                "dreamer_shadow_evaluations": shadow_count,
+            }
+            if dry_run:
+                return counts
+            if shot_ids:
+                self._store.conn.execute(
+                    "DELETE FROM upload_queue WHERE local_record_type='shot' AND local_record_id = ANY(%s)",
+                    (shot_ids,),
+                )
+            if recommendation_ids:
+                self._store.conn.execute(
+                    "DELETE FROM upload_queue WHERE local_record_type='recommendation' AND local_record_id = ANY(%s)",
+                    (recommendation_ids,),
+                )
+            self._store.conn.execute(
+                "DELETE FROM dreamer_shadow_evaluations WHERE install_id=%s AND machine_id=%s",
+                (install_id, machine_id),
+            )
+            self._store.conn.execute(
+                "DELETE FROM recommendations WHERE install_id=%s AND machine_id=%s",
+                (install_id, machine_id),
+            )
+            self._store.conn.execute(
+                "DELETE FROM shots WHERE install_id=%s AND machine_id=%s",
+                (install_id, machine_id),
+            )
+            self._store.conn.commit()
+            return counts
         except Exception:
             self._store.conn.rollback()
             raise
@@ -1337,6 +1413,28 @@ def _count_upload_queue_for_shots_postgres(conn, shot_ids: list[str]) -> int:
             (shot_ids,),
         ).fetchone()["count"]
     )
+
+
+def _count_upload_queue_for_records_postgres(
+    conn,
+    *,
+    shot_ids: list[str],
+    recommendation_ids: list[str],
+) -> int:
+    total = _count_upload_queue_for_shots_postgres(conn, shot_ids)
+    if recommendation_ids:
+        total += int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM upload_queue
+                WHERE local_record_type='recommendation'
+                  AND local_record_id = ANY(%s)
+                """,
+                (recommendation_ids,),
+            ).fetchone()["count"]
+        )
+    return total
 
 
 def _row_to_community_raw_upload(row: dict[str, Any]) -> CommunityRawUpload:

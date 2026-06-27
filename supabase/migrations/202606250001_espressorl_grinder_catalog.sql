@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS public.espressorl_grinder_catalog (
     manufacturer TEXT,
     model TEXT,
     microns_per_step DOUBLE PRECISION,
+    min_steps INTEGER,
     max_steps INTEGER,
     step_direction TEXT,
     source TEXT NOT NULL DEFAULT 'community',
@@ -20,7 +21,9 @@ CREATE TABLE IF NOT EXISTS public.espressorl_grinder_catalog (
     CHECK (length(grinder_id) BETWEEN 1 AND 128),
     CHECK (length(canonical_name) BETWEEN 1 AND 160),
     CHECK (microns_per_step IS NULL OR microns_per_step > 0),
+    CHECK (min_steps IS NULL OR min_steps >= 0),
     CHECK (max_steps IS NULL OR max_steps > 0),
+    CHECK (min_steps IS NULL OR max_steps IS NULL OR min_steps < max_steps),
     CHECK (step_direction IS NULL OR step_direction IN ('higher_is_finer', 'higher_is_coarser')),
     CHECK (confidence >= 0.0 AND confidence <= 1.0)
 );

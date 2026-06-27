@@ -129,6 +129,8 @@ def recommendation_upload_payload(recommendation: Recommendation) -> dict[str, A
         "machine_id": recommendation.machine_id,
         "bean_context_id": recommendation.bean_context_id,
         "grinder_context_id": recommendation.grinder_context_id,
+        "profile_id": recommendation.profile_id,
+        "raw_profile_hash": recommendation.raw_profile_hash,
         "grind_delta_steps_from_current": recommendation.grind_delta_steps_from_current,
         "grind_delta_um_from_current": recommendation.grind_delta_um_from_current,
         "projected_relative_step_from_reference": recommendation.projected_relative_step_from_reference,

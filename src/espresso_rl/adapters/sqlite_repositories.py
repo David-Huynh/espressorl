@@ -142,6 +142,8 @@ class SQLiteStore:
                 machine_id TEXT NOT NULL,
                 bean_context_id TEXT,
                 grinder_context_id TEXT,
+                profile_id TEXT,
+                raw_profile_hash TEXT,
                 grind_delta_steps_from_current INTEGER NOT NULL,
                 grind_delta_um_from_current REAL NOT NULL,
                 projected_relative_step_from_reference REAL NOT NULL,
@@ -223,6 +225,8 @@ class SQLiteStore:
         self._ensure_column("recommendations", "manual_fields_json", "TEXT NOT NULL DEFAULT '[]'")
         self._ensure_column("recommendations", "apply_error", "TEXT")
         self._ensure_column("recommendations", "grinder_context_id", "TEXT")
+        self._ensure_column("recommendations", "profile_id", "TEXT")
+        self._ensure_column("recommendations", "raw_profile_hash", "TEXT")
         self._ensure_column("recommendations", "grinder_calibration_mode", "TEXT NOT NULL DEFAULT 'relative_calibrated'")
         self._ensure_column("recommendations", "grinder_step_direction", "TEXT NOT NULL DEFAULT 'higher_is_finer'")
         self._ensure_column("recommendations", "grinder_reference_label", "TEXT NOT NULL DEFAULT 'reference'")
@@ -652,6 +656,80 @@ class SQLiteLocalDataRepository:
         self._store.conn.commit()
         return {"shots": shot_count, "recommendations": recommendation_count}
 
+    def reset_all(
+        self,
+        install_id: str,
+        machine_id: str,
+        *,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        shot_rows = self._store.conn.execute(
+            """
+            SELECT shot_id FROM shots
+            WHERE install_id=? AND machine_id=?
+            """,
+            (install_id, machine_id),
+        ).fetchall()
+        recommendation_rows = self._store.conn.execute(
+            """
+            SELECT recommendation_id FROM recommendations
+            WHERE install_id=? AND machine_id=?
+            """,
+            (install_id, machine_id),
+        ).fetchall()
+        shot_ids = [row["shot_id"] for row in shot_rows]
+        recommendation_ids = [row["recommendation_id"] for row in recommendation_rows]
+        upload_count = _count_upload_queue_for_records_sqlite(
+            self._store.conn,
+            shot_ids=shot_ids,
+            recommendation_ids=recommendation_ids,
+        )
+        shadow_count = int(
+            self._store.conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM dreamer_shadow_evaluations
+                WHERE install_id=? AND machine_id=?
+                """,
+                (install_id, machine_id),
+            ).fetchone()["count"]
+        )
+        if dry_run:
+            return {
+                "shots": len(shot_ids),
+                "recommendations": len(recommendation_ids),
+                "upload_queue": upload_count,
+                "dreamer_shadow_evaluations": shadow_count,
+            }
+        for shot_id in shot_ids:
+            self._store.conn.execute(
+                "DELETE FROM upload_queue WHERE local_record_type='shot' AND local_record_id=?",
+                (shot_id,),
+            )
+        for recommendation_id in recommendation_ids:
+            self._store.conn.execute(
+                "DELETE FROM upload_queue WHERE local_record_type='recommendation' AND local_record_id=?",
+                (recommendation_id,),
+            )
+        self._store.conn.execute(
+            "DELETE FROM dreamer_shadow_evaluations WHERE install_id=? AND machine_id=?",
+            (install_id, machine_id),
+        )
+        self._store.conn.execute(
+            "DELETE FROM recommendations WHERE install_id=? AND machine_id=?",
+            (install_id, machine_id),
+        )
+        self._store.conn.execute(
+            "DELETE FROM shots WHERE install_id=? AND machine_id=?",
+            (install_id, machine_id),
+        )
+        self._store.conn.commit()
+        return {
+            "shots": len(shot_ids),
+            "recommendations": len(recommendation_ids),
+            "upload_queue": upload_count,
+            "dreamer_shadow_evaluations": shadow_count,
+        }
+
 
 class SQLiteRecommendationRepository:
     def __init__(self, store: SQLiteStore) -> None:
@@ -663,6 +741,7 @@ class SQLiteRecommendationRepository:
             INSERT OR REPLACE INTO recommendations (
                 recommendation_id, created_at, updated_at, expires_at,
                 install_id, machine_id, bean_context_id, grinder_context_id,
+                profile_id, raw_profile_hash,
                 grind_delta_steps_from_current, grind_delta_um_from_current, projected_relative_step_from_reference, projected_relative_grind_um_from_reference, next_dose_g,
                 target_yield_g, target_ratio, mode, confidence, reason, status,
                 shown_count, accepted_at, ignored_at, edited_at, used_at,
@@ -674,6 +753,7 @@ class SQLiteRecommendationRepository:
             ) VALUES (
                 :recommendation_id, :created_at, :updated_at, :expires_at,
                 :install_id, :machine_id, :bean_context_id, :grinder_context_id,
+                :profile_id, :raw_profile_hash,
                 :grind_delta_steps_from_current, :grind_delta_um_from_current, :projected_relative_step_from_reference, :projected_relative_grind_um_from_reference, :next_dose_g,
                 :target_yield_g, :target_ratio, :mode, :confidence, :reason, :status,
                 :shown_count, :accepted_at, :ignored_at, :edited_at, :used_at,
@@ -1364,6 +1444,8 @@ def _recommendation_to_row(recommendation: Recommendation) -> dict:
         "machine_id": recommendation.machine_id,
         "bean_context_id": recommendation.bean_context_id,
         "grinder_context_id": recommendation.grinder_context_id,
+        "profile_id": recommendation.profile_id,
+        "raw_profile_hash": recommendation.raw_profile_hash,
         "grind_delta_steps_from_current": recommendation.grind_delta_steps_from_current,
         "grind_delta_um_from_current": recommendation.grind_delta_um_from_current,
         "projected_relative_step_from_reference": recommendation.projected_relative_step_from_reference,
@@ -1406,6 +1488,8 @@ def _row_to_recommendation(row: sqlite3.Row) -> Recommendation:
         machine_id=row["machine_id"],
         bean_context_id=row["bean_context_id"],
         grinder_context_id=row["grinder_context_id"],
+        profile_id=row["profile_id"],
+        raw_profile_hash=row["raw_profile_hash"],
         grind_delta_steps_from_current=row["grind_delta_steps_from_current"],
         grind_delta_um_from_current=row["grind_delta_um_from_current"],
         projected_relative_step_from_reference=row["projected_relative_step_from_reference"],
@@ -1473,6 +1557,29 @@ def _count_upload_queue_for_shots_sqlite(conn: sqlite3.Connection, shot_ids: lis
             tuple(shot_ids),
         ).fetchone()["count"]
     )
+
+
+def _count_upload_queue_for_records_sqlite(
+    conn: sqlite3.Connection,
+    *,
+    shot_ids: list[str],
+    recommendation_ids: list[str],
+) -> int:
+    total = _count_upload_queue_for_shots_sqlite(conn, shot_ids)
+    if recommendation_ids:
+        placeholders = ",".join("?" for _ in recommendation_ids)
+        total += int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM upload_queue
+                WHERE local_record_type='recommendation'
+                  AND local_record_id IN ({placeholders})
+                """,
+                tuple(recommendation_ids),
+            ).fetchone()["count"]
+        )
+    return total
 
 
 def _upload_item_to_row(item: UploadQueueItem) -> dict:

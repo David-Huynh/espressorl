@@ -205,6 +205,8 @@ class Recommendation:
     reason: str
     status: RecommendationStatus = RecommendationStatus.PENDING
     grinder_context_id: str | None = None
+    profile_id: str | None = None
+    raw_profile_hash: str | None = None
     shown_count: int = 0
     accepted_at: int | None = None
     ignored_at: int | None = None

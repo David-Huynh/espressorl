@@ -415,6 +415,28 @@ class UploadQueueMaintenanceEvent:
 
 
 @dataclass(frozen=True)
+class LocalResetEvent:
+    install_id: str
+    machine_id: str
+    timestamp: int
+    scope: str = "all"
+    dry_run: bool = False
+    source: str = "unknown"
+    schema_version: int = 1
+
+    event_type: str = field(default="local_reset", init=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported local reset schema_version")
+        if self.scope != "all":
+            raise ValueError("unsupported local reset scope")
+        if not isinstance(self.dry_run, bool):
+            raise ValueError("dry_run must be boolean")
+        object.__setattr__(self, "source", _optional_string(self.source, "source", 80) or "unknown")
+
+
+@dataclass(frozen=True)
 class RecommendationDecisionEvent:
     recommendation_id: str
     decision: RecommendationDecision
@@ -500,6 +522,8 @@ class MachineStateEvent:
     absolute_reference_step: float | None = None
     dose_in_g: float | None = None
     target_yield_g: float | None = None
+    profile_id: str | None = None
+    raw_profile_hash: str | None = None
     community_upload_enabled: bool | None = None
     source: str = "unknown"
 
@@ -547,6 +571,8 @@ class MachineStateEvent:
             raise ValueError("target_yield_g must be positive when present")
         if self.community_upload_enabled is not None and not isinstance(self.community_upload_enabled, bool):
             raise ValueError("community_upload_enabled must be boolean")
+        object.__setattr__(self, "profile_id", _optional_string(self.profile_id, "profile_id", 120))
+        object.__setattr__(self, "raw_profile_hash", _optional_sha256(self.raw_profile_hash))
 
     def current_recipe(self) -> Recipe | None:
         if (

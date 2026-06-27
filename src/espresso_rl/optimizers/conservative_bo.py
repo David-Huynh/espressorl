@@ -208,9 +208,6 @@ class ConservativeBOOptimizer:
             and shot.optimization_weight > 0.0
             and shot.feedback_recorded
             and shot.reward is not None
-            and shot.recommendation_decision
-            not in {RecommendationDecision.IGNORED, RecommendationDecision.DISMISSED}
-            and shot.recommendation_followed != FollowThroughState.NOT_FOLLOWED
         ]
 
     def _single_point_probe(

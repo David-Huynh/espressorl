@@ -325,7 +325,7 @@ class WarmStartPriorTests(unittest.TestCase):
         self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
         self.assertLessEqual(abs(recommendation.target_yield_g - current.target_yield_g), 4.0)
 
-    def test_ignored_and_not_followed_shots_are_not_optimizer_observations(self) -> None:
+    def test_ignored_and_not_followed_shots_still_inform_optimizer(self) -> None:
         current = Recipe(42, 12.5, 18.0, 36.0)
         ignored = shot_record("ignored", timestamp=1, reward=1.0, rating=5)
         ignored.recommendation_decision = RecommendationDecision.IGNORED
@@ -344,9 +344,8 @@ class WarmStartPriorTests(unittest.TestCase):
 
         recommendation = ConservativeBOOptimizer().recommend(context)
 
-        self.assertEqual(recommendation.mode, RecommendationMode.ZERO_OBSERVE)
-        self.assertIsNone(recommendation.source_shot_id)
-        self.assertEqual(recommendation.projected_relative_step_from_reference, current.relative_grind_steps_from_reference)
+        self.assertEqual(recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
+        self.assertEqual(recommendation.source_shot_id, "not_followed")
 
     def test_community_provider_revalidates_and_caps_released_prior_json(self) -> None:
         repo = FakeCommunityPriorRepo(

@@ -17,6 +17,9 @@ RATE_LIMIT_MIGRATION = (
 GRINDER_CATALOG_MIGRATION = (
     ROOT / "supabase" / "migrations" / "202606250001_espressorl_grinder_catalog.sql"
 )
+GRINDER_CATALOG_SEED_MIGRATION = (
+    ROOT / "supabase" / "migrations" / "202606270001_espressorl_grinder_catalog_seed.sql"
+)
 
 
 class SupabaseIngestionContractTests(unittest.TestCase):
@@ -37,6 +40,8 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("MAX_LIMIT = 10", source)
         self.assertIn("espressorl_grinder_aliases", source)
         self.assertIn("espressorl_grinder_catalog", source)
+        self.assertIn("min_steps", source)
+        self.assertIn("metadata_json", source)
         self.assertIn("espressorl_consume_rate_limit", source)
         self.assertIn("'Access-Control-Allow-Origin': '*'", source)
 
@@ -154,12 +159,46 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS public.espressorl_grinder_catalog", sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS public.espressorl_grinder_aliases", sql)
         self.assertIn("microns_per_step DOUBLE PRECISION", sql)
+        self.assertIn("min_steps INTEGER", sql)
         self.assertIn("max_steps INTEGER", sql)
         self.assertIn("normalized_alias TEXT NOT NULL", sql)
         self.assertIn("ALTER TABLE public.espressorl_grinder_catalog ENABLE ROW LEVEL SECURITY", sql)
         self.assertIn("ALTER TABLE public.espressorl_grinder_aliases ENABLE ROW LEVEL SECURITY", sql)
         self.assertIn("REVOKE ALL ON public.espressorl_grinder_catalog FROM anon, authenticated", sql)
         self.assertIn("REVOKE ALL ON public.espressorl_grinder_aliases FROM anon, authenticated", sql)
+
+    def test_grinder_catalog_seed_populates_practical_step_metadata(self) -> None:
+        sql = GRINDER_CATALOG_SEED_MIGRATION.read_text()
+
+        self.assertIn("ADD COLUMN IF NOT EXISTS min_steps", sql)
+        self.assertIn("'1zpresso_jx_pro'", sql)
+        self.assertIn("12.5, 0, 200, 'higher_is_coarser'", sql)
+        self.assertIn("'df64_gen_2'", sql)
+        self.assertIn("10.8, 0, 90, 'higher_is_coarser'", sql)
+        self.assertIn('"adjustment_model":"piecewise_single_axis"', sql)
+        self.assertIn("20.0, 1, 40, 'higher_is_coarser'", sql)
+        self.assertIn('"default_range":{"min":1,"max":20,"microns_per_step":20.0}', sql)
+        self.assertIn('"adjustment_model":"compound_dual_axis"', sql)
+        self.assertIn('"primary_axis":{"name":"outer_macro_ring","min":1,"max":41', sql)
+        self.assertIn("16.7, NULL, NULL, 'higher_is_coarser'", sql)
+        self.assertIn('"adjustment_unit":"dial_marker"', sql)
+        self.assertIn('"source_quality":"user_measured"', sql)
+        self.assertIn("('baratza_encore_esp', 'Encore ESP coarse'", sql)
+        self.assertIn("('fellow_opus', 'Opus micro'", sql)
+
+    def test_grinder_catalog_seed_has_unique_normalized_aliases(self) -> None:
+        sql = GRINDER_CATALOG_SEED_MIGRATION.read_text()
+        alias_values = sql.split("WITH seed_aliases", 1)[1].split(")\nINSERT INTO", 1)[0]
+        aliases: list[str] = []
+        for line in alias_values.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("('"):
+                continue
+            parts = stripped.split("'")
+            if len(parts) >= 6:
+                aliases.append(parts[5])
+
+        self.assertEqual(len(aliases), len(set(aliases)))
 
 
 if __name__ == "__main__":

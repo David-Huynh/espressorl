@@ -9,6 +9,7 @@ import paho.mqtt.client as mqtt
 
 from espresso_rl.config import Config
 from espresso_rl.domain.events import (
+    LocalResetEvent,
     MachineStateEvent,
     OptimizerSettingsEvent,
     RecommendationApplyEvent,
@@ -31,6 +32,7 @@ DECISION_TOPIC = "gaggimate/+/rl/recommendation/decision"
 APPLY_TOPIC = "gaggimate/+/rl/recommendation/apply"
 MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
 OPTIMIZER_SETTINGS_TOPIC = "gaggimate/+/rl/settings"
+LOCAL_RESET_TOPIC = "gaggimate/+/rl/local/reset"
 
 
 class GaggimateMQTTClient:
@@ -47,6 +49,7 @@ class GaggimateMQTTClient:
         on_apply: Callable[[RecommendationApplyEvent], None],
         on_machine_state: Callable[[MachineStateEvent], None],
         on_optimizer_settings: Callable[[OptimizerSettingsEvent], None] | None = None,
+        on_local_reset: Callable[[LocalResetEvent], None] | None = None,
     ) -> None:
         self._config = config
         self._on_shot = on_shot
@@ -57,6 +60,7 @@ class GaggimateMQTTClient:
         self._on_apply = on_apply
         self._on_machine_state = on_machine_state
         self._on_optimizer_settings = on_optimizer_settings or (lambda event: None)
+        self._on_local_reset = on_local_reset or (lambda event: None)
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.mqtt_user:
             self._client.username_pw_set(config.mqtt_user, config.mqtt_password)
@@ -100,10 +104,18 @@ class GaggimateMQTTClient:
             "current_absolute_step": recommendation.current_absolute_step,
             "absolute_reference_step": recommendation.absolute_reference_step,
             "projected_absolute_step": recommendation.projected_absolute_step,
+            "profile_id": recommendation.profile_id,
+            "raw_profile_hash": recommendation.raw_profile_hash,
             "expires_at": recommendation.expires_at,
         }
         self._client.publish(topic, json.dumps(payload), qos=1, retain=True)
         logger.info("Published recommendation %s to %s", recommendation.recommendation_id, topic)
+
+    def clear_recommendation(self, machine_id: str) -> None:
+        machine_topic_id = machine_id.removeprefix("gaggimate:")
+        topic = f"gaggimate/{machine_topic_id}/rl/recommendation"
+        self._client.publish(topic, "", qos=1, retain=True)
+        logger.info("Cleared retained recommendation on %s", topic)
 
     def publish_status(self, machine_id: str, status: dict[str, Any]) -> None:
         machine_topic_id = machine_id.removeprefix("gaggimate:")
@@ -134,8 +146,9 @@ class GaggimateMQTTClient:
             client.subscribe(APPLY_TOPIC)
             client.subscribe(MACHINE_STATE_TOPIC)
             client.subscribe(OPTIMIZER_SETTINGS_TOPIC)
+            client.subscribe(LOCAL_RESET_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
                 FEEDBACK_TOPIC,
                 CORRECTION_TOPIC,
@@ -144,6 +157,7 @@ class GaggimateMQTTClient:
                 APPLY_TOPIC,
                 MACHINE_STATE_TOPIC,
                 OPTIMIZER_SETTINGS_TOPIC,
+                LOCAL_RESET_TOPIC,
             )
         else:
             logger.error("MQTT connection refused: %s", reason_code)
@@ -174,6 +188,8 @@ class GaggimateMQTTClient:
                 self._on_machine_state(self.translate_machine_state_payload(payload, mac))
             elif msg.topic.endswith("/rl/settings"):
                 self._on_optimizer_settings(self.translate_optimizer_settings_payload(payload, mac))
+            elif msg.topic.endswith("/rl/local/reset"):
+                self._on_local_reset(self.translate_local_reset_payload(payload, mac))
         except Exception:
             logger.exception("Error handling message on %s", msg.topic)
 
@@ -365,6 +381,8 @@ class GaggimateMQTTClient:
             target_yield_g=_optional_float(
                 payload.get("target_yield_g", self._config.initial_target_yield_g)
             ),
+            profile_id=_optional_string(payload.get("profile_id")),
+            raw_profile_hash=_optional_string(payload.get("raw_profile_hash")),
             community_upload_enabled=_optional_bool(payload.get("community_upload_enabled")),
             source=payload.get("source", "gaggimate_mqtt"),
         )
@@ -380,6 +398,16 @@ class GaggimateMQTTClient:
             grinder_context_id=_optional_string(payload.get("grinder_context_id")),
             model_artifact_path=_optional_string(payload.get("model_artifact_path")),
             model_artifact_sha256=_optional_string(payload.get("model_artifact_sha256")),
+            source=payload.get("source", "gaggimate_mqtt"),
+        )
+
+    def translate_local_reset_payload(self, payload: dict[str, Any], mac: str) -> LocalResetEvent:
+        return LocalResetEvent(
+            install_id=str(payload.get("install_id") or self._config.install_id),
+            machine_id=str(payload.get("machine_id") or f"gaggimate:{mac}"),
+            timestamp=int(payload.get("timestamp") or self._config.now()),
+            scope=str(payload.get("scope") or payload.get("reset_scope") or "all"),
+            dry_run=bool(payload.get("dry_run", False)),
             source=payload.get("source", "gaggimate_mqtt"),
         )
 

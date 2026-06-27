@@ -87,6 +87,56 @@ class LocalDataManagementTests(unittest.TestCase):
                 self.assertEqual(shot.optimization_weight, 0.0)  # type: ignore[union-attr]
                 self.assertEqual(rec.status, RecommendationStatus.SUPERSEDED)  # type: ignore[union-attr]
 
+    def test_reset_all_deletes_machine_local_data_and_queued_uploads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                recommendations = SQLiteRecommendationRepository(store)
+                local = SQLiteLocalDataRepository(store)
+                queue = SQLiteUploadQueueRepository(store)
+                shots.upsert(_shot("espresso_1", shot_type=ShotType.ESPRESSO, optimization_weight=1.0))
+                recommendations.upsert(_recommendation("rec_1"))
+                queue.enqueue(_upload("shot_upload", "espresso_1", local_record_type="shot"))
+                queue.enqueue(_upload("rec_upload", "rec_1", local_record_type="recommendation"))
+                store.conn.execute(
+                    """
+                    INSERT INTO dreamer_shadow_evaluations (
+                        evaluation_id, install_id, machine_id, bean_context_id, grinder_context_id,
+                        source_timestamp, status, payload_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "eval_1",
+                        "install_1",
+                        "machine_1",
+                        "bean_1",
+                        "",
+                        10,
+                        "ok",
+                        "{}",
+                        10,
+                        10,
+                    ),
+                )
+                store.conn.commit()
+                service = LocalDataService(local, install_id="install_1", machine_id="machine_1", clock=lambda: 20)
+
+                dry_run = service.reset_all(dry_run=True).to_dict()
+                result = service.reset_all().to_dict()
+
+                self.assertEqual(dry_run["counts"]["shots"], 1)
+                self.assertEqual(dry_run["counts"]["recommendations"], 1)
+                self.assertEqual(dry_run["counts"]["upload_queue"], 2)
+                self.assertEqual(dry_run["counts"]["dreamer_shadow_evaluations"], 1)
+                self.assertEqual(result["counts"], dry_run["counts"])
+                self.assertIsNone(shots.get("espresso_1"))
+                self.assertIsNone(recommendations.get("rec_1"))
+                self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM upload_queue").fetchone()["count"], 0)
+                self.assertEqual(
+                    store.conn.execute("SELECT COUNT(*) AS count FROM dreamer_shadow_evaluations").fetchone()["count"],
+                    0,
+                )
+
 
 def _shot(
     shot_id: str,
@@ -140,11 +190,11 @@ def _recommendation(recommendation_id: str) -> Recommendation:
     )
 
 
-def _upload(upload_id: str, shot_id: str) -> UploadQueueItem:
+def _upload(upload_id: str, local_record_id: str, *, local_record_type: str = "shot") -> UploadQueueItem:
     return UploadQueueItem(
         upload_id=upload_id,
-        local_record_type="shot",
-        local_record_id=shot_id,
+        local_record_type=local_record_type,
+        local_record_id=local_record_id,
         payload_hash=f"{upload_id}_hash",
         payload_json='{"event_type":"shot_record"}',
         status=UploadQueueStatus.REJECTED,

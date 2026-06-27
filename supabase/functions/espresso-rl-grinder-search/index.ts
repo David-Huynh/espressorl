@@ -53,7 +53,7 @@ serve(async request => {
   const { data, error } = await supabase
     .from('espressorl_grinder_aliases')
     .select(
-      'alias_name, normalized_alias, confidence, grinder:espressorl_grinder_catalog(grinder_id, canonical_name, manufacturer, model, microns_per_step, max_steps, step_direction, confidence)',
+      'alias_name, normalized_alias, confidence, grinder:espressorl_grinder_catalog(grinder_id, canonical_name, manufacturer, model, microns_per_step, min_steps, max_steps, step_direction, confidence, metadata_json)',
     )
     .ilike('normalized_alias', `%${query}%`)
     .order('confidence', { ascending: false })
@@ -83,8 +83,10 @@ function toSuggestion(row: JsonRecord): JsonRecord | null {
     manufacturer: stringValue(grinder.manufacturer),
     model: stringValue(grinder.model),
     microns_per_step: numberValue(grinder.microns_per_step),
+    min_steps: numberValue(grinder.min_steps),
     max_steps: numberValue(grinder.max_steps),
     step_direction: stepDirectionValue(grinder.step_direction),
+    metadata: recordValue(grinder.metadata_json),
     confidence: Math.max(numberValue(row.confidence) || 0, numberValue(grinder.confidence) || 0),
   };
 }
@@ -159,6 +161,10 @@ function stringValue(value: unknown): string | undefined {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function recordValue(value: unknown): JsonRecord | undefined {
+  return isRecord(value) ? value : undefined;
 }
 
 function stepDirectionValue(value: unknown): string | undefined {

@@ -21,6 +21,7 @@ from espresso_rl.domain.models import (
     RecommendationStatus,
 )
 from espresso_rl.domain.profile import build_fixed_cadence_sequence, resample_profile, resample_shot_metadata
+from espresso_rl.main import maybe_publish_startup_recommendation
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 
 
@@ -32,7 +33,53 @@ class FakeMQTT:
         self.published.append((topic, payload, qos, retain))
 
 
+class FakeStartupMQTT:
+    def __init__(self) -> None:
+        self.recommendations: list[Recommendation] = []
+        self.statuses: list[tuple[str, dict]] = []
+        self.cleared: list[str] = []
+
+    def publish_recommendation(self, recommendation: Recommendation) -> None:
+        self.recommendations.append(recommendation)
+
+    def publish_status(self, machine_id: str, status: dict) -> None:
+        self.statuses.append((machine_id, status))
+
+    def clear_recommendation(self, machine_id: str) -> None:
+        self.cleared.append(machine_id)
+
+
 class GaggimateAdapterTests(unittest.TestCase):
+    def test_local_reset_payload_translates_to_canonical_event(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_local_reset_payload(
+            {
+                "event_type": "local_reset",
+                "schema_version": 1,
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 100,
+                "scope": "all",
+                "dry_run": True,
+                "source": "gaggimate_webui",
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.machine_id, "gaggimate:AA_BB")
+        self.assertEqual(event.scope, "all")
+        self.assertTrue(event.dry_run)
+        self.assertEqual(event.source, "gaggimate_webui")
+
     def test_optimizer_settings_payload_translates_to_canonical_event(self) -> None:
         client = GaggimateMQTTClient(
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
@@ -67,6 +114,38 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.grinder_context_id, "grinder_1")
         self.assertEqual(event.model_artifact_path, "models/dreamer-v3.pt")
         self.assertEqual(event.model_artifact_sha256, "a" * 64)
+
+    def test_machine_state_payload_carries_profile_scope(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_machine_state_payload(
+            {
+                "event_type": "machine_state",
+                "schema_version": 1,
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 100,
+                "state": "idle",
+                "bean_context_id": "bean_1",
+                "profile_id": "lever",
+                "relative_grind_steps_from_reference": 42,
+                "microns_per_step": 12.5,
+                "dose_in_g": 18,
+                "target_yield_g": 36,
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.profile_id, "lever")
+        self.assertEqual(event.current_recipe().relative_grind_steps_from_reference, 42)
 
     def test_shot_profile_payload_accepts_gaggimate_recipe_metadata(self) -> None:
         client = GaggimateMQTTClient(
@@ -349,6 +428,62 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(decoded["current_absolute_step"], 42)
         self.assertEqual(decoded["absolute_reference_step"], 40)
         self.assertEqual(decoded["projected_absolute_step"], 43)
+
+    def test_clear_recommendation_publishes_retained_empty_payload(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+        fake = FakeMQTT()
+        client._client = fake  # type: ignore[assignment]
+
+        client.clear_recommendation("gaggimate:AA_BB")
+
+        self.assertEqual(fake.published, [("gaggimate/AA_BB/rl/recommendation", "", 1, True)])
+
+    def test_startup_without_current_recommendation_clears_retained_recommendation_without_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(
+                mqtt_host="localhost",
+                data_dir=Path(tmp),
+                install_id="install_1",
+                machine_id="gaggimate:AA_BB",
+                bean_context_id="bean_1",
+                grinder_context_id="grinder_1",
+            )
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                recs = SQLiteRecommendationRepository(store)
+                service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+                mqtt = FakeStartupMQTT()
+
+                maybe_publish_startup_recommendation(
+                    config,
+                    service,
+                    mqtt,  # type: ignore[arg-type]
+                    shot_repo=shots,
+                )
+
+                self.assertEqual(mqtt.cleared, ["gaggimate:AA_BB"])
+                self.assertEqual(mqtt.recommendations, [])
+                self.assertEqual(len(mqtt.statuses), 1)
+                self.assertIsNone(
+                    recs.get_current(
+                        "install_1",
+                        "gaggimate:AA_BB",
+                        "bean_1",
+                        now=10,
+                        grinder_context_id="grinder_1",
+                    )
+                )
+                self.assertIsNone(mqtt.statuses[0][1]["last_recommendation_id"])
+                self.assertIsNone(mqtt.statuses[0][1]["mode"])
 
     def test_status_payload_is_retained_for_gaggimate_settings(self) -> None:
         client = GaggimateMQTTClient(

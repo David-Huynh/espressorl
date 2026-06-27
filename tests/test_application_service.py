@@ -987,6 +987,96 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertTrue(feedback.shot.feedback_recorded)
         self.assertEqual(feedback.recommendation.source_shot_id, "shot_2")
 
+    def test_unknown_grind_shot_still_generates_next_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(shots, recs, optimizer, clock=lambda: 10)
+
+        ingest_and_feedback(service, shot_event("shot_1", 1, profile_id="lever"))
+        service.ingest_shot_profile(
+            shot_event(
+                "shot_2",
+                3,
+                profile_id="lever",
+                relative_grind_steps_from_reference=None,
+                current_absolute_step=None,
+                absolute_reference_step=None,
+                beverage_out_g=34.0,
+            )
+        )
+
+        feedback = service.record_feedback(feedback_event("shot_2", 4, rating=4))
+
+        self.assertEqual(feedback.recommendation.source_shot_id, "shot_2")
+        self.assertIsNone(feedback.shot.relative_grind_steps_from_reference)
+        self.assertEqual(optimizer.contexts[-1].current_recipe.relative_grind_steps_from_reference, 42)
+
+    def test_not_followed_shot_remains_actual_optimizer_observation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(shots, recs, optimizer, clock=lambda: 10)
+        first = ingest_and_feedback(service, shot_event("shot_1", 1, profile_id="lever"))
+        service.record_recommendation_decision(
+            RecommendationDecisionEvent(
+                recommendation_id=first.recommendation_id,
+                decision=RecommendationDecision.ACCEPTED,
+                timestamp=2,
+            )
+        )
+        service.ingest_shot_profile(
+            shot_event(
+                "shot_2",
+                3,
+                profile_id="lever",
+                recommendation_id=first.recommendation_id,
+                relative_grind_steps_from_reference=first.projected_relative_step_from_reference + 8,
+                dose_in_g=first.next_dose_g + 2,
+                target_yield_g=first.target_yield_g + 8,
+            )
+        )
+        corrected = service.record_shot_correction(
+            ShotCorrectionEvent(
+                shot_id="shot_2",
+                install_id="install_1",
+                machine_id="machine_1",
+                timestamp=4,
+                grind_followed=False,
+                dose_followed=False,
+                yield_followed=False,
+            )
+        )
+
+        feedback = service.record_feedback(feedback_event("shot_2", 5, rating=2))
+
+        self.assertEqual(corrected.recommendation_followed, FollowThroughState.NOT_FOLLOWED)
+        self.assertEqual(corrected.recommendation_attribution_weight, 0.0)
+        self.assertEqual(feedback.recommendation.source_shot_id, "shot_2")
+        self.assertIn("shot_2", [shot.shot_id for shot in optimizer.contexts[-1].shots])
+
+    def test_recommendations_are_scoped_to_profile_id(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(shots, recs, optimizer, clock=lambda: 10)
+        lever = ingest_and_feedback(service, shot_event("shot_1", 1, profile_id="lever"))
+        turbo = ingest_and_feedback(service, shot_event("shot_2", 3, profile_id="turbo"))
+
+        shown = service.handle_machine_state(
+            idle_event(
+                5,
+                profile_id="lever",
+                relative_grind_steps_from_reference=42,
+                target_yield_g=36,
+            )
+        )
+
+        self.assertNotEqual(turbo.recommendation_id, shown.recommendation_id)
+        self.assertEqual(shown.profile_id, "lever")
+        self.assertTrue(all(shot.profile_id == "lever" for shot in optimizer.contexts[-1].shots))
+        self.assertEqual(recs.get(turbo.recommendation_id).status, RecommendationStatus.EXPIRED)
+
     def test_machine_idle_shows_current_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()

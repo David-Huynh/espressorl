@@ -67,6 +67,7 @@ from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceSer
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityUploadCredentials
 from espresso_rl.domain.events import (
+    LocalResetEvent,
     MachineStateEvent,
     OptimizerSettingsEvent,
     RecommendationApplyEvent,
@@ -76,7 +77,7 @@ from espresso_rl.domain.events import (
     ShotProfileEvent,
     UploadQueueMaintenanceEvent,
 )
-from espresso_rl.domain.models import Recipe, SafetyBounds, UploadQueueStatus
+from espresso_rl.domain.models import SafetyBounds, UploadQueueStatus
 from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
@@ -413,6 +414,25 @@ def main() -> None:
         )
         publish_status(event.machine_id, event.bean_context_id, event.grinder_context_id)
 
+    def on_local_reset(event: LocalResetEvent) -> None:
+        if event.install_id != config.install_id or event.machine_id != config.machine_id:
+            logger.warning(
+                "Ignoring local reset for unexpected owner install=%s machine=%s",
+                event.install_id,
+                event.machine_id,
+            )
+            return
+        result = local_data_service.reset_all(dry_run=event.dry_run)
+        logger.warning(
+            "Local reset requested machine=%s dry_run=%s counts=%s",
+            event.machine_id,
+            event.dry_run,
+            result.counts,
+        )
+        if not event.dry_run:
+            mqtt_client.clear_recommendation(event.machine_id)
+        publish_status(event.machine_id, None, None)
+
     mqtt_client = GaggimateMQTTClient(
         config=config,
         on_shot=on_shot,
@@ -423,6 +443,7 @@ def main() -> None:
         on_apply=on_apply,
         on_machine_state=on_machine_state,
         on_optimizer_settings=on_optimizer_settings,
+        on_local_reset=on_local_reset,
     )
 
     def shutdown(sig: int, frame: object) -> None:
@@ -500,6 +521,21 @@ def maybe_publish_startup_recommendation(
     if config.machine_id == "gaggimate:local":
         return
     if not config.bean_context_id:
+        mqtt_client.clear_recommendation(config.machine_id)
+        mqtt_client.publish_status(
+            config.machine_id,
+            build_status_payload(
+                config=config,
+                service=service,
+                upload_maintenance=upload_maintenance,
+                shot_repo=shot_repo,
+                upload_queue_repo=upload_queue_repo,
+                machine_id=config.machine_id,
+                bean_context_id=None,
+                grinder_context_id=config.grinder_context_id,
+                optimizer_status=optimizer_status,
+            ),
+        )
         return
     current = service.get_current_recommendation(
         install_id=config.install_id,
@@ -527,20 +563,7 @@ def maybe_publish_startup_recommendation(
             ),
         )
         return
-    recipe = Recipe(
-        relative_grind_steps_from_reference=config.initial_relative_grind_steps_from_reference,
-        microns_per_step=config.microns_per_step,
-        dose_g=config.initial_dose_g,
-        target_yield_g=config.initial_target_yield_g,
-    )
-    recommendation = service.generate_recommendation(
-        install_id=config.install_id,
-        machine_id=config.machine_id,
-        bean_context_id=config.bean_context_id,
-        grinder_context_id=config.grinder_context_id,
-        current_recipe=recipe,
-    )
-    mqtt_client.publish_recommendation(recommendation)
+    mqtt_client.clear_recommendation(config.machine_id)
     mqtt_client.publish_status(
         config.machine_id,
         build_status_payload(
@@ -552,9 +575,6 @@ def maybe_publish_startup_recommendation(
             machine_id=config.machine_id,
             bean_context_id=config.bean_context_id,
             grinder_context_id=config.grinder_context_id,
-            last_recommendation_id=recommendation.recommendation_id,
-            last_recommendation_at=recommendation.created_at,
-            mode=recommendation.mode.value,
             optimizer_status=optimizer_status,
         ),
     )

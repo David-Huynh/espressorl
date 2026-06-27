@@ -337,8 +337,19 @@ rejected before network upload or trusted admin storage.
 The Supabase scaffold lives in `supabase/`:
 
 - `supabase/migrations/202605290001_espresso_rl_raw_queue.sql`
+- `supabase/migrations/202606250001_espressorl_grinder_catalog.sql`
+- `supabase/migrations/202606270001_espressorl_grinder_catalog_seed.sql`
 - `supabase/functions/espresso-rl-register/index.ts`
 - `supabase/functions/espresso-rl-ingest/index.ts`
+- `supabase/functions/espresso-rl-grinder-search/index.ts`
+
+The grinder catalog is reviewed metadata, not client-owned runtime state. Add
+new grinders with a PR that updates the catalog seed/migrations and includes
+source quality for the click or marker scale. Unknown step sizes or ranges
+should stay `NULL`; stepless grinders can use a practical dial-marker unit when
+the marker pitch is sourced or measured. One physical grinder should remain one
+catalog row: piecewise ranges and compound controls such as macro plus micro
+rings belong in `metadata_json` so bean/grinder history is not fragmented.
 
 Deploy it with:
 
@@ -346,6 +357,7 @@ Deploy it with:
 supabase db push
 supabase functions deploy espresso-rl-register --no-verify-jwt
 supabase functions deploy espresso-rl-ingest --no-verify-jwt
+supabase functions deploy espresso-rl-grinder-search --no-verify-jwt
 ```
 
 ## Local Data Dashboard
@@ -649,8 +661,10 @@ Community prior JSON is treated as hostile at read time: the provider requires
 the expected context key and zero-trust metadata, revalidates numeric fields,
 caps confidence, enforces minimum observation noise, and emits only weak
 canonical prior points. The optimizer uses priors only while local data is
-sparse, keeps the first shot as `zero_observe`, applies normal trust-region and
-safety bounds, and stops using external priors once enough local shots exist.
+sparse, starts after the first real shot receives feedback, applies normal
+trust-region and safety bounds, and stops using external priors once enough
+local shots exist. Service startup clears stale retained MQTT recommendations
+when no active recommendation exists instead of publishing a no-op baseline.
 Previous bags of the same normalized bean on the same grinder are converted into
 up to 64 local `local_bean_history` prior points after the new bag has at least
 one valid local observation. These points are ranked and down-weighted by rank,
