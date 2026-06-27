@@ -34,6 +34,7 @@ class DreamerShadowInferenceSession:
 
     models: DreamerShadowModels
     status: DreamerShadowInferenceStatus
+    checkpoint: VerifiedDreamerCheckpoint
 
 
 def build_dreamer_shadow_inference_session(
@@ -53,4 +54,5 @@ def build_dreamer_shadow_inference_session(
             tensor_count=len(checkpoint.tensors),
             component_names=checkpoint.component_names,
         ),
+        checkpoint=checkpoint,
     )

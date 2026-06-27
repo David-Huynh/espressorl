@@ -11,6 +11,7 @@ from espresso_rl.adapters.postgres_repositories import (
     PostgresCommunityWarehouse,
     PostgresLocalDataRepository,
     PostgresRecommendationRepository,
+    PostgresShadowEvaluationRepository,
     PostgresShotRepository,
     PostgresStore,
     PostgresUploadQueueRepository,
@@ -18,6 +19,7 @@ from espresso_rl.adapters.postgres_repositories import (
 from espresso_rl.adapters.sqlite_repositories import (
     SQLiteLocalDataRepository,
     SQLiteRecommendationRepository,
+    SQLiteShadowEvaluationRepository,
     SQLiteShotRepository,
     SQLiteStore,
     SQLiteUploadQueueRepository,
@@ -44,12 +46,17 @@ from espresso_rl.application.dreamer_shadow_inference import (
     DreamerShadowInferenceError,
     build_dreamer_shadow_inference_session,
 )
+from espresso_rl.application.dreamer_shadow_evaluation import (
+    DreamerShadowEvaluationError,
+    DreamerShadowEvaluationService,
+)
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.community_priors import CommunityPriorGenerationService
 from espresso_rl.application.community_validation import CommunityValidationService
 from espresso_rl.application.local_data import LocalDataService
 from espresso_rl.application.training_export import TrainingDatasetExportService
+from espresso_rl.application.training_export import local_training_transition_from_shot
 from espresso_rl.application.prior_providers import (
     CommunityPriorProvider,
     CompositePriorProvider,
@@ -75,6 +82,7 @@ from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MO
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import LocalDataRepository, RecommendationRepository, ShotRepository, UploadQueueRepository
+from espresso_rl.ports.shadow_evaluations import ShadowEvaluationRepository
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,7 +109,7 @@ def main() -> None:
             "DreamerV3 training is not wired into the active path yet; BO remains the safe recommendation path."
         )
 
-    shot_repo, recommendation_repo, upload_queue_repo, local_data_repo = open_repositories(config)
+    shot_repo, recommendation_repo, upload_queue_repo, local_data_repo, shadow_evaluation_repo = open_repositories(config)
     verified_checkpoint, checkpoint_unavailable_reason = load_configured_dreamer_checkpoint(config)
     checkpoint_inference_parity_verified = False
     checkpoint_inference_parity_reason = None
@@ -123,6 +131,16 @@ def main() -> None:
         checkpoint_unavailable_reason=checkpoint_unavailable_reason,
         checkpoint_inference_parity_verified=checkpoint_inference_parity_verified,
         checkpoint_inference_parity_reason=checkpoint_inference_parity_reason,
+    )
+    shadow_evaluation_service = (
+        DreamerShadowEvaluationService(
+            session=dreamer_shadow_session,
+            repository=shadow_evaluation_repo,
+            safety_bounds=SafetyBounds(),
+            clock=config.now,
+        )
+        if dreamer_shadow_session is not None
+        else None
     )
     service = EspressoRLService(
         shots=shot_repo,
@@ -164,6 +182,13 @@ def main() -> None:
 
     mqtt_client: GaggimateMQTTClient
 
+    def record_shadow_evaluation(shot, recommendation) -> None:
+        try_record_shadow_evaluation(
+            shadow_evaluation_service,
+            shot=shot,
+            recommendation=recommendation,
+        )
+
     def publish_status(
         machine_id: str,
         bean_context_id: str | None,
@@ -190,6 +215,7 @@ def main() -> None:
             last_recommendation_at=last_recommendation_at,
             mode=mode,
             optimizer_status=runtime_optimizer.status().to_dict(),
+            shadow_evaluation_service=shadow_evaluation_service,
         )
         mqtt_client.publish_status(machine_id, status)
 
@@ -226,6 +252,7 @@ def main() -> None:
             result.recommendation.next_dose_g,
             result.recommendation.target_yield_g,
         )
+        record_shadow_evaluation(result.shot, result.recommendation)
         mqtt_client.publish_recommendation(result.recommendation)
         publish_status(
             event.machine_id,
@@ -259,6 +286,7 @@ def main() -> None:
                 result.recommendation.target_yield_g,
             )
             mqtt_client.publish_recommendation(result.recommendation)
+        record_shadow_evaluation(shot, result.recommendation)
         publish_status(
             shot.machine_id,
             shot.bean_context_id,
@@ -548,6 +576,7 @@ def build_status_payload(
     last_recommendation_at: int | None = None,
     mode: str | None = None,
     optimizer_status: dict[str, object] | None = None,
+    shadow_evaluation_service: DreamerShadowEvaluationService | None = None,
 ) -> dict:
     now = config.now()
     recent = (
@@ -678,6 +707,28 @@ def build_status_payload(
         if config_optimizer_mode == DEFAULT_OPTIMIZER_MODE
         else "Bayesian Optimization is serving recommendations.",
     }
+    shadow_summary = {
+        "record_count": 0,
+        "pending_count": 0,
+        "observed_count": 0,
+        "safe_proposal_count": 0,
+        "unsafe_proposal_count": 0,
+        "dreamer_matched_count": 0,
+        "bo_matched_count": 0,
+        "mean_dreamer_followed_reward_delta": None,
+        "mean_bo_followed_reward_delta": None,
+        "shadow_only": True,
+    }
+    if shadow_evaluation_service is not None and bean_context_id and grinder_context_id:
+        try:
+            shadow_summary = shadow_evaluation_service.context_summary(
+                install_id=config.install_id,
+                machine_id=machine_id,
+                bean_context_id=bean_context_id,
+                grinder_context_id=grinder_context_id,
+            )
+        except Exception as exc:
+            logger.warning("DreamerV3 shadow evaluation status unavailable: %s", exc)
 
     return {
         "addon_online": True,
@@ -739,6 +790,7 @@ def build_status_payload(
         "optimizer_available_modes": optimizer_status.get("available_modes") or [DEFAULT_OPTIMIZER_MODE],
         "optimizer_unavailable_modes": optimizer_status.get("unavailable_modes") or {},
         "optimizer_fallback_reason": optimizer_status.get("fallback_reason"),
+        "dreamer_shadow_evaluation": shadow_summary,
         "local_shot_count": len(optimizer_shots),
         "rated_shot_count": len(rated_shots),
         "best_known_recipe": best_known_recipe_payload(optimizer_shots),
@@ -984,6 +1036,37 @@ def load_configured_dreamer_checkpoint(
     return checkpoint, None
 
 
+def try_record_shadow_evaluation(
+    shadow_service: DreamerShadowEvaluationService | None,
+    *,
+    shot,
+    recommendation,
+):
+    if shadow_service is None:
+        return None
+    try:
+        transition = local_training_transition_from_shot(shot)
+        if transition is None:
+            return None
+        result = shadow_service.evaluate_transition(
+            transition,
+            bo_recommendation=recommendation,
+        )
+    except DreamerShadowEvaluationError as exc:
+        logger.warning("DreamerV3 shadow evaluation skipped for shot %s: %s", shot.shot_id, exc)
+        return None
+    except Exception:
+        logger.exception("DreamerV3 shadow evaluation failed for shot %s; BO remains active", shot.shot_id)
+        return None
+    logger.info(
+        "DreamerV3 shadow evaluation stored shot=%s evaluation=%s safe=%s parity_only=true",
+        shot.shot_id,
+        result.evaluation.evaluation_id,
+        result.evaluation.dreamer_proposal.safety_valid,
+    )
+    return result
+
+
 def maybe_start_admin_collector_worker(
     config: Config,
     stop_event: threading.Event,
@@ -1200,7 +1283,13 @@ def open_prior_provider(config: Config) -> CompositePriorProvider:
 
 def open_repositories(
     config: Config,
-) -> tuple[ShotRepository, RecommendationRepository, UploadQueueRepository, LocalDataRepository]:
+) -> tuple[
+    ShotRepository,
+    RecommendationRepository,
+    UploadQueueRepository,
+    LocalDataRepository,
+    ShadowEvaluationRepository,
+]:
     if config.storage_backend == "postgres":
         logger.info("Using Postgres storage backend")
         store = PostgresStore(config.postgres_dsn)
@@ -1209,6 +1298,7 @@ def open_repositories(
             PostgresRecommendationRepository(store),
             PostgresUploadQueueRepository(store),
             PostgresLocalDataRepository(store),
+            PostgresShadowEvaluationRepository(store),
         )
 
     logger.warning("Using SQLite storage backend; Postgres is the intended container/admin runtime backend.")
@@ -1218,6 +1308,7 @@ def open_repositories(
         SQLiteRecommendationRepository(store),
         SQLiteUploadQueueRepository(store),
         SQLiteLocalDataRepository(store),
+        SQLiteShadowEvaluationRepository(store),
     )
 
 

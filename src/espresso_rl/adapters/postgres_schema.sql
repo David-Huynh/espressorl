@@ -184,6 +184,24 @@ CREATE INDEX IF NOT EXISTS idx_upload_queue_ready
 CREATE INDEX IF NOT EXISTS idx_upload_queue_record
     ON upload_queue (local_record_type, local_record_id);
 
+CREATE TABLE IF NOT EXISTS dreamer_shadow_evaluations (
+    evaluation_id TEXT PRIMARY KEY,
+    install_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    bean_context_id TEXT NOT NULL,
+    grinder_context_id TEXT NOT NULL,
+    source_timestamp BIGINT NOT NULL,
+    status TEXT NOT NULL,
+    payload_json JSONB NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context
+    ON dreamer_shadow_evaluations (
+        install_id, machine_id, bean_context_id, grinder_context_id, source_timestamp DESC
+    );
+
 -- Admin/training warehouse tables. These are populated by an admin collector
 -- from the community-fed Supabase raw queue. Public clients must not write here.
 CREATE TABLE IF NOT EXISTS community_raw_uploads (

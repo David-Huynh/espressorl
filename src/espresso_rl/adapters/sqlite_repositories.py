@@ -23,6 +23,7 @@ from espresso_rl.domain.models import (
     UploadQueueItem,
     UploadQueueStatus,
 )
+from espresso_rl.domain.shadow_evaluation import DreamerShadowEvaluation, ShadowEvaluationStatus
 
 
 class SQLiteStore:
@@ -188,6 +189,30 @@ class SQLiteStore:
                 error_message TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dreamer_shadow_evaluations (
+                evaluation_id TEXT PRIMARY KEY,
+                install_id TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                bean_context_id TEXT NOT NULL,
+                grinder_context_id TEXT NOT NULL,
+                source_timestamp INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context
+            ON dreamer_shadow_evaluations (
+                install_id, machine_id, bean_context_id, grinder_context_id, source_timestamp DESC
             )
             """
         )
@@ -743,6 +768,99 @@ class SQLiteRecommendationRepository:
             tuple(params),
         )
         self._store.conn.commit()
+
+
+class SQLiteShadowEvaluationRepository:
+    def __init__(self, store: SQLiteStore) -> None:
+        self._store = store
+
+    def upsert(self, evaluation: DreamerShadowEvaluation) -> None:
+        payload_json = json.dumps(
+            evaluation.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        self._store.conn.execute(
+            """
+            INSERT INTO dreamer_shadow_evaluations (
+                evaluation_id, install_id, machine_id, bean_context_id,
+                grinder_context_id, source_timestamp, status, payload_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(evaluation_id) DO UPDATE SET
+                status=excluded.status,
+                payload_json=excluded.payload_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                evaluation.evaluation_id,
+                evaluation.install_id,
+                evaluation.machine_id,
+                evaluation.bean_context_id,
+                evaluation.grinder_context_id,
+                evaluation.source_timestamp,
+                evaluation.status.value,
+                payload_json,
+                evaluation.created_at,
+                evaluation.updated_at,
+            ),
+        )
+        self._store.conn.commit()
+
+    def get(self, evaluation_id: str) -> DreamerShadowEvaluation | None:
+        row = self._store.conn.execute(
+            "SELECT payload_json FROM dreamer_shadow_evaluations WHERE evaluation_id=?",
+            (evaluation_id,),
+        ).fetchone()
+        return _row_to_shadow_evaluation(row) if row else None
+
+    def get_pending(
+        self,
+        *,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str,
+        grinder_context_id: str,
+    ) -> DreamerShadowEvaluation | None:
+        row = self._store.conn.execute(
+            """
+            SELECT payload_json FROM dreamer_shadow_evaluations
+            WHERE install_id=? AND machine_id=? AND bean_context_id=? AND grinder_context_id=? AND status=?
+            ORDER BY source_timestamp DESC
+            LIMIT 1
+            """,
+            (
+                install_id,
+                machine_id,
+                bean_context_id,
+                grinder_context_id,
+                ShadowEvaluationStatus.PENDING_OUTCOME.value,
+            ),
+        ).fetchone()
+        return _row_to_shadow_evaluation(row) if row else None
+
+    def list_context(
+        self,
+        *,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str,
+        grinder_context_id: str,
+        limit: int = 100,
+    ) -> list[DreamerShadowEvaluation]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+            raise ValueError("shadow evaluation limit must be 1..10000")
+        rows = self._store.conn.execute(
+            """
+            SELECT payload_json FROM dreamer_shadow_evaluations
+            WHERE install_id=? AND machine_id=? AND bean_context_id=? AND grinder_context_id=?
+            ORDER BY source_timestamp DESC
+            LIMIT ?
+            """,
+            (install_id, machine_id, bean_context_id, grinder_context_id, limit),
+        ).fetchall()
+        return [_row_to_shadow_evaluation(row) for row in rows]
 
 
 class SQLiteUploadQueueRepository:
@@ -1389,3 +1507,17 @@ def _row_to_upload_item(row: sqlite3.Row) -> UploadQueueItem:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _row_to_shadow_evaluation(row: sqlite3.Row | dict) -> DreamerShadowEvaluation:
+    payload = row["payload_json"]
+    if isinstance(payload, dict):
+        value = payload
+    elif isinstance(payload, str):
+        try:
+            value = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError("stored shadow evaluation payload is invalid JSON") from exc
+    else:
+        raise ValueError("stored shadow evaluation payload must be an object or JSON text")
+    return DreamerShadowEvaluation.from_dict(value)

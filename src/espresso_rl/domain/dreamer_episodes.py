@@ -9,7 +9,7 @@ from espresso_rl.domain.models import (
     FIXED_CADENCE_SAMPLE_INTERVAL_MS,
     VALID_TASTE_TAGS,
 )
-from espresso_rl.domain.training import FORBIDDEN_TRAINING_FIELD_NAMES
+from espresso_rl.domain.training import FORBIDDEN_TRAINING_FIELD_NAMES, TRAINING_SOURCE_KINDS
 
 DREAMER_EPISODE_FORMAT = "espresso_rl_dreamer_episode_v2"
 DREAMER_EPISODE_SCHEMA_VERSION = 2
@@ -222,7 +222,7 @@ def _validate_group_key(group_key: dict[str, Any], errors: list[str]) -> None:
 
 def _validate_source(source: dict[str, Any], errors: list[str]) -> None:
     _reject_unknown_fields(source, _SOURCE_FIELDS, errors, path="episode.source")
-    if source.get("source_kind") != "community_validated_shot":
+    if source.get("source_kind") not in TRAINING_SOURCE_KINDS:
         errors.append("episode.source.source_kind is invalid")
     _require_positive_int(source.get("source_validation_id"), "episode.source.source_validation_id", errors)
     _require_nonempty_string(source.get("install_id"), "episode.source.install_id", errors)

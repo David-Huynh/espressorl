@@ -456,6 +456,7 @@ def _world_model_train_preview_metrics(
                 ),
                 validation_split=float(training_config["world_model_preview_validation_split"]),
                 early_stop_patience=int(training_config["world_model_preview_early_stop_patience"]),
+                control_spec=control_spec,
                 imagination_horizon=int(training_config["world_model_preview_imagination_horizon"]),
                 imagination_actor_hidden_dim=int(
                     training_config["world_model_preview_imagination_actor_hidden_dim"]

@@ -791,6 +791,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             "shots",
             "recommendations",
             "upload_queue",
+            "dreamer_shadow_evaluations",
             "community_raw_uploads",
             "community_validated_shots",
             "community_recommendations",

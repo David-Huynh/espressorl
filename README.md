@@ -624,6 +624,23 @@ readiness; parity does not enable recommendations or machine control.
 Earlier v1 preview checkpoints do not contain authenticated reconstruction
 metadata and must be regenerated; they are rejected rather than inferred.
 
+Parity-verified checkpoints can run context-conditioned shadow evaluation after
+a rated local shot. Only canonical shots with fixed-cadence telemetry and exact
+bean/grinder context are accepted. Dreamer emits a static recipe proposal in
+relative grind steps plus dose and yield; the existing Dreamer safety validator
+checks it without clamping unsafe output. The proposal, its safety result, and
+the context-matched BO comparison are stored in `dreamer_shadow_evaluations`
+through the `ShadowEvaluationRepository` port, with SQLite and Postgres
+adapters. The next shot resolves only the pending record for the same install,
+machine, bean, and grinder context. Reward deltas are aggregated only when the
+actual next recipe matched the corresponding proposal, avoiding unsupported
+counterfactual attribution.
+
+Shadow proposals are never inserted into the recommendation repository and are
+never published or applied. BO remains the sole active recommendation path.
+Status output contains aggregate shadow counts and safety/outcome metrics, not
+actionable shadow proposals.
+
 ## Warm-Started BO Priors
 
 Runtime recommendation generation can consume canonical `PriorPoint` values

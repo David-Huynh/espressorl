@@ -243,6 +243,35 @@ def checkpoint_bundle() -> dict:
         "tensors": tensor_entries,
     }
     tensor_manifest_sha256 = sha256_json(tensor_manifest)
+    control_spec = {
+        "format": "espresso_rl_dreamer_control_spec_v1",
+        "schema_version": 1,
+        "optimizer_family": "dreamer_v3",
+        "observation_interval_ms": 250,
+        "decision_interval_ms": 1000,
+        "dynamic_control_enabled": False,
+        "pressure_control_allowed": False,
+        "flow_control_allowed": False,
+        "pump_control_allowed": False,
+        "valve_control_allowed": False,
+        "temperature_control_allowed": False,
+        "stop_control_allowed": False,
+        "safety_limits": {
+            "min_pressure_bar": 0.0,
+            "max_pressure_bar": 15.0,
+            "min_flow_ml_s": 0.0,
+            "max_flow_ml_s": 20.0,
+            "min_temperature_c": 80.0,
+            "max_temperature_c": 105.0,
+            "min_yield_stop_target_g": 5.0,
+            "max_yield_stop_target_g": 100.0,
+            "min_pump_duty": 0.0,
+            "max_pump_duty": 1.0,
+            "min_valve_position": 0.0,
+            "max_valve_position": 1.0,
+        },
+    }
+    control_spec_sha256 = sha256_json(control_spec)
     architecture = {
         "format": "espresso_rl_dreamer_v3_checkpoint_architecture_v1",
         "schema_version": 1,
@@ -250,6 +279,7 @@ def checkpoint_bundle() -> dict:
         "behavior_dim": 39,
         "static_dim": 18,
         "dynamic_action_dim": 7,
+        "control_spec": control_spec,
         "world_model": {
             "model_preset": "espresso_debug",
             "deter_dim": 32,
@@ -287,7 +317,7 @@ def checkpoint_bundle() -> dict:
         "training_config_sha256": "3" * 64,
         "dreamer_tensor_contract_sha256": "4" * 64,
         "feature_layout_sha256": "5" * 64,
-        "control_spec_sha256": "6" * 64,
+        "control_spec_sha256": control_spec_sha256,
         "tensor_manifest_sha256": tensor_manifest_sha256,
         "architecture_sha256": architecture_sha256,
         "inference_probe_sha256": "9" * 64,
@@ -321,7 +351,7 @@ def checkpoint_bundle() -> dict:
             "component_names": ["actor", "critic", "world_model"],
             "dreamer_tensor_contract_sha256": "4" * 64,
             "feature_layout_sha256": "5" * 64,
-            "control_spec_sha256": "6" * 64,
+            "control_spec_sha256": control_spec_sha256,
         },
         "dataset": {
             "format": "espresso_rl_training_dataset_v1",

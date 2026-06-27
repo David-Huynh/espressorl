@@ -9,8 +9,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 from espresso_rl.application.upload_validation import validate_upload_payload
+from espresso_rl.application.upload_payloads import canonical_payload_json, shot_upload_payload
 from espresso_rl.domain.artifacts import ArtifactInfo
 from espresso_rl.domain.community import CommunityTrainingRow
+from espresso_rl.domain.models import ShotRecord
 from espresso_rl.domain.training import (
     TRAINING_DATASET_FORMAT,
     TRAINING_SCHEMA_VERSION,
@@ -28,6 +30,37 @@ CSV_FILENAME = "training_rows.csv"
 README_FILENAME = "README.txt"
 MANIFEST_FILENAME = "manifest.json"
 _INVALID_RECOMMENDATION = object()
+
+
+def local_training_transition_from_shot(shot: ShotRecord) -> dict[str, Any] | None:
+    if (
+        shot.fixed_cadence_sequence is None
+        or not shot.bean_context_id
+        or not shot.grinder_context_id
+        or shot.exclude_from_local_optimization
+        or shot.optimization_weight <= 0
+    ):
+        return None
+    payload = shot_upload_payload(shot)
+    payload_json = canonical_payload_json(payload)
+    digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    stable_id = int.from_bytes(
+        hashlib.sha256(f"{shot.install_id}:{shot.machine_id}:{shot.shot_id}".encode("utf-8")).digest()[:8],
+        "big",
+    ) & ((1 << 63) - 1)
+    row = CommunityTrainingRow(
+        training_row_id=stable_id or 1,
+        source_validation_id=stable_id or 1,
+        install_id=shot.install_id,
+        payload_json=payload,
+        trust_weight=min(1.0, max(0.0, float(shot.optimization_weight))),
+        payload_hash=digest,
+    )
+    transition = _training_transition_from_payload(row, payload)
+    if transition is None:
+        return None
+    transition["source"]["source_kind"] = "local_validated_shot"
+    return transition if not validate_training_transition(transition) else None
 
 CSV_COLUMNS = [
     "training_row_id",

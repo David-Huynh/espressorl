@@ -8,6 +8,7 @@ from espresso_rl.domain.models import VALID_TASTE_TAGS
 TRAINING_DATASET_FORMAT = "espresso_rl_training_dataset_v1"
 TRAINING_TRANSITION_FORMAT = "espresso_rl_training_transition_v1"
 TRAINING_SCHEMA_VERSION = 1
+TRAINING_SOURCE_KINDS = frozenset({"community_validated_shot", "local_validated_shot"})
 
 FORBIDDEN_TRAINING_FIELD_NAMES = frozenset(
     {
@@ -129,7 +130,7 @@ def validate_training_transition(row: dict[str, Any]) -> list[str]:
     source = _require_object(row, "source", errors)
     if source is not None:
         _reject_unknown_fields(source, _SOURCE_FIELDS, errors, path="source")
-        if source.get("source_kind") != "community_validated_shot":
+        if source.get("source_kind") not in TRAINING_SOURCE_KINDS:
             errors.append("source.source_kind is invalid")
         _require_positive_int(source.get("source_validation_id"), "source.source_validation_id", errors)
         _require_nonempty_string(source.get("install_id"), "source.install_id", errors)

@@ -7,6 +7,7 @@ from typing import Any
 from espresso_rl.adapters.sqlite_repositories import (
     _recommendation_to_row,
     _row_to_recommendation,
+    _row_to_shadow_evaluation,
     _row_to_shot,
     _row_to_upload_item,
     _shot_to_row,
@@ -26,6 +27,7 @@ from espresso_rl.domain.community import (
     community_rejection_categories,
 )
 from espresso_rl.domain.models import Recommendation, ShotRecord, UploadQueueItem, UploadQueueStatus
+from espresso_rl.domain.shadow_evaluation import DreamerShadowEvaluation, ShadowEvaluationStatus
 
 
 class PostgresStore:
@@ -514,6 +516,98 @@ class PostgresRecommendationRepository:
             tuple(params),
         )
         self._store.conn.commit()
+
+
+class PostgresShadowEvaluationRepository:
+    def __init__(self, store: PostgresStore) -> None:
+        self._store = store
+
+    def upsert(self, evaluation: DreamerShadowEvaluation) -> None:
+        try:
+            self._store.conn.execute(
+                """
+                INSERT INTO dreamer_shadow_evaluations (
+                    evaluation_id, install_id, machine_id, bean_context_id,
+                    grinder_context_id, source_timestamp, status, payload_json,
+                    created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                ON CONFLICT (evaluation_id) DO UPDATE SET
+                    status=EXCLUDED.status,
+                    payload_json=EXCLUDED.payload_json,
+                    updated_at=EXCLUDED.updated_at
+                """,
+                (
+                    evaluation.evaluation_id,
+                    evaluation.install_id,
+                    evaluation.machine_id,
+                    evaluation.bean_context_id,
+                    evaluation.grinder_context_id,
+                    evaluation.source_timestamp,
+                    evaluation.status.value,
+                    json.dumps(evaluation.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False),
+                    evaluation.created_at,
+                    evaluation.updated_at,
+                ),
+            )
+            self._store.conn.commit()
+        except Exception:
+            self._store.conn.rollback()
+            raise
+
+    def get(self, evaluation_id: str) -> DreamerShadowEvaluation | None:
+        row = self._store.conn.execute(
+            "SELECT payload_json FROM dreamer_shadow_evaluations WHERE evaluation_id=%s",
+            (evaluation_id,),
+        ).fetchone()
+        return _row_to_shadow_evaluation(row) if row else None
+
+    def get_pending(
+        self,
+        *,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str,
+        grinder_context_id: str,
+    ) -> DreamerShadowEvaluation | None:
+        row = self._store.conn.execute(
+            """
+            SELECT payload_json FROM dreamer_shadow_evaluations
+            WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
+              AND grinder_context_id=%s AND status=%s
+            ORDER BY source_timestamp DESC
+            LIMIT 1
+            """,
+            (
+                install_id,
+                machine_id,
+                bean_context_id,
+                grinder_context_id,
+                ShadowEvaluationStatus.PENDING_OUTCOME.value,
+            ),
+        ).fetchone()
+        return _row_to_shadow_evaluation(row) if row else None
+
+    def list_context(
+        self,
+        *,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str,
+        grinder_context_id: str,
+        limit: int = 100,
+    ) -> list[DreamerShadowEvaluation]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+            raise ValueError("shadow evaluation limit must be 1..10000")
+        rows = self._store.conn.execute(
+            """
+            SELECT payload_json FROM dreamer_shadow_evaluations
+            WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND grinder_context_id=%s
+            ORDER BY source_timestamp DESC
+            LIMIT %s
+            """,
+            (install_id, machine_id, bean_context_id, grinder_context_id, limit),
+        ).fetchall()
+        return [_row_to_shadow_evaluation(row) for row in rows]
 
 
 class PostgresUploadQueueRepository:

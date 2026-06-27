@@ -287,6 +287,10 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(model_metadata["format"], CHECKPOINT_ARTIFACT_FORMAT)
         self.assertGreater(manifest["model_artifact"]["tensor_count"], 0)
         self.assertEqual(manifest["model_artifact"]["component_names"], ["actor", "critic", "world_model"])
+        self.assertEqual(
+            manifest["model_artifact"]["architecture"]["control_spec"],
+            config["dreamer_control_spec"],
+        )
         self.assertIn("world_model.reward_bins", model_header)
         self.assertIn("actor.static_action_bins", model_header)
         self.assertIn("critic.value_bins", model_header)

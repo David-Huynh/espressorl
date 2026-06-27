@@ -15,6 +15,7 @@ from espresso_rl.domain.model_checkpoint import (
     DreamerWorldModelArchitecture,
     VerifiedDreamerCheckpoint,
 )
+from espresso_rl.domain.dreamer_control import DreamerControlSpec
 from espresso_rl.domain.trainer_artifacts import TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW
 from espresso_rl.dreamer.imagination import (
     DreamerV3ImaginationActor,
@@ -56,6 +57,7 @@ def checkpoint_architecture_from_models(
     behavior_dim: int,
     static_dim: int,
     dynamic_action_dim: int,
+    control_spec: DreamerControlSpec,
 ) -> DreamerCheckpointArchitecture:
     if actor.config != critic.config:
         raise DreamerCheckpointMaterializationError("actor and critic imagination configs do not match")
@@ -66,6 +68,7 @@ def checkpoint_architecture_from_models(
         behavior_dim=behavior_dim,
         static_dim=static_dim,
         dynamic_action_dim=dynamic_action_dim,
+        control_spec=control_spec,
         world_model=DreamerWorldModelArchitecture(
             model_preset=model.model_preset,
             deter_dim=model.deter_dim,

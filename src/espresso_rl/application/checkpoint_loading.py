@@ -16,6 +16,7 @@ from espresso_rl.domain.model_checkpoint import (
     DreamerWorldModelArchitecture,
     VerifiedDreamerCheckpoint,
 )
+from espresso_rl.domain.dreamer_control import DreamerControlSpec
 from espresso_rl.domain.model_manifest import (
     CHECKPOINT_ARTIFACT_FORMAT,
     CHECKPOINT_ARTIFACT_SCHEMA_VERSION,
@@ -200,6 +201,10 @@ def load_verified_dreamer_checkpoint(
     if _sha256_json(architecture_payload) != architecture_sha256:
         raise CheckpointLoadError("checkpoint runtime architecture SHA-256 does not match its content")
     architecture = _parse_architecture(architecture_payload) if tensors else None
+    if architecture is not None and _sha256_json(architecture.control_spec.to_dict()) != artifact.get(
+        "control_spec_sha256"
+    ):
+        raise CheckpointLoadError("checkpoint runtime control spec does not match control_spec_sha256")
     inference_probe_sha256 = _optional_sha256(
         artifact.get("inference_probe_sha256"),
         "checkpoint inference probe SHA-256",
@@ -488,6 +493,7 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
                 "behavior_dim",
                 "static_dim",
                 "dynamic_action_dim",
+                "control_spec",
                 "world_model",
                 "imagination",
             }
@@ -545,6 +551,7 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
             behavior_dim=value["behavior_dim"],
             static_dim=value["static_dim"],
             dynamic_action_dim=value["dynamic_action_dim"],
+            control_spec=DreamerControlSpec.from_dict(value.get("control_spec")),
             world_model=DreamerWorldModelArchitecture(**world_model),
             imagination=DreamerImaginationArchitecture(**imagination),
         )

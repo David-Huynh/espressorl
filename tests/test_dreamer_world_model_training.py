@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC
 from espresso_rl.dreamer.reference_world_model import default_world_model_config
 from espresso_rl.dreamer.world_model_training import (
     FixedCadenceWorldModelTrainingError,
@@ -44,6 +45,7 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
             model=default_world_model_config("espresso_debug"),
             validation_split=0.25,
             early_stop_patience=2,
+            control_spec=DEFAULT_DREAMER_CONTROL_SPEC,
         )
         split = {
             "strategy": "test",
@@ -110,6 +112,7 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
             model=default_world_model_config("espresso_debug"),
             validation_split=0.25,
             early_stop_patience=2,
+            control_spec=DEFAULT_DREAMER_CONTROL_SPEC,
             actor_critic_train_steps=2,
             imagination_batch_size=2,
         )

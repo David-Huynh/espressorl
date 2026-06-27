@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from espresso_rl.domain.dreamer_control import DreamerControlSpec
+
 DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT = "espresso_rl_dreamer_v3_checkpoint_architecture_v1"
 DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION = 1
 DREAMER_INFERENCE_PROBE_FORMAT = "espresso_rl_dreamer_v3_inference_probe_v1"
@@ -121,6 +123,7 @@ class DreamerCheckpointArchitecture:
     behavior_dim: int
     static_dim: int
     dynamic_action_dim: int
+    control_spec: DreamerControlSpec
     world_model: DreamerWorldModelArchitecture
     imagination: DreamerImaginationArchitecture
     format: str = DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT
@@ -139,6 +142,8 @@ class DreamerCheckpointArchitecture:
             raise ValueError("checkpoint world-model architecture is invalid")
         if not isinstance(self.imagination, DreamerImaginationArchitecture):
             raise ValueError("checkpoint imagination architecture is invalid")
+        if not isinstance(self.control_spec, DreamerControlSpec):
+            raise ValueError("checkpoint control spec is invalid")
         if self.world_model.reward_bins != self.imagination.value_bins:
             raise ValueError("checkpoint reward and value bin counts must match")
 
@@ -150,6 +155,7 @@ class DreamerCheckpointArchitecture:
             "behavior_dim": self.behavior_dim,
             "static_dim": self.static_dim,
             "dynamic_action_dim": self.dynamic_action_dim,
+            "control_spec": self.control_spec.to_dict(),
             "world_model": self.world_model.to_dict(),
             "imagination": self.imagination.to_dict(),
         }

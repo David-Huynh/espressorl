@@ -9,6 +9,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from espresso_rl.domain.dreamer_control import DreamerControlSpec
 from espresso_rl.domain.model_checkpoint import DreamerCheckpointArchitecture
 from espresso_rl.dreamer.checkpoint_inference import (
     checkpoint_architecture_from_models,
@@ -73,6 +74,7 @@ class WorldModelTrainPreviewConfig:
     model: DreamerV3WorldModelConfig
     validation_split: float
     early_stop_patience: int
+    control_spec: DreamerControlSpec
     imagination_horizon: int = 3
     imagination_actor_hidden_dim: int = 32
     imagination_critic_hidden_dim: int = 32
@@ -296,6 +298,7 @@ def run_fixed_cadence_world_model_train_preview(
             behavior_dim=int(_behavior_tensor(train_tensors).shape[-1]),
             static_dim=int(train_tensors["static_context"].shape[-1]),
             dynamic_action_dim=int(train_tensors["dynamic_actions"].shape[-1]),
+            control_spec=config.control_spec,
         )
         inference_probe_sha256 = dreamer_inference_probe_sha256(
             world_model=model,
