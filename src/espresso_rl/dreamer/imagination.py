@@ -160,12 +160,61 @@ def run_dreamer_v3_imagination_preview(
         )
     if critic is None:
         critic = DreamerV3ImaginationCritic(feature_dim=world_model.feature_dim, config=config)
-    observed = world_model.observe(batch, sample=False)
+    rollout = dreamer_v3_imagination_rollout(
+        world_model=world_model,
+        batch=batch,
+        config=config,
+        actor=actor,
+        critic=critic,
+    )
+    dynamic_action_tensor = rollout["dynamic_actions"]
+    control_mask = rollout["control_action_mask"]
+    unsupported_dynamic = dynamic_action_tensor * (1.0 - control_mask.unsqueeze(1))
+
+    return {
+        "format": DREAMER_V3_IMAGINATION_PREVIEW_FORMAT,
+        "schema_version": DREAMER_V3_IMAGINATION_PREVIEW_SCHEMA_VERSION,
+        "inference_ready": False,
+        "contract_only": True,
+        "config": config.to_dict(),
+        "static_action_heads": list(DREAMER_STATIC_RECIPE_ACTION_HEADS),
+        "static_action_bins": {key: list(value) for key, value in DREAMER_STATIC_RECIPE_ACTION_BINS.items()},
+        "dynamic_action_features": list(DREAMER_DYNAMIC_ACTION_FEATURES),
+        "start_count": int(rollout["imagined_features"].shape[0]),
+        "feature_dim": int(world_model.feature_dim),
+        "static_logits_shape": _shape(rollout["static_logits"]),
+        "static_action_shape": _shape(rollout["static_actions"]),
+        "dynamic_action_shape": _shape(dynamic_action_tensor),
+        "control_action_mask_shape": _shape(control_mask),
+        "supported_dynamic_action_count": int(control_mask.sum().item()),
+        "unsupported_dynamic_action_abs_max": _round_float(unsupported_dynamic.abs().max()),
+        "reward_prediction_shape": _shape(rollout["rewards"]),
+        "continuation_shape": _shape(rollout["continuations"]),
+        "critic_value_logits_shape": _shape(rollout["value_logits"]),
+        "lambda_return_shape": _shape(rollout["lambda_returns"]),
+        "actor_entropy_mean": _round_float(rollout["entropy"].mean()),
+        "actor_loss_preview": _round_float(rollout["actor_loss_preview"]),
+        "critic_loss_preview": _round_float(rollout["critic_loss_preview"]),
+    }
+
+
+def dreamer_v3_imagination_rollout(
+    *,
+    world_model: DreamerV3VectorWorldModel,
+    batch: dict[str, torch.Tensor],
+    config: DreamerV3ImaginationConfig,
+    actor: DreamerV3ImaginationActor,
+    critic: DreamerV3ImaginationCritic,
+) -> dict[str, torch.Tensor]:
+    validate_imagination_config(config)
+    world_model.eval()
+    with torch.no_grad():
+        observed = world_model.observe(batch, sample=False)
     start_indexes = _last_decision_indexes(batch)
     batch_indexes = torch.arange(batch["observations"].shape[0], device=batch["observations"].device)
-    deter = observed["deter"][batch_indexes, start_indexes]
-    stoch = observed["stoch"][batch_indexes, start_indexes]
-    features = observed["features"][batch_indexes, start_indexes]
+    deter = observed["deter"][batch_indexes, start_indexes].detach()
+    stoch = observed["stoch"][batch_indexes, start_indexes].detach()
+    features = observed["features"][batch_indexes, start_indexes].detach()
     control_mask = _decision_control_mask(batch)
     constraints = batch["constraints"].amax(dim=1)
 
@@ -234,32 +283,21 @@ def run_dreamer_v3_imagination_preview(
     entropy_tensor = torch.stack(entropies, dim=1)
     actor_loss = -(log_prob_tensor * advantage).mean() - config.actor_entropy_scale * entropy_tensor.mean()
     dynamic_action_tensor = torch.stack(dynamic_actions, dim=1)
-    unsupported_dynamic = dynamic_action_tensor * (1.0 - control_mask.unsqueeze(1))
-
     return {
-        "format": DREAMER_V3_IMAGINATION_PREVIEW_FORMAT,
-        "schema_version": DREAMER_V3_IMAGINATION_PREVIEW_SCHEMA_VERSION,
-        "inference_ready": False,
-        "contract_only": True,
-        "config": config.to_dict(),
-        "static_action_heads": list(DREAMER_STATIC_RECIPE_ACTION_HEADS),
-        "static_action_bins": {key: list(value) for key, value in DREAMER_STATIC_RECIPE_ACTION_BINS.items()},
-        "dynamic_action_features": list(DREAMER_DYNAMIC_ACTION_FEATURES),
-        "start_count": int(features.shape[0]),
-        "feature_dim": int(world_model.feature_dim),
-        "static_logits_shape": _shape(torch.stack(static_logits, dim=1)),
-        "static_action_shape": _shape(torch.stack(static_actions, dim=1)),
-        "dynamic_action_shape": _shape(dynamic_action_tensor),
-        "control_action_mask_shape": _shape(control_mask),
-        "supported_dynamic_action_count": int(control_mask.sum().item()),
-        "unsupported_dynamic_action_abs_max": _round_float(unsupported_dynamic.abs().max()),
-        "reward_prediction_shape": _shape(reward_tensor),
-        "continuation_shape": _shape(continuation_tensor),
-        "critic_value_logits_shape": _shape(torch.stack(value_logits, dim=1)),
-        "lambda_return_shape": _shape(lambda_target_tensor),
-        "actor_entropy_mean": _round_float(entropy_tensor.mean()),
-        "actor_loss_preview": _round_float(actor_loss),
-        "critic_loss_preview": _round_float(critic_loss),
+        "imagined_features": imagined_feature_tensor,
+        "rewards": reward_tensor,
+        "continuations": continuation_tensor,
+        "values": value_tensor,
+        "value_logits": torch.stack(value_logits, dim=1),
+        "lambda_returns": lambda_target_tensor,
+        "static_logits": torch.stack(static_logits, dim=1),
+        "static_actions": torch.stack(static_actions, dim=1),
+        "static_log_prob": log_prob_tensor,
+        "entropy": entropy_tensor,
+        "dynamic_actions": dynamic_action_tensor,
+        "control_action_mask": control_mask,
+        "actor_loss_preview": actor_loss,
+        "critic_loss_preview": critic_loss,
     }
 
 

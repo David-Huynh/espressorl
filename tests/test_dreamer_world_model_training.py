@@ -74,6 +74,13 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         self.assertEqual(first["epochs_completed"], 2)
         self.assertEqual(len(first["train_loss_curve"]), 2)
         self.assertEqual(len(first["validation_loss_curve"]), 2)
+        self.assertEqual(first["actor_critic_train_steps"], 3)
+        self.assertEqual(first["actor_learning_rate"], 0.0003)
+        self.assertEqual(first["critic_learning_rate"], 0.0003)
+        self.assertEqual(len(first["actor_critic_train_curve"]), 3)
+        self.assertIn("actor_loss", first["actor_critic_train_curve"][0])
+        self.assertIn("critic_loss", first["actor_critic_train_curve"][0])
+        self.assertIn("imagined_return_mean", first["actor_critic_train_curve"][0])
         self.assertIn("loss_dyn", first["train_loss_curve"][0])
         self.assertIn("loss_rep", first["validation_loss_curve"][0])
         self.assertEqual(first["dataset_split"]["validation_source_training_row_ids"], [3])
@@ -83,6 +90,41 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         self.assertTrue(preview["contract_only"])
         self.assertEqual(preview["dynamic_action_shape"], [1, 3, 7])
         self.assertEqual(preview["lambda_return_shape"], [1, 3])
+
+    def test_actor_critic_training_respects_dynamic_control_masks(self) -> None:
+        config = WorldModelTrainPreviewConfig(
+            seed=13,
+            epochs=1,
+            batch_size=1,
+            learning_rate=0.001,
+            gradient_steps_per_epoch=1,
+            model=default_world_model_config("espresso_debug"),
+            validation_split=0.25,
+            early_stop_patience=2,
+            actor_critic_train_steps=2,
+            imagination_batch_size=2,
+        )
+        split = {
+            "strategy": "test",
+            "train_source_training_row_ids": [1, 2],
+            "validation_source_training_row_ids": [3],
+            "train_episode_count": 2,
+            "validation_episode_count": 1,
+            "validation_split": 0.25,
+        }
+
+        result = run_fixed_cadence_world_model_train_preview(
+            train_batch=dynamic_control_batch(batch_size=2),
+            validation_batch=dynamic_control_batch(batch_size=1),
+            config=config,
+            dataset_split=split,
+        ).to_dict()
+
+        curve = result["actor_critic_train_curve"]
+        self.assertEqual(len(curve), 2)
+        self.assertEqual(curve[0]["supported_dynamic_action_count"], 4.0)
+        self.assertEqual(curve[0]["unsupported_dynamic_action_abs_max"], 0.0)
+        self.assertGreater(curve[0]["actor_entropy_mean"], 0.0)
 
 
 def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
@@ -125,6 +167,19 @@ def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
     if batch_size == 1:
         return batch
     return {key: value.repeat(batch_size, *([1] * (value.ndim - 1))) for key, value in batch.items()}
+
+
+def dynamic_control_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
+    batch = smoke_batch(batch_size=batch_size)
+    control_mask = torch.zeros_like(batch["control_action_mask"])
+    control_mask[:, :, 0] = batch["decision_step_mask"]
+    control_mask[:, :, 5] = batch["decision_step_mask"]
+    batch["control_action_mask"] = control_mask
+    constraints = torch.zeros_like(batch["constraints"])
+    constraints[:, :, 0] = 1.0
+    constraints[:, :, 5] = 1.0
+    batch["constraints"] = constraints
+    return batch
 
 
 if __name__ == "__main__":

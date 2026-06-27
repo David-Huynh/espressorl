@@ -13,6 +13,7 @@ from espresso_rl.dreamer.imagination import (
     DreamerV3ImaginationActor,
     DreamerV3ImaginationConfig,
     DreamerV3ImaginationCritic,
+    dreamer_v3_imagination_rollout,
     run_dreamer_v3_imagination_preview,
 )
 from espresso_rl.dreamer.reference_world_model import (
@@ -66,6 +67,11 @@ class WorldModelTrainPreviewConfig:
     imagination_actor_entropy_scale: float = 0.0003
     imagination_lambda_return: float = 0.95
     imagination_discount: float = 0.997
+    actor_critic_train_steps: int = 3
+    actor_learning_rate: float = 0.0003
+    critic_learning_rate: float = 0.0003
+    imagination_batch_size: int = 4
+    actor_critic_gradient_clip_norm: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,7 @@ class WorldModelTrainPreviewResult:
     best_epoch: int
     epochs_completed: int
     early_stopped: bool
+    actor_critic_train_curve: tuple[dict[str, float], ...]
     imagination_preview: dict[str, Any]
     checkpoint_tensors: dict[str, torch.Tensor]
 
@@ -101,6 +108,11 @@ class WorldModelTrainPreviewResult:
             "imagination_actor_entropy_scale": self.config.imagination_actor_entropy_scale,
             "imagination_lambda_return": self.config.imagination_lambda_return,
             "imagination_discount": self.config.imagination_discount,
+            "actor_critic_train_steps": self.config.actor_critic_train_steps,
+            "actor_learning_rate": self.config.actor_learning_rate,
+            "critic_learning_rate": self.config.critic_learning_rate,
+            "imagination_batch_size": self.config.imagination_batch_size,
+            "actor_critic_gradient_clip_norm": self.config.actor_critic_gradient_clip_norm,
             "best_epoch": self.best_epoch,
             "early_stopped": self.early_stopped,
             "dataset_split": self.dataset_split,
@@ -109,6 +121,7 @@ class WorldModelTrainPreviewResult:
             ),
             "train_loss_curve": list(self.train_loss_curve),
             "validation_loss_curve": list(self.validation_loss_curve),
+            "actor_critic_train_curve": list(self.actor_critic_train_curve),
             "imagination_preview": self.imagination_preview,
             "checkpoint_tensor_names": sorted(self.checkpoint_tensors),
         }
@@ -230,6 +243,14 @@ def run_fixed_cadence_world_model_train_preview(
             config=imagination_config,
         )
         critic = DreamerV3ImaginationCritic(feature_dim=model.feature_dim, config=imagination_config)
+        actor_critic_curve = _train_actor_critic(
+            world_model=model,
+            actor=actor,
+            critic=critic,
+            batch=train_tensors,
+            config=config,
+            imagination_config=imagination_config,
+        )
         imagination_preview = run_dreamer_v3_imagination_preview(
             world_model=model,
             batch=validation_tensors,
@@ -250,6 +271,7 @@ def run_fixed_cadence_world_model_train_preview(
         best_epoch=best_epoch,
         epochs_completed=len(train_curve),
         early_stopped=early_stopped,
+        actor_critic_train_curve=tuple(actor_critic_curve),
         imagination_preview=imagination_preview,
         checkpoint_tensors=checkpoint_tensors,
     )
@@ -342,6 +364,11 @@ def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
     _range_float(config.imagination_actor_entropy_scale, "imagination_actor_entropy_scale", 0.0, 1.0)
     _range_float(config.imagination_lambda_return, "imagination_lambda_return", 0.0, 1.0)
     _range_float(config.imagination_discount, "imagination_discount", 0.0, 1.0)
+    _range_int(config.actor_critic_train_steps, "actor_critic_train_steps", 1, 128)
+    _range_int(config.imagination_batch_size, "imagination_batch_size", 1, 128)
+    _range_float(config.actor_critic_gradient_clip_norm, "actor_critic_gradient_clip_norm", 0.1, 100.0)
+    _validate_learning_rate(config.actor_learning_rate, "actor")
+    _validate_learning_rate(config.critic_learning_rate, "critic")
     _validate_reference_model_config(config.model)
     _validate_learning_rate(config.learning_rate, "world model preview")
 
@@ -402,6 +429,159 @@ def _evaluate(model: DreamerV3VectorWorldModel, batch: dict[str, torch.Tensor]) 
 def _mean_loss_dicts(losses: list[dict[str, float]]) -> dict[str, float]:
     keys = sorted({key for item in losses for key in item})
     return {key: round(sum(item[key] for item in losses) / len(losses), 8) for key in keys}
+
+
+def _train_actor_critic(
+    *,
+    world_model: DreamerV3VectorWorldModel,
+    actor: DreamerV3ImaginationActor,
+    critic: DreamerV3ImaginationCritic,
+    batch: dict[str, torch.Tensor],
+    config: WorldModelTrainPreviewConfig,
+    imagination_config: DreamerV3ImaginationConfig,
+) -> list[dict[str, float]]:
+    world_model.eval()
+    actor.train()
+    critic.train()
+    world_model_requires_grad = [parameter.requires_grad for parameter in world_model.parameters()]
+    try:
+        for parameter in world_model.parameters():
+            parameter.requires_grad_(False)
+        actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_learning_rate)
+        critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config.critic_learning_rate)
+        curve: list[dict[str, float]] = []
+        for step_index in range(1, config.actor_critic_train_steps + 1):
+            minibatch = _cyclic_batch(
+                batch,
+                start=(step_index - 1) * config.imagination_batch_size,
+                batch_size=config.imagination_batch_size,
+            )
+            critic_metrics = _train_critic_step(
+                world_model=world_model,
+                actor=actor,
+                critic=critic,
+                optimizer=critic_optimizer,
+                batch=minibatch,
+                imagination_config=imagination_config,
+                gradient_clip_norm=config.actor_critic_gradient_clip_norm,
+            )
+            actor_metrics = _train_actor_step(
+                world_model=world_model,
+                actor=actor,
+                critic=critic,
+                optimizer=actor_optimizer,
+                batch=minibatch,
+                imagination_config=imagination_config,
+                gradient_clip_norm=config.actor_critic_gradient_clip_norm,
+            )
+            curve.append(
+                {
+                    "step": float(step_index),
+                    **critic_metrics,
+                    **actor_metrics,
+                }
+            )
+    finally:
+        for parameter, requires_grad in zip(world_model.parameters(), world_model_requires_grad, strict=True):
+            parameter.requires_grad_(requires_grad)
+    return curve
+
+
+def _train_critic_step(
+    *,
+    world_model: DreamerV3VectorWorldModel,
+    actor: DreamerV3ImaginationActor,
+    critic: DreamerV3ImaginationCritic,
+    optimizer: torch.optim.Optimizer,
+    batch: dict[str, torch.Tensor],
+    imagination_config: DreamerV3ImaginationConfig,
+    gradient_clip_norm: float,
+) -> dict[str, float]:
+    actor.eval()
+    critic.train()
+    with torch.no_grad():
+        rollout = dreamer_v3_imagination_rollout(
+            world_model=world_model,
+            batch=batch,
+            config=imagination_config,
+            actor=actor,
+            critic=critic,
+        )
+    optimizer.zero_grad()
+    step_mask = torch.ones_like(rollout["lambda_returns"])
+    critic_loss = critic.loss(
+        rollout["imagined_features"].detach(),
+        rollout["lambda_returns"].detach(),
+        step_mask,
+    )
+    critic_loss.backward()
+    grad_norm = nn.utils.clip_grad_norm_(critic.parameters(), gradient_clip_norm)
+    optimizer.step()
+    return {
+        "critic_loss": _rounded_scalar(critic_loss),
+        "critic_grad_norm": _rounded_scalar(grad_norm),
+    }
+
+
+def _train_actor_step(
+    *,
+    world_model: DreamerV3VectorWorldModel,
+    actor: DreamerV3ImaginationActor,
+    critic: DreamerV3ImaginationCritic,
+    optimizer: torch.optim.Optimizer,
+    batch: dict[str, torch.Tensor],
+    imagination_config: DreamerV3ImaginationConfig,
+    gradient_clip_norm: float,
+) -> dict[str, float]:
+    actor.train()
+    critic.eval()
+    critic_requires_grad = [parameter.requires_grad for parameter in critic.parameters()]
+    try:
+        for parameter in critic.parameters():
+            parameter.requires_grad_(False)
+        optimizer.zero_grad()
+        rollout = dreamer_v3_imagination_rollout(
+            world_model=world_model,
+            batch=batch,
+            config=imagination_config,
+            actor=actor,
+            critic=critic,
+        )
+        advantage = (rollout["lambda_returns"] - rollout["values"][:, :-1]).detach()
+        static_policy_loss = -(rollout["static_log_prob"] * advantage).mean()
+        imagined_return_loss = -rollout["lambda_returns"].mean()
+        entropy = rollout["entropy"].mean()
+        actor_loss = imagined_return_loss + static_policy_loss - imagination_config.actor_entropy_scale * entropy
+        actor_loss.backward()
+        grad_norm = nn.utils.clip_grad_norm_(actor.parameters(), gradient_clip_norm)
+        optimizer.step()
+    finally:
+        for parameter, requires_grad in zip(critic.parameters(), critic_requires_grad, strict=True):
+            parameter.requires_grad_(requires_grad)
+
+    dynamic_actions = rollout["dynamic_actions"]
+    control_mask = rollout["control_action_mask"]
+    unsupported_dynamic = dynamic_actions * (1.0 - control_mask.unsqueeze(1))
+    return {
+        "actor_loss": _rounded_scalar(actor_loss),
+        "static_policy_loss": _rounded_scalar(static_policy_loss),
+        "imagined_return_loss": _rounded_scalar(imagined_return_loss),
+        "actor_entropy_mean": _rounded_scalar(entropy),
+        "imagined_return_mean": _rounded_scalar(rollout["lambda_returns"].mean()),
+        "actor_grad_norm": _rounded_scalar(grad_norm),
+        "supported_dynamic_action_count": _rounded_scalar(control_mask.sum()),
+        "unsupported_dynamic_action_abs_max": _rounded_scalar(unsupported_dynamic.abs().max()),
+    }
+
+
+def _cyclic_batch(batch: dict[str, torch.Tensor], *, start: int, batch_size: int) -> dict[str, torch.Tensor]:
+    count = batch["observations"].shape[0]
+    indexes = (torch.arange(batch_size, dtype=torch.long) + start) % count
+    return {key: value.index_select(0, indexes) for key, value in batch.items()}
+
+
+def _rounded_scalar(value: torch.Tensor) -> float:
+    return round(float(value.detach().cpu().item()), 8)
 
 
 def _checkpoint_tensors(

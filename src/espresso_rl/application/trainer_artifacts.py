@@ -417,6 +417,13 @@ def _world_model_train_preview_metrics(
                 ),
                 imagination_lambda_return=float(training_config["world_model_preview_imagination_lambda_return"]),
                 imagination_discount=float(training_config["world_model_preview_imagination_discount"]),
+                actor_critic_train_steps=int(training_config["world_model_preview_actor_critic_train_steps"]),
+                actor_learning_rate=float(training_config["world_model_preview_actor_learning_rate"]),
+                critic_learning_rate=float(training_config["world_model_preview_critic_learning_rate"]),
+                imagination_batch_size=int(training_config["world_model_preview_imagination_batch_size"]),
+                actor_critic_gradient_clip_norm=float(
+                    training_config["world_model_preview_actor_critic_gradient_clip_norm"]
+                ),
             ),
             dataset_split=split["summary"],
         )
