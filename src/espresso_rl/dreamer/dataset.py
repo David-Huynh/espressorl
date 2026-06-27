@@ -16,6 +16,13 @@ from typing import Any, Iterable
 import numpy as np
 import torch
 
+from espresso_rl.domain.dreamer_control import (
+    DEFAULT_DREAMER_CONTROL_SPEC,
+    DREAMER_CONTROL_CONSTRAINT_FIELDS,
+    DREAMER_DYNAMIC_ACTION_FIELDS,
+    DreamerControlSpec,
+    validate_dynamic_action_for_control_spec,
+)
 from espresso_rl.domain.dreamer_episodes import (
     DREAMER_EPISODE_FORMAT,
     DREAMER_PROFILE_CHANNELS,
@@ -32,15 +39,7 @@ MIN_SHOTS = 4
 
 _PUMP_TARGET_MODE_PRESSURE = 1
 _PUMP_TARGET_MODE_FLOW = 2
-_DEFAULT_CONSTRAINTS = {
-    "dynamic_control_enabled": False,
-    "pressure_control_allowed": False,
-    "flow_control_allowed": False,
-    "pump_control_allowed": False,
-    "valve_control_allowed": False,
-    "temperature_control_allowed": False,
-    "stop_control_allowed": False,
-}
+_DEFAULT_CONSTRAINTS = DEFAULT_DREAMER_CONTROL_SPEC.constraints()
 DREAMER_OBSERVATION_FEATURES = DREAMER_PROFILE_CHANNELS
 DREAMER_OBSERVED_TARGET_FEATURES = (
     "pressure_target_bar",
@@ -49,16 +48,8 @@ DREAMER_OBSERVED_TARGET_FEATURES = (
     "pump_target_mode",
     "valve_open",
 )
-DREAMER_DYNAMIC_ACTION_FEATURES = (
-    "pressure_target_bar",
-    "flow_target_ml_s",
-    "pump_duty",
-    "valve_position",
-    "temperature_target_c",
-    "yield_stop_target_g",
-    "stop",
-)
-DREAMER_CONSTRAINT_FEATURES = tuple(_DEFAULT_CONSTRAINTS)
+DREAMER_DYNAMIC_ACTION_FEATURES = DREAMER_DYNAMIC_ACTION_FIELDS
+DREAMER_CONSTRAINT_FEATURES = DREAMER_CONTROL_CONSTRAINT_FIELDS
 DREAMER_STATIC_CONTEXT_FEATURES = (
     "relative_grind_steps_from_reference",
     "relative_grind_um_from_reference",
@@ -224,11 +215,13 @@ def build_dreamer_episode_batch(
     episodes: Iterable[dict[str, Any]],
     *,
     pad_to_step_count: int | None = None,
+    control_spec: DreamerControlSpec | dict[str, Any] | None = None,
     device: torch.device | str | None = None,
 ) -> dict[str, Any]:
     sorted_episodes = sorted(_validated_episodes(episodes), key=_episode_sort_key)
     if not sorted_episodes:
         raise DreamerEpisodeDatasetError("Dreamer episode batch must contain at least one episode")
+    resolved_control_spec = _resolve_control_spec(control_spec)
 
     max_steps = max(len(episode["steps"]) for episode in sorted_episodes)
     if pad_to_step_count is not None:
@@ -242,7 +235,9 @@ def build_dreamer_episode_batch(
     observed_target_mask = np.zeros_like(observed_targets)
     dynamic_actions = np.zeros((batch_size, max_steps, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=np.float32)
     dynamic_action_mask = np.zeros_like(dynamic_actions)
+    control_action_mask = np.zeros_like(dynamic_actions)
     constraints = np.zeros((batch_size, max_steps, len(DREAMER_CONSTRAINT_FEATURES)), dtype=np.float32)
+    decision_step_mask = np.zeros((batch_size, max_steps), dtype=np.float32)
     elapsed_seconds = np.zeros((batch_size, max_steps, 1), dtype=np.float32)
     step_duration_seconds = np.zeros((batch_size, max_steps, 1), dtype=np.float32)
     step_mask = np.zeros((batch_size, max_steps), dtype=np.float32)
@@ -257,6 +252,7 @@ def build_dreamer_episode_batch(
     for batch_index, episode in enumerate(sorted_episodes):
         steps = episode["steps"]
         valid_step_count = len(steps)
+        held_dynamic_action: dict[str, Any] | None = None
         static_context[batch_index] = _encode_static_context(episode["static_context"])
         terminal[batch_index] = _encode_terminal(episode["terminal"])
         terminal_reward = _finite_or_zero(episode["terminal"].get("reward"))
@@ -274,13 +270,32 @@ def build_dreamer_episode_batch(
                 DREAMER_OBSERVED_TARGET_FEATURES,
             )
             observed_target_mask[batch_index, step_index] = _encode_observed_target_mask(step["observed_profile_target"])
-            action_values, action_mask = _encode_dynamic_action(step.get("dynamic_action"))
+            decision_action = step.get("dynamic_action")
+            if decision_action is not None:
+                action_errors = validate_dynamic_action_for_control_spec(
+                    decision_action,
+                    control_spec=resolved_control_spec,
+                    step_index=step_index,
+                )
+                if action_errors:
+                    label = episode.get("episode_id", batch_index)
+                    raise DreamerEpisodeDatasetError(
+                        f"Dreamer episode {label} dynamic action is invalid: {'; '.join(action_errors[:10])}"
+                    )
+                held_dynamic_action = dict(decision_action)
+            action_values, action_mask = _encode_dynamic_action(held_dynamic_action)
             dynamic_actions[batch_index, step_index] = action_values
             dynamic_action_mask[batch_index, step_index] = action_mask
             constraints[batch_index, step_index] = _encode_bool_object(
                 step["constraints"],
                 DREAMER_CONSTRAINT_FEATURES,
             )
+            if resolved_control_spec.is_decision_step(step_index):
+                decision_step_mask[batch_index, step_index] = 1.0
+                control_action_mask[batch_index, step_index] = np.asarray(
+                    resolved_control_spec.action_capability_mask(),
+                    dtype=np.float32,
+                )
             elapsed_seconds[batch_index, step_index, 0] = float(step["elapsed_ms"]) / 1000.0
             step_duration_seconds[batch_index, step_index, 0] = float(episode["sample_interval_ms"]) / 1000.0
             step_mask[batch_index, step_index] = 1.0
@@ -294,7 +309,9 @@ def build_dreamer_episode_batch(
         "observed_profile_target_mask": torch.tensor(observed_target_mask, dtype=torch.float32, device=target_device),
         "dynamic_actions": torch.tensor(dynamic_actions, dtype=torch.float32, device=target_device),
         "dynamic_action_mask": torch.tensor(dynamic_action_mask, dtype=torch.float32, device=target_device),
+        "control_action_mask": torch.tensor(control_action_mask, dtype=torch.float32, device=target_device),
         "constraints": torch.tensor(constraints, dtype=torch.float32, device=target_device),
+        "decision_step_mask": torch.tensor(decision_step_mask, dtype=torch.float32, device=target_device),
         "elapsed_seconds": torch.tensor(elapsed_seconds, dtype=torch.float32, device=target_device),
         "step_duration_seconds": torch.tensor(step_duration_seconds, dtype=torch.float32, device=target_device),
         "step_mask": torch.tensor(step_mask, dtype=torch.float32, device=target_device),
@@ -305,11 +322,13 @@ def build_dreamer_episode_batch(
         "episode_weights": torch.tensor(episode_weights, dtype=torch.float32, device=target_device),
         "source_training_row_ids": torch.tensor(source_training_row_ids, dtype=torch.long, device=target_device),
         "episode_ids": tuple(episode_ids),
+        "control_spec": resolved_control_spec.to_dict(),
         "feature_names": {
             "observations": DREAMER_OBSERVATION_FEATURES,
             "observed_profile_targets": DREAMER_OBSERVED_TARGET_FEATURES,
             "observed_profile_target_mask": DREAMER_OBSERVED_TARGET_FEATURES,
             "dynamic_actions": DREAMER_DYNAMIC_ACTION_FEATURES,
+            "control_action_mask": DREAMER_DYNAMIC_ACTION_FEATURES,
             "constraints": DREAMER_CONSTRAINT_FEATURES,
             "static_context": DREAMER_STATIC_CONTEXT_FEATURES,
             "terminal": DREAMER_TERMINAL_FEATURES,
@@ -328,6 +347,14 @@ def _validated_episodes(episodes: Iterable[dict[str, Any]]) -> list[dict[str, An
             raise DreamerEpisodeDatasetError(f"Dreamer episode {label} failed validation: {'; '.join(errors[:10])}")
         validated.append(episode)
     return validated
+
+
+def _resolve_control_spec(control_spec: DreamerControlSpec | dict[str, Any] | None) -> DreamerControlSpec:
+    if control_spec is None:
+        return DEFAULT_DREAMER_CONTROL_SPEC
+    if isinstance(control_spec, DreamerControlSpec):
+        return control_spec
+    return DreamerControlSpec.from_dict(control_spec)
 
 
 def _encode_static_context(static_context: dict[str, Any]) -> np.ndarray:

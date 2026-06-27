@@ -7,10 +7,22 @@ from .models import Recipe, Recommendation, SafetyBounds, ShotRecord
 
 DEFAULT_OPTIMIZER_MODE = "bayesian_optimization"
 OPTIMIZER_MODE_DREAMER_V3_SHADOW = "dreamer_v3_shadow"
+OPTIMIZER_FAMILY_BAYESIAN_OPTIMIZATION = "bayesian_optimization"
+OPTIMIZER_FAMILY_TRUST_REGION_BO = "trust_region_bo"
+OPTIMIZER_FAMILY_TRUST_REGION_PPO = "trust_region_ppo"
+OPTIMIZER_FAMILY_DREAMER_V3 = "dreamer_v3"
 VALID_OPTIMIZER_MODES = {
     DEFAULT_OPTIMIZER_MODE,
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
 }
+SHOT_LEVEL_OPTIMIZER_FAMILIES = frozenset(
+    {
+        OPTIMIZER_FAMILY_BAYESIAN_OPTIMIZATION,
+        OPTIMIZER_FAMILY_TRUST_REGION_BO,
+        OPTIMIZER_FAMILY_TRUST_REGION_PPO,
+    }
+)
+ADAPTIVE_PROFILE_CONTROL_OPTIMIZER_FAMILIES = frozenset({OPTIMIZER_FAMILY_DREAMER_V3})
 OPTIMIZER_MODE_ALIASES = {
     "bo": DEFAULT_OPTIMIZER_MODE,
     "conservative_bo": DEFAULT_OPTIMIZER_MODE,
@@ -23,6 +35,16 @@ def normalize_optimizer_mode(value: object) -> str:
     if mode not in VALID_OPTIMIZER_MODES:
         raise ValueError("optimizer_mode is invalid")
     return mode
+
+
+def optimizer_family_allows_adaptive_profile_control(value: object) -> bool:
+    family = str(value or "").strip().lower()
+    return family in ADAPTIVE_PROFILE_CONTROL_OPTIMIZER_FAMILIES
+
+
+def require_adaptive_profile_control_optimizer(value: object) -> None:
+    if not optimizer_family_allows_adaptive_profile_control(value):
+        raise ValueError("adaptive profile control is only available for DreamerV3")
 
 
 @dataclass(frozen=True)

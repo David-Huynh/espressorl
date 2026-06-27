@@ -514,6 +514,12 @@ continuations, and step padding masks. The batch includes feature-name metadata
 so external trainers can audit the numeric layout instead of relying on
 implicit column order. `elapsed_seconds` advances by 0.25 on every valid step,
 and `step_duration_seconds` is 0.25 for valid steps and zero for padding.
+The batch also includes a Dreamer control spec, a `decision_step_mask`, and a
+`control_action_mask`. Observations use the 250 ms recurrent clock, while actor
+decisions default to 1000 ms and must never be faster than the supported control
+cadence. Decision steps are fixed and equally spaced; the batcher forward-fills
+the latest decision as the held action between decision ticks. BO and other
+shot-level optimizers do not emit adaptive in-shot profile controls.
 
 No export artifact uses pickle, model binaries, SQLite dumps, parquet, macros,
 absolute grinder settings, or another executable/opaque format. Trainers should

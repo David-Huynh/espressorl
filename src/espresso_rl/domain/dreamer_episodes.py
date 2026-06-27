@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from espresso_rl.domain.dreamer_control import DREAMER_CONTROL_CONSTRAINT_FIELDS, DREAMER_DYNAMIC_ACTION_FIELDS
 from espresso_rl.domain.models import (
     FIXED_CADENCE_MAX_STEPS,
     FIXED_CADENCE_SAMPLE_INTERVAL_MS,
@@ -92,17 +93,7 @@ _OBSERVED_PROFILE_TARGET_FIELDS = frozenset(
         "valve_open",
     }
 )
-_DYNAMIC_ACTION_FIELDS = frozenset(
-    {
-        "pressure_target_bar",
-        "flow_target_ml_s",
-        "pump_duty",
-        "valve_position",
-        "temperature_target_c",
-        "yield_stop_target_g",
-        "stop",
-    }
-)
+_DYNAMIC_ACTION_FIELDS = frozenset(DREAMER_DYNAMIC_ACTION_FIELDS)
 _DYNAMIC_ACTION_FORBIDDEN_FIELDS = frozenset(
     {
         "relative_grind_steps_from_reference",
@@ -117,13 +108,7 @@ _DYNAMIC_ACTION_FORBIDDEN_FIELDS = frozenset(
 )
 _CONSTRAINT_FIELDS = frozenset(
     {
-        "dynamic_control_enabled",
-        "pressure_control_allowed",
-        "flow_control_allowed",
-        "pump_control_allowed",
-        "valve_control_allowed",
-        "temperature_control_allowed",
-        "stop_control_allowed",
+        *DREAMER_CONTROL_CONSTRAINT_FIELDS,
     }
 )
 _TERMINAL_FIELDS = frozenset(

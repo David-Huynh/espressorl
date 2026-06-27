@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC, DreamerControlSpec
 from espresso_rl.domain.model_manifest import MODEL_FAMILY_DREAMER_V3
 
 TRAINING_CONFIG_FORMAT = "espresso_rl_training_config_v1"
@@ -15,6 +16,7 @@ _TRAINING_CONFIG_FIELDS = frozenset(
         "schema_version",
         "model_family",
         "artifact_stage",
+        "dreamer_control_spec",
         "seed",
         "notes",
     }
@@ -34,6 +36,10 @@ def validate_training_config(config: dict[str, Any]) -> list[str]:
         errors.append("training config model_family is unsupported")
     if config.get("artifact_stage") != TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY:
         errors.append("training config artifact_stage is unsupported")
+    try:
+        DreamerControlSpec.from_dict(config.get("dreamer_control_spec"))
+    except ValueError as exc:
+        errors.append(str(exc))
     seed = config.get("seed")
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1:
         errors.append("training config seed must be a uint32 integer")
@@ -49,6 +55,7 @@ def default_training_config(*, seed: int = 0) -> dict[str, Any]:
         "schema_version": TRAINING_CONFIG_SCHEMA_VERSION,
         "model_family": MODEL_FAMILY_DREAMER_V3,
         "artifact_stage": TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
+        "dreamer_control_spec": DEFAULT_DREAMER_CONTROL_SPEC.to_dict(),
         "seed": seed,
     }
 

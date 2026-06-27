@@ -50,6 +50,9 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(result.row_count, 1)
         self.assertTrue(files[MODEL_FILENAME].content.startswith(len(files[MODEL_FILENAME].content[8:]).to_bytes(8, "little")))
         manifest = json.loads(files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
+        config = json.loads(files[TRAINING_CONFIG_FILENAME].content.decode("utf-8"))
+        self.assertEqual(config["dreamer_control_spec"]["observation_interval_ms"], 250)
+        self.assertEqual(config["dreamer_control_spec"]["decision_interval_ms"], 1000)
         self.assertEqual(manifest["model_artifact"]["format"], "safetensors")
         self.assertEqual(manifest["model_artifact"]["sha256"], files[MODEL_FILENAME].sha256)
         self.assertEqual(manifest["dataset"]["sha256"], hashlib.sha256(dataset_text.encode("utf-8")).hexdigest())
@@ -101,6 +104,21 @@ class TrainerArtifactTests(unittest.TestCase):
                 training_config_json=canonical_json(default_training_config()) + "\n",
                 trainer_git_sha="trainerabc",
                 model_filename="dreamer_v3.pt",
+            )
+
+    def test_rejects_training_config_with_non_dreamer_adaptive_control(self) -> None:
+        dataset_text, manifest_text = dataset_export_text([training_row(1)])
+        config = default_training_config()
+        config["dreamer_control_spec"]["optimizer_family"] = "bayesian_optimization"
+        config["dreamer_control_spec"]["dynamic_control_enabled"] = True
+        config["dreamer_control_spec"]["pressure_control_allowed"] = True
+
+        with self.assertRaisesRegex(TrainerArtifactError, "only available for Dreamer"):
+            build_dreamer_trainer_artifacts(
+                training_rows_jsonl=dataset_text,
+                training_dataset_manifest_json=manifest_text,
+                training_config_json=canonical_json(config) + "\n",
+                trainer_git_sha="trainerabc",
             )
 
     def test_dataset_size_guard_is_configurable_resource_protection(self) -> None:
