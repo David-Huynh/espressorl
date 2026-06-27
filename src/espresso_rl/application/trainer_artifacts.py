@@ -6,6 +6,8 @@ import struct
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import torch
+
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
 from espresso_rl.domain.dreamer_episodes import DREAMER_EPISODE_FORMAT, DREAMER_EPISODE_SCHEMA_VERSION
 from espresso_rl.domain.model_manifest import (
@@ -46,6 +48,10 @@ CHECKSUMS_FILENAME = "checksums.txt"
 AUDIT_REPORT_FILENAME = "audit_report.json"
 
 DEFAULT_MAX_DATASET_BYTES = 8 * 1024 * 1024 * 1024
+CHECKPOINT_ARTIFACT_FORMAT = "espresso_rl_dreamer_v3_checkpoint_safetensors_v1"
+CHECKPOINT_ARTIFACT_SCHEMA_VERSION = 1
+CHECKPOINT_TENSOR_MANIFEST_FORMAT = "espresso_rl_checkpoint_tensor_manifest_v1"
+CHECKPOINT_TENSOR_MANIFEST_SCHEMA_VERSION = 1
 _MAX_DATASET_MANIFEST_BYTES = 256 * 1024
 _MAX_TRAINING_CONFIG_BYTES = 128 * 1024
 _DREAMER_TENSOR_KEYS = (
@@ -152,27 +158,41 @@ def build_dreamer_trainer_artifacts(
         dreamer_tensor_build["batch"],
         training_config=training_config,
     )
-    world_model_train_preview = _world_model_train_preview_metrics(
+    world_model_train_preview_result = _world_model_train_preview_metrics(
         dreamer_tensor_build["episodes"],
         control_spec=control_spec,
         training_config=training_config,
+    )
+    world_model_train_preview = (
+        world_model_train_preview_result["metrics"] if world_model_train_preview_result is not None else None
+    )
+    checkpoint_tensors = (
+        world_model_train_preview_result["checkpoint_tensors"] if world_model_train_preview_result is not None else {}
     )
     canonical_training_config_text = _canonical_json(training_config) + "\n"
     canonical_training_config_payload = canonical_training_config_text.encode("utf-8")
     training_config_sha256 = _sha256_bytes(canonical_training_config_payload)
 
-    model_payload = _placeholder_safetensors(
+    world_model_smoke_sha256 = _sha256_json(world_model_smoke) if world_model_smoke is not None else None
+    world_model_train_preview_sha256 = (
+        _sha256_json(world_model_train_preview) if world_model_train_preview is not None else None
+    )
+    checkpoint_tensor_manifest = _checkpoint_tensor_manifest(checkpoint_tensors)
+    checkpoint_tensor_manifest_sha256 = _sha256_json(checkpoint_tensor_manifest)
+    checkpoint_metadata = _checkpoint_metadata(
         dataset_sha256=dataset_sha256,
         training_config_sha256=training_config_sha256,
         dreamer_tensor_contract_sha256=dreamer_tensor_contract["tensor_contract_sha256"],
-        world_model_smoke_sha256=_sha256_json(world_model_smoke) if world_model_smoke is not None else None,
-        world_model_train_preview_sha256=(
-            _sha256_json(world_model_train_preview) if world_model_train_preview is not None else None
-        ),
+        feature_layout_sha256=dreamer_tensor_contract["feature_layout_sha256"],
+        control_spec_sha256=dreamer_tensor_contract["control_spec_sha256"],
+        checkpoint_tensor_manifest_sha256=checkpoint_tensor_manifest_sha256,
+        world_model_smoke_sha256=world_model_smoke_sha256,
+        world_model_train_preview_sha256=world_model_train_preview_sha256,
         artifact_stage=artifact_stage,
         row_count=row_count,
         created_at=created_at,
     )
+    model_payload = _checkpoint_safetensors(checkpoint_tensors, metadata=checkpoint_metadata)
     model_sha256 = _sha256_bytes(model_payload)
     model_manifest = _model_manifest(
         model_sha256=model_sha256,
@@ -181,7 +201,11 @@ def build_dreamer_trainer_artifacts(
         training_config_sha256=training_config_sha256,
         trainer_git_sha=trainer_git_sha,
         artifact_stage=artifact_stage,
+        checkpoint_tensor_manifest=checkpoint_tensor_manifest,
+        checkpoint_tensor_manifest_sha256=checkpoint_tensor_manifest_sha256,
+        dreamer_tensor_contract=dreamer_tensor_contract,
     )
+    validate_dreamer_checkpoint_safetensors(model_payload, model_manifest)
     model_manifest_payload = (_canonical_json(model_manifest) + "\n").encode("utf-8")
     model_manifest_sha256 = _sha256_bytes(model_manifest_payload)
 
@@ -197,6 +221,7 @@ def build_dreamer_trainer_artifacts(
                 model_manifest_sha256=model_manifest_sha256,
                 trainer_git_sha=trainer_git_sha,
                 dreamer_tensor_contract=dreamer_tensor_contract,
+                checkpoint_tensor_manifest_sha256=checkpoint_tensor_manifest_sha256,
                 world_model_smoke=world_model_smoke,
                 world_model_train_preview=world_model_train_preview,
                 artifact_stage=artifact_stage,
@@ -229,8 +254,8 @@ def build_dreamer_trainer_artifacts(
         model_manifest_sha256=model_manifest_sha256,
         files=files,
         warnings=(
-            f"{artifact_stage} output is a placeholder safetensors file and is not inference-ready",
-            "DreamerV3 active inference and training are not implemented in this command",
+            f"{artifact_stage} output is a non-runtime safetensors checkpoint and is not inference-ready",
+            "DreamerV3 active inference is not implemented in this command",
         ),
     )
 
@@ -353,7 +378,7 @@ def _world_model_train_preview_metrics(
     train_batch = build_dreamer_episode_batch(split["train_episodes"], control_spec=control_spec)
     validation_batch = build_dreamer_episode_batch(split["validation_episodes"], control_spec=control_spec)
     try:
-        return run_fixed_cadence_world_model_train_preview(
+        result = run_fixed_cadence_world_model_train_preview(
             train_batch=train_batch,
             validation_batch=validation_batch,
             config=WorldModelTrainPreviewConfig(
@@ -394,7 +419,11 @@ def _world_model_train_preview_metrics(
                 imagination_discount=float(training_config["world_model_preview_imagination_discount"]),
             ),
             dataset_split=split["summary"],
-        ).to_dict()
+        )
+        return {
+            "metrics": result.to_dict(),
+            "checkpoint_tensors": result.checkpoint_tensors,
+        }
     except FixedCadenceWorldModelTrainingError as exc:
         raise TrainerArtifactError(f"Dreamer world-model train preview failed: {exc}") from exc
 
@@ -468,6 +497,9 @@ def _model_manifest(
     training_config_sha256: str,
     trainer_git_sha: str,
     artifact_stage: str,
+    checkpoint_tensor_manifest: dict[str, Any],
+    checkpoint_tensor_manifest_sha256: str,
+    dreamer_tensor_contract: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "format": MODEL_MANIFEST_FORMAT,
@@ -476,6 +508,16 @@ def _model_manifest(
         "model_artifact": {
             "format": MODEL_ARTIFACT_FORMAT_SAFETENSORS,
             "sha256": model_sha256,
+            "checkpoint_format": CHECKPOINT_ARTIFACT_FORMAT,
+            "checkpoint_schema_version": CHECKPOINT_ARTIFACT_SCHEMA_VERSION,
+            "tensor_manifest_sha256": checkpoint_tensor_manifest_sha256,
+            "tensor_manifest": checkpoint_tensor_manifest,
+            "tensor_count": checkpoint_tensor_manifest["tensor_count"],
+            "component_count": checkpoint_tensor_manifest["component_count"],
+            "component_names": checkpoint_tensor_manifest["component_names"],
+            "dreamer_tensor_contract_sha256": dreamer_tensor_contract["tensor_contract_sha256"],
+            "feature_layout_sha256": dreamer_tensor_contract["feature_layout_sha256"],
+            "control_spec_sha256": dreamer_tensor_contract["control_spec_sha256"],
         },
         "dataset": {
             "format": TRAINING_DATASET_FORMAT,
@@ -511,6 +553,7 @@ def _audit_report(
     model_manifest_sha256: str,
     trainer_git_sha: str,
     dreamer_tensor_contract: dict[str, Any],
+    checkpoint_tensor_manifest_sha256: str,
     world_model_smoke: dict[str, Any] | None,
     world_model_train_preview: dict[str, Any] | None,
     artifact_stage: str,
@@ -530,6 +573,7 @@ def _audit_report(
         "model_manifest_sha256": model_manifest_sha256,
         "trainer_git_sha": trainer_git_sha,
         "dreamer_tensor_contract": dreamer_tensor_contract,
+        "checkpoint_tensor_manifest_sha256": checkpoint_tensor_manifest_sha256,
         "world_model_smoke": world_model_smoke,
         "world_model_train_preview": world_model_train_preview,
         "zero_trust": {
@@ -538,6 +582,7 @@ def _audit_report(
             "dreamer_tensors_revalidated": True,
             "world_model_smoke_trained": world_model_smoke is not None,
             "world_model_train_preview_trained": world_model_train_preview is not None,
+            "checkpoint_safetensors_validated": True,
             "absolute_grinder_fields_allowed": False,
             "pickle_outputs_allowed": False,
             "runtime_inference_enabled": False,
@@ -545,34 +590,180 @@ def _audit_report(
     }
 
 
-def _placeholder_safetensors(
+def _checkpoint_metadata(
     *,
     dataset_sha256: str,
     training_config_sha256: str,
     dreamer_tensor_contract_sha256: str,
+    feature_layout_sha256: str,
+    control_spec_sha256: str,
+    checkpoint_tensor_manifest_sha256: str,
     world_model_smoke_sha256: str | None,
     world_model_train_preview_sha256: str | None,
     artifact_stage: str,
     row_count: int,
     created_at: int,
-) -> bytes:
-    header = {
-        "__metadata__": {
-            "format": "espresso_rl_placeholder_safetensors_v1",
-            "model_family": MODEL_FAMILY_DREAMER_V3,
-            "artifact_stage": artifact_stage,
-            "inference_ready": "false",
-            "dataset_sha256": dataset_sha256,
-            "training_config_sha256": training_config_sha256,
-            "dreamer_tensor_contract_sha256": dreamer_tensor_contract_sha256,
-            "world_model_smoke_sha256": world_model_smoke_sha256 or "",
-            "world_model_train_preview_sha256": world_model_train_preview_sha256 or "",
-            "row_count": str(row_count),
-            "created_at": str(int(created_at)),
-        }
+) -> dict[str, str]:
+    return {
+        "format": CHECKPOINT_ARTIFACT_FORMAT,
+        "schema_version": str(CHECKPOINT_ARTIFACT_SCHEMA_VERSION),
+        "model_family": MODEL_FAMILY_DREAMER_V3,
+        "artifact_stage": artifact_stage,
+        "inference_ready": "false",
+        "dataset_sha256": dataset_sha256,
+        "training_config_sha256": training_config_sha256,
+        "dreamer_tensor_contract_sha256": dreamer_tensor_contract_sha256,
+        "feature_layout_sha256": feature_layout_sha256,
+        "control_spec_sha256": control_spec_sha256,
+        "tensor_manifest_sha256": checkpoint_tensor_manifest_sha256,
+        "world_model_smoke_sha256": world_model_smoke_sha256 or "",
+        "world_model_train_preview_sha256": world_model_train_preview_sha256 or "",
+        "row_count": str(row_count),
+        "created_at": str(int(created_at)),
     }
+
+
+def _checkpoint_safetensors(tensors: dict[str, torch.Tensor], *, metadata: dict[str, str]) -> bytes:
+    header: dict[str, Any] = {"__metadata__": {key: str(value) for key, value in sorted(metadata.items())}}
+    chunks: list[bytes] = []
+    offset = 0
+    for name in sorted(tensors):
+        tensor = _checkpoint_tensor(tensors[name])
+        raw = _tensor_bytes(tensor)
+        next_offset = offset + len(raw)
+        header[name] = {
+            "dtype": "F32",
+            "shape": [int(dimension) for dimension in tensor.shape],
+            "data_offsets": [offset, next_offset],
+        }
+        chunks.append(raw)
+        offset = next_offset
     header_bytes = _canonical_json(header).encode("utf-8")
-    return struct.pack("<Q", len(header_bytes)) + header_bytes
+    return struct.pack("<Q", len(header_bytes)) + header_bytes + b"".join(chunks)
+
+
+def _checkpoint_tensor_manifest(tensors: dict[str, torch.Tensor]) -> dict[str, Any]:
+    components: dict[str, dict[str, int]] = {}
+    tensor_entries: dict[str, dict[str, Any]] = {}
+    for name in sorted(tensors):
+        component_name = name.split(".", 1)[0]
+        tensor = _checkpoint_tensor(tensors[name])
+        raw = _tensor_bytes(tensor)
+        entry = {
+            "component": component_name,
+            "dtype": "F32",
+            "shape": [int(dimension) for dimension in tensor.shape],
+            "element_count": int(tensor.numel()),
+            "sha256": _sha256_bytes(raw),
+        }
+        tensor_entries[name] = entry
+        component = components.setdefault(component_name, {"tensor_count": 0, "element_count": 0})
+        component["tensor_count"] += 1
+        component["element_count"] += entry["element_count"]
+    return {
+        "format": CHECKPOINT_TENSOR_MANIFEST_FORMAT,
+        "schema_version": CHECKPOINT_TENSOR_MANIFEST_SCHEMA_VERSION,
+        "tensor_count": len(tensor_entries),
+        "component_count": len(components),
+        "component_names": sorted(components),
+        "components": {key: components[key] for key in sorted(components)},
+        "tensors": tensor_entries,
+    }
+
+
+def validate_dreamer_checkpoint_safetensors(payload: bytes, model_manifest: dict[str, Any]) -> None:
+    artifact = model_manifest.get("model_artifact")
+    if not isinstance(artifact, dict):
+        raise TrainerArtifactError("checkpoint manifest is missing model_artifact")
+    if artifact.get("format") != MODEL_ARTIFACT_FORMAT_SAFETENSORS:
+        raise TrainerArtifactError("checkpoint artifact format must be safetensors")
+    if artifact.get("sha256") != _sha256_bytes(payload):
+        raise TrainerArtifactError("checkpoint artifact sha256 does not match payload")
+    if artifact.get("checkpoint_format") != CHECKPOINT_ARTIFACT_FORMAT:
+        raise TrainerArtifactError("checkpoint artifact format metadata is unsupported")
+    if artifact.get("checkpoint_schema_version") != CHECKPOINT_ARTIFACT_SCHEMA_VERSION:
+        raise TrainerArtifactError("checkpoint artifact schema version is unsupported")
+    tensor_manifest = artifact.get("tensor_manifest")
+    if not isinstance(tensor_manifest, dict):
+        raise TrainerArtifactError("checkpoint tensor manifest is missing")
+    expected_manifest_sha = artifact.get("tensor_manifest_sha256")
+    if expected_manifest_sha != _sha256_json(tensor_manifest):
+        raise TrainerArtifactError("checkpoint tensor manifest hash does not match")
+
+    header, data = _safetensors_header(payload)
+    data_length = len(data)
+    metadata = header.get("__metadata__")
+    if not isinstance(metadata, dict):
+        raise TrainerArtifactError("checkpoint safetensors metadata is missing")
+    _require_metadata(metadata, "format", CHECKPOINT_ARTIFACT_FORMAT)
+    _require_metadata(metadata, "schema_version", str(CHECKPOINT_ARTIFACT_SCHEMA_VERSION))
+    _require_metadata(metadata, "model_family", MODEL_FAMILY_DREAMER_V3)
+    _require_metadata(metadata, "inference_ready", "false")
+    _require_metadata(metadata, "tensor_manifest_sha256", expected_manifest_sha)
+    for key in ("dreamer_tensor_contract_sha256", "feature_layout_sha256", "control_spec_sha256"):
+        _require_metadata(metadata, key, artifact.get(key))
+
+    tensors = tensor_manifest.get("tensors")
+    if not isinstance(tensors, dict):
+        raise TrainerArtifactError("checkpoint tensor manifest tensors must be an object")
+    expected_names = sorted(tensors)
+    actual_names = sorted(key for key in header if key != "__metadata__")
+    if actual_names != expected_names:
+        raise TrainerArtifactError("checkpoint safetensors tensor names do not match manifest")
+    if artifact.get("tensor_count") != len(expected_names) or tensor_manifest.get("tensor_count") != len(expected_names):
+        raise TrainerArtifactError("checkpoint tensor count does not match manifest")
+    if artifact.get("component_names") != tensor_manifest.get("component_names"):
+        raise TrainerArtifactError("checkpoint component names do not match manifest")
+    for name in expected_names:
+        expected = tensors[name]
+        actual = header[name]
+        if actual.get("dtype") != expected.get("dtype"):
+            raise TrainerArtifactError(f"checkpoint tensor {name} dtype does not match manifest")
+        if actual.get("shape") != expected.get("shape"):
+            raise TrainerArtifactError(f"checkpoint tensor {name} shape does not match manifest")
+        offsets = actual.get("data_offsets")
+        if (
+            not isinstance(offsets, list)
+            or len(offsets) != 2
+            or any(isinstance(item, bool) or not isinstance(item, int) for item in offsets)
+            or not 0 <= offsets[0] <= offsets[1] <= data_length
+        ):
+            raise TrainerArtifactError(f"checkpoint tensor {name} data offsets are invalid")
+        tensor_bytes = data[offsets[0] : offsets[1]]
+        if _sha256_bytes(tensor_bytes) != expected.get("sha256"):
+            raise TrainerArtifactError(f"checkpoint tensor {name} sha256 does not match manifest")
+
+
+def _checkpoint_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if not isinstance(tensor, torch.Tensor):
+        raise TrainerArtifactError("checkpoint tensors must be torch tensors")
+    if not torch.isfinite(tensor.detach()).all():
+        raise TrainerArtifactError("checkpoint tensor contains non-finite values")
+    return tensor.detach().cpu().contiguous().to(dtype=torch.float32)
+
+
+def _tensor_bytes(tensor: torch.Tensor) -> bytes:
+    return tensor.numpy().tobytes(order="C")
+
+
+def _safetensors_header(payload: bytes) -> tuple[dict[str, Any], bytes]:
+    if not isinstance(payload, bytes) or len(payload) < 8:
+        raise TrainerArtifactError("checkpoint safetensors payload is truncated")
+    header_length = struct.unpack("<Q", payload[:8])[0]
+    if header_length <= 0 or 8 + header_length > len(payload):
+        raise TrainerArtifactError("checkpoint safetensors header length is invalid")
+    try:
+        header = json.loads(payload[8 : 8 + header_length].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrainerArtifactError("checkpoint safetensors header is not valid UTF-8 JSON") from exc
+    if not isinstance(header, dict):
+        raise TrainerArtifactError("checkpoint safetensors header must be a JSON object")
+    return header, payload[8 + header_length :]
+
+
+def _require_metadata(metadata: dict[str, Any], key: str, expected: object) -> None:
+    if metadata.get(key) != str(expected):
+        raise TrainerArtifactError(f"checkpoint safetensors metadata {key} does not match manifest")
 
 
 def _artifact_file(relative_path: str, content: bytes, *, content_type: str) -> TrainerArtifactFile:

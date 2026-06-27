@@ -9,7 +9,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from espresso_rl.dreamer.imagination import DreamerV3ImaginationConfig, run_dreamer_v3_imagination_preview
+from espresso_rl.dreamer.imagination import (
+    DreamerV3ImaginationActor,
+    DreamerV3ImaginationConfig,
+    DreamerV3ImaginationCritic,
+    run_dreamer_v3_imagination_preview,
+)
 from espresso_rl.dreamer.reference_world_model import (
     DreamerV3VectorWorldModel,
     DreamerV3WorldModelConfig,
@@ -73,6 +78,7 @@ class WorldModelTrainPreviewResult:
     epochs_completed: int
     early_stopped: bool
     imagination_preview: dict[str, Any]
+    checkpoint_tensors: dict[str, torch.Tensor]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +110,7 @@ class WorldModelTrainPreviewResult:
             "train_loss_curve": list(self.train_loss_curve),
             "validation_loss_curve": list(self.validation_loss_curve),
             "imagination_preview": self.imagination_preview,
+            "checkpoint_tensor_names": sorted(self.checkpoint_tensors),
         }
 
 
@@ -207,19 +214,30 @@ def run_fixed_cadence_world_model_train_preview(
                 if epochs_without_improvement >= config.early_stop_patience:
                     early_stopped = True
                     break
+        imagination_config = DreamerV3ImaginationConfig(
+            horizon=config.imagination_horizon,
+            actor_hidden_dim=config.imagination_actor_hidden_dim,
+            critic_hidden_dim=config.imagination_critic_hidden_dim,
+            value_bins=config.model.reward_bins,
+            discount=config.imagination_discount,
+            lambda_return=config.imagination_lambda_return,
+            actor_entropy_scale=config.imagination_actor_entropy_scale,
+        )
+        torch.manual_seed((config.seed + 0x9E3779B9) % (2**32))
+        actor = DreamerV3ImaginationActor(
+            feature_dim=model.feature_dim,
+            dynamic_action_dim=validation_tensors["dynamic_actions"].shape[-1],
+            config=imagination_config,
+        )
+        critic = DreamerV3ImaginationCritic(feature_dim=model.feature_dim, config=imagination_config)
         imagination_preview = run_dreamer_v3_imagination_preview(
             world_model=model,
             batch=validation_tensors,
-            config=DreamerV3ImaginationConfig(
-                horizon=config.imagination_horizon,
-                actor_hidden_dim=config.imagination_actor_hidden_dim,
-                critic_hidden_dim=config.imagination_critic_hidden_dim,
-                value_bins=config.model.reward_bins,
-                discount=config.imagination_discount,
-                lambda_return=config.imagination_lambda_return,
-                actor_entropy_scale=config.imagination_actor_entropy_scale,
-            ),
+            config=imagination_config,
+            actor=actor,
+            critic=critic,
         )
+        checkpoint_tensors = _checkpoint_tensors(model, actor, critic)
     finally:
         torch.use_deterministic_algorithms(old_deterministic)
         torch.set_num_threads(old_threads)
@@ -233,6 +251,7 @@ def run_fixed_cadence_world_model_train_preview(
         epochs_completed=len(train_curve),
         early_stopped=early_stopped,
         imagination_preview=imagination_preview,
+        checkpoint_tensors=checkpoint_tensors,
     )
 
 
@@ -383,6 +402,25 @@ def _evaluate(model: DreamerV3VectorWorldModel, batch: dict[str, torch.Tensor]) 
 def _mean_loss_dicts(losses: list[dict[str, float]]) -> dict[str, float]:
     keys = sorted({key for item in losses for key in item})
     return {key: round(sum(item[key] for item in losses) / len(losses), 8) for key in keys}
+
+
+def _checkpoint_tensors(
+    world_model: DreamerV3VectorWorldModel,
+    actor: DreamerV3ImaginationActor,
+    critic: DreamerV3ImaginationCritic,
+) -> dict[str, torch.Tensor]:
+    tensors: dict[str, torch.Tensor] = {}
+    for component_name, module in (
+        ("world_model", world_model),
+        ("actor", actor),
+        ("critic", critic),
+    ):
+        for tensor_name, tensor in module.state_dict().items():
+            tensors[f"{component_name}.{tensor_name}"] = tensor.detach().cpu().contiguous().to(dtype=torch.float32)
+    tensors["world_model.reward_bins"] = world_model.reward_bins.detach().cpu().contiguous().to(dtype=torch.float32)
+    tensors["actor.static_action_bins"] = actor.static_action_bins.detach().cpu().contiguous().to(dtype=torch.float32)
+    tensors["critic.value_bins"] = critic.value_bins.detach().cpu().contiguous().to(dtype=torch.float32)
+    return tensors
 
 
 def _validate_reference_model_config(config: DreamerV3WorldModelConfig) -> None:

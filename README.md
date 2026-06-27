@@ -574,16 +574,19 @@ It produces:
 - `checksums.txt`
 
 This command is intentionally an artifact pipeline skeleton. The generated
-`.safetensors` file remains a placeholder and `inference_ready=false`, so the
-runtime verifier will not expose it as an active DreamerV3 model. The
+`.safetensors` file is a valid checkpoint container but remains
+`inference_ready=false`, so the runtime verifier will not expose it as an active
+DreamerV3 model. The
 `world_model_smoke` stage proves that the exported tensors can run through the
 same reference-aligned categorical RSSM path used by the preview trainer and
 records initial/final losses in `audit_report.json`; `world_model_train_preview`
 extends that to deterministic train/validation curves and an actor/critic
 imagination contract preview. Neither stage produces a useful runtime model
-artifact. A real offline trainer must replace that placeholder with trained
-tensors and set runtime compatibility only after inference is safe. The command
-has a configurable `--max-dataset-bytes` resource
+artifact. The train-preview stage serializes its deterministic RSSM,
+actor-head, and critic-head tensors with explicit tensor names, shapes,
+component metadata, feature-layout hash, control-spec hash, and tensor-manifest
+hash; runtime compatibility should only be set after inference is safe. The
+command has a configurable `--max-dataset-bytes` resource
 guard, defaulting to 8 GiB, because this skeleton validates JSONL in-process.
 That guard is not a training policy; real large-scale Dreamer training should
 use streaming or sharded dataset loading so the corpus can grow beyond one

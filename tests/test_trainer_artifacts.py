@@ -10,6 +10,7 @@ from pathlib import Path
 
 from espresso_rl.application.trainer_artifacts import (
     AUDIT_REPORT_FILENAME,
+    CHECKPOINT_ARTIFACT_FORMAT,
     CHECKSUMS_FILENAME,
     MODEL_FILENAME,
     MODEL_MANIFEST_FILENAME,
@@ -17,6 +18,7 @@ from espresso_rl.application.trainer_artifacts import (
     TrainerArtifactError,
     build_dreamer_trainer_artifacts,
     DEFAULT_MAX_DATASET_BYTES,
+    validate_dreamer_checkpoint_safetensors,
 )
 from espresso_rl.domain.model_manifest import validate_model_manifest
 from espresso_rl.domain.trainer_artifacts import (
@@ -52,16 +54,22 @@ class TrainerArtifactTests(unittest.TestCase):
             },
         )
         self.assertEqual(result.row_count, 1)
-        self.assertTrue(files[MODEL_FILENAME].content.startswith(len(files[MODEL_FILENAME].content[8:]).to_bytes(8, "little")))
+        model_header = safetensors_header(files[MODEL_FILENAME].content)
+        model_metadata = model_header["__metadata__"]
         manifest = json.loads(files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
         config = json.loads(files[TRAINING_CONFIG_FILENAME].content.decode("utf-8"))
         self.assertEqual(config["dreamer_control_spec"]["observation_interval_ms"], 250)
         self.assertEqual(config["dreamer_control_spec"]["decision_interval_ms"], 1000)
         self.assertEqual(manifest["model_artifact"]["format"], "safetensors")
+        self.assertEqual(manifest["model_artifact"]["checkpoint_format"], CHECKPOINT_ARTIFACT_FORMAT)
+        self.assertEqual(manifest["model_artifact"]["tensor_count"], 0)
         self.assertEqual(manifest["model_artifact"]["sha256"], files[MODEL_FILENAME].sha256)
+        self.assertEqual(model_metadata["format"], CHECKPOINT_ARTIFACT_FORMAT)
+        self.assertEqual(model_metadata["inference_ready"], "false")
         self.assertEqual(manifest["dataset"]["sha256"], hashlib.sha256(dataset_text.encode("utf-8")).hexdigest())
         self.assertEqual(manifest["trainer"]["training_config_sha256"], files[TRAINING_CONFIG_FILENAME].sha256)
         self.assertFalse(manifest["runtime_compatibility"]["inference_ready"])
+        validate_dreamer_checkpoint_safetensors(files[MODEL_FILENAME].content, manifest)
         manifest_validation = validate_model_manifest(
             manifest,
             expected_model_sha256=files[MODEL_FILENAME].sha256,
@@ -86,6 +94,7 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(len(tensor_contract["feature_layout_sha256"]), 64)
         self.assertEqual(len(tensor_contract["control_spec_sha256"]), 64)
         self.assertEqual(len(tensor_contract["tensor_contract_sha256"]), 64)
+        self.assertTrue(audit["zero_trust"]["checkpoint_safetensors_validated"])
         self.assertIn(f"{files[MODEL_FILENAME].sha256}  {MODEL_FILENAME}", files[CHECKSUMS_FILENAME].content.decode("utf-8"))
 
     def test_rejects_dataset_manifest_hash_mismatch(self) -> None:
@@ -187,7 +196,7 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(first_files[MODEL_FILENAME].content, second_files[MODEL_FILENAME].content)
         audit = json.loads(first_files[AUDIT_REPORT_FILENAME].content.decode("utf-8"))
         manifest = json.loads(first_files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
-        model_metadata = placeholder_metadata(first_files[MODEL_FILENAME].content)
+        model_metadata = safetensors_metadata(first_files[MODEL_FILENAME].content)
 
         self.assertEqual(audit["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
         self.assertTrue(audit["zero_trust"]["world_model_smoke_trained"])
@@ -201,6 +210,7 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(manifest["trainer"]["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
         self.assertEqual(model_metadata["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE)
         self.assertEqual(len(model_metadata["world_model_smoke_sha256"]), 64)
+        self.assertEqual(manifest["model_artifact"]["tensor_count"], 0)
 
     def test_world_model_train_preview_stage_writes_split_and_loss_curves_without_inference_ready(self) -> None:
         dataset_text, manifest_text = dataset_export_text(
@@ -234,9 +244,11 @@ class TrainerArtifactTests(unittest.TestCase):
         first_files = {file.relative_path: file for file in first.files}
         second_files = {file.relative_path: file for file in second.files}
         self.assertEqual(first_files[AUDIT_REPORT_FILENAME].content, second_files[AUDIT_REPORT_FILENAME].content)
+        self.assertEqual(first_files[MODEL_FILENAME].content, second_files[MODEL_FILENAME].content)
         audit = json.loads(first_files[AUDIT_REPORT_FILENAME].content.decode("utf-8"))
         manifest = json.loads(first_files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
-        model_metadata = placeholder_metadata(first_files[MODEL_FILENAME].content)
+        model_metadata = safetensors_metadata(first_files[MODEL_FILENAME].content)
+        model_header = safetensors_header(first_files[MODEL_FILENAME].content)
         preview = audit["world_model_train_preview"]
 
         self.assertEqual(audit["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
@@ -246,6 +258,17 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(manifest["trainer"]["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
         self.assertEqual(model_metadata["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
         self.assertEqual(len(model_metadata["world_model_train_preview_sha256"]), 64)
+        self.assertEqual(model_metadata["format"], CHECKPOINT_ARTIFACT_FORMAT)
+        self.assertGreater(manifest["model_artifact"]["tensor_count"], 0)
+        self.assertEqual(manifest["model_artifact"]["component_names"], ["actor", "critic", "world_model"])
+        self.assertIn("world_model.reward_bins", model_header)
+        self.assertIn("actor.static_action_bins", model_header)
+        self.assertIn("critic.value_bins", model_header)
+        self.assertEqual(
+            manifest["model_artifact"]["tensor_manifest_sha256"],
+            model_metadata["tensor_manifest_sha256"],
+        )
+        validate_dreamer_checkpoint_safetensors(first_files[MODEL_FILENAME].content, manifest)
         self.assertEqual(preview["seed"], 17)
         self.assertEqual(preview["epochs_requested"], 2)
         self.assertEqual(preview["epochs_completed"], 2)
@@ -266,6 +289,34 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(preview["dataset_split"]["train_source_training_row_ids"], [1, 2, 3])
         self.assertEqual(preview["dataset_split"]["validation_source_training_row_ids"], [4])
         self.assertEqual(preview["dataset_split_sha256"], preview["dataset_split"]["dataset_split_sha256"])
+
+    def test_checkpoint_safetensors_validation_rejects_manifest_tampering(self) -> None:
+        dataset_text, manifest_text = dataset_export_text(
+            [training_row(1), training_row(2), training_row(3), training_row(4)]
+        )
+        config = default_training_config(seed=17, artifact_stage=TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW)
+        config["world_model_preview_epochs"] = 1
+        result = build_dreamer_trainer_artifacts(
+            training_rows_jsonl=dataset_text,
+            training_dataset_manifest_json=manifest_text,
+            training_config_json=canonical_json(config) + "\n",
+            trainer_git_sha="trainerabc",
+            created_at=1_800_000_000,
+        )
+        files = {file.relative_path: file for file in result.files}
+        manifest = json.loads(files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
+        manifest["model_artifact"]["tensor_manifest"]["tensors"]["actor.static_action_bins"]["shape"] = [99]
+
+        with self.assertRaisesRegex(TrainerArtifactError, "hash"):
+            validate_dreamer_checkpoint_safetensors(files[MODEL_FILENAME].content, manifest)
+
+        payload = bytearray(files[MODEL_FILENAME].content)
+        payload[-1] ^= 1
+        tampered_manifest = json.loads(files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
+        tampered_manifest["model_artifact"]["sha256"] = hashlib.sha256(payload).hexdigest()
+
+        with self.assertRaisesRegex(TrainerArtifactError, "sha256"):
+            validate_dreamer_checkpoint_safetensors(bytes(payload), tampered_manifest)
 
     def test_world_model_train_preview_requires_enough_episodes_for_validation(self) -> None:
         dataset_text, manifest_text = dataset_export_text([training_row(1)])
@@ -509,10 +560,13 @@ def fixed_cadence_sequence(step_count: int = 4) -> dict:
     }
 
 
-def placeholder_metadata(payload: bytes) -> dict:
+def safetensors_metadata(payload: bytes) -> dict:
+    return safetensors_header(payload)["__metadata__"]
+
+
+def safetensors_header(payload: bytes) -> dict:
     header_len = int.from_bytes(payload[:8], "little")
-    header = json.loads(payload[8 : 8 + header_len].decode("utf-8"))
-    return header["__metadata__"]
+    return json.loads(payload[8 : 8 + header_len].decode("utf-8"))
 
 
 def canonical_json(value) -> str:

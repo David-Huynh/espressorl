@@ -11,6 +11,10 @@ MODEL_MANIFEST_FORMAT = "espresso_rl_model_manifest_v1"
 MODEL_MANIFEST_SCHEMA_VERSION = 1
 MODEL_FAMILY_DREAMER_V3 = "dreamer_v3"
 MODEL_ARTIFACT_FORMAT_SAFETENSORS = "safetensors"
+CHECKPOINT_ARTIFACT_FORMAT = "espresso_rl_dreamer_v3_checkpoint_safetensors_v1"
+CHECKPOINT_ARTIFACT_SCHEMA_VERSION = 1
+CHECKPOINT_TENSOR_MANIFEST_FORMAT = "espresso_rl_checkpoint_tensor_manifest_v1"
+CHECKPOINT_TENSOR_MANIFEST_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 1
 ACTION_SCHEMA_VERSION = DREAMER_ACTION_SCHEMA_VERSION
 REWARD_SCHEMA_VERSION = 1
@@ -63,6 +67,9 @@ def validate_model_manifest(
     model_artifact_sha256 = _sha256(artifact.get("sha256"))
     if model_artifact_sha256 is None:
         return _invalid("DreamerV3 model manifest model_artifact.sha256 is invalid.")
+    checkpoint_validation = _validate_checkpoint_artifact_metadata(artifact)
+    if checkpoint_validation is not None:
+        return _invalid(checkpoint_validation)
 
     expected_digest = _sha256(expected_model_sha256)
     if expected_digest is not None and model_artifact_sha256 != expected_digest:
@@ -135,6 +142,45 @@ def _invalid(reason: str) -> ModelManifestValidation:
     return ModelManifestValidation(verified=False, unavailable_reason=reason)
 
 
+def _validate_checkpoint_artifact_metadata(artifact: dict[str, Any]) -> str | None:
+    if "checkpoint_format" not in artifact:
+        return None
+    if artifact.get("checkpoint_format") != CHECKPOINT_ARTIFACT_FORMAT:
+        return "DreamerV3 model manifest checkpoint_format is unsupported."
+    if _int_value(artifact.get("checkpoint_schema_version")) != CHECKPOINT_ARTIFACT_SCHEMA_VERSION:
+        return "DreamerV3 model manifest checkpoint_schema_version is unsupported."
+    tensor_manifest_sha256 = _sha256(artifact.get("tensor_manifest_sha256"))
+    if tensor_manifest_sha256 is None:
+        return "DreamerV3 model manifest tensor_manifest_sha256 is invalid."
+    if _sha256(artifact.get("dreamer_tensor_contract_sha256")) is None:
+        return "DreamerV3 model manifest dreamer_tensor_contract_sha256 is invalid."
+    if _sha256(artifact.get("feature_layout_sha256")) is None:
+        return "DreamerV3 model manifest feature_layout_sha256 is invalid."
+    if _sha256(artifact.get("control_spec_sha256")) is None:
+        return "DreamerV3 model manifest control_spec_sha256 is invalid."
+    tensor_manifest = artifact.get("tensor_manifest")
+    if not isinstance(tensor_manifest, dict):
+        return "DreamerV3 model manifest tensor_manifest is missing."
+    if tensor_manifest.get("format") != CHECKPOINT_TENSOR_MANIFEST_FORMAT:
+        return "DreamerV3 model manifest tensor_manifest format is unsupported."
+    if _int_value(tensor_manifest.get("schema_version")) != CHECKPOINT_TENSOR_MANIFEST_SCHEMA_VERSION:
+        return "DreamerV3 model manifest tensor_manifest schema_version is unsupported."
+    tensor_count = _nonnegative_int(artifact.get("tensor_count"))
+    component_count = _nonnegative_int(artifact.get("component_count"))
+    if tensor_count is None or tensor_count != _nonnegative_int(tensor_manifest.get("tensor_count")):
+        return "DreamerV3 model manifest tensor_count is invalid."
+    if component_count is None or component_count != _nonnegative_int(tensor_manifest.get("component_count")):
+        return "DreamerV3 model manifest component_count is invalid."
+    component_names = artifact.get("component_names")
+    if not isinstance(component_names, list) or component_names != tensor_manifest.get("component_names"):
+        return "DreamerV3 model manifest component_names are invalid."
+    if any(_safe_nonempty_string(name, max_len=80) is None for name in component_names):
+        return "DreamerV3 model manifest component_names are invalid."
+    if not isinstance(tensor_manifest.get("components"), dict) or not isinstance(tensor_manifest.get("tensors"), dict):
+        return "DreamerV3 model manifest tensor_manifest entries are invalid."
+    return None
+
+
 def _sha256(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -159,3 +205,10 @@ def _int_value(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
+
+
+def _nonnegative_int(value: object) -> int | None:
+    parsed = _int_value(value)
+    if parsed is None or parsed < 0:
+        return None
+    return parsed

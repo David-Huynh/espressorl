@@ -147,15 +147,19 @@ def run_dreamer_v3_imagination_preview(
     world_model: DreamerV3VectorWorldModel,
     batch: dict[str, torch.Tensor],
     config: DreamerV3ImaginationConfig,
+    actor: DreamerV3ImaginationActor | None = None,
+    critic: DreamerV3ImaginationCritic | None = None,
 ) -> dict[str, Any]:
     validate_imagination_config(config)
     world_model.eval()
-    actor = DreamerV3ImaginationActor(
-        feature_dim=world_model.feature_dim,
-        dynamic_action_dim=batch["dynamic_actions"].shape[-1],
-        config=config,
-    )
-    critic = DreamerV3ImaginationCritic(feature_dim=world_model.feature_dim, config=config)
+    if actor is None:
+        actor = DreamerV3ImaginationActor(
+            feature_dim=world_model.feature_dim,
+            dynamic_action_dim=batch["dynamic_actions"].shape[-1],
+            config=config,
+        )
+    if critic is None:
+        critic = DreamerV3ImaginationCritic(feature_dim=world_model.feature_dim, config=config)
     observed = world_model.observe(batch, sample=False)
     start_indexes = _last_decision_indexes(batch)
     batch_indexes = torch.arange(batch["observations"].shape[0], device=batch["observations"].device)
