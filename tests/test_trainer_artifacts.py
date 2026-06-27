@@ -259,6 +259,10 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(len(preview["validation_loss_curve"]), 2)
         self.assertIn("loss_dyn", preview["train_loss_curve"][0])
         self.assertIn("loss_rep", preview["validation_loss_curve"][0])
+        self.assertFalse(preview["imagination_preview"]["inference_ready"])
+        self.assertTrue(preview["imagination_preview"]["contract_only"])
+        self.assertEqual(preview["imagination_preview"]["static_logits_shape"], [1, 3, 3, 5])
+        self.assertEqual(preview["imagination_preview"]["lambda_return_shape"], [1, 3])
         self.assertEqual(preview["dataset_split"]["train_source_training_row_ids"], [1, 2, 3])
         self.assertEqual(preview["dataset_split"]["validation_source_training_row_ids"], [4])
         self.assertEqual(preview["dataset_split_sha256"], preview["dataset_split"]["dataset_split_sha256"])
@@ -387,6 +391,9 @@ class TrainerArtifactTests(unittest.TestCase):
             self.assertEqual(config["world_model_preview_batch_size"], 4)
             self.assertEqual(config["world_model_preview_model_preset"], "espresso_debug")
             self.assertEqual(config["world_model_preview_stoch_size"], 4)
+            self.assertEqual(config["world_model_preview_imagination_horizon"], 3)
+            self.assertEqual(config["world_model_preview_imagination_actor_hidden_dim"], 32)
+            self.assertEqual(config["world_model_preview_imagination_critic_hidden_dim"], 32)
 
 
 def dataset_export_text(rows: list[dict]) -> tuple[str, str]:

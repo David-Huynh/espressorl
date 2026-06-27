@@ -78,6 +78,11 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         self.assertIn("loss_rep", first["validation_loss_curve"][0])
         self.assertEqual(first["dataset_split"]["validation_source_training_row_ids"], [3])
         self.assertEqual(len(first["dataset_split_sha256"]), 64)
+        preview = first["imagination_preview"]
+        self.assertFalse(preview["inference_ready"])
+        self.assertTrue(preview["contract_only"])
+        self.assertEqual(preview["dynamic_action_shape"], [1, 3, 7])
+        self.assertEqual(preview["lambda_return_shape"], [1, 3])
 
 
 def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:

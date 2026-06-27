@@ -559,7 +559,11 @@ For a larger offline-loop preview, `world_model_train_preview` deterministically
 splits episodes into train/validation sets, runs a bounded CPU-only
 fixed-cadence recurrent world-model training loop, and records train/validation
 loss curves, dyn/rep KL losses, best epoch, split hash, model-size fields, and
-hyperparameters in `audit_report.json`.
+hyperparameters in `audit_report.json`. It also runs an audit-only DreamerV3
+imagination preview from posterior RSSM starts through the prior, using masked
+actor heads for static recipe deltas and dynamic controls plus a symlog/two-hot
+critic and lambda-return targets. Those actor/critic metrics are contract
+evidence only.
 
 It produces:
 
@@ -575,10 +579,11 @@ runtime verifier will not expose it as an active DreamerV3 model. The
 `world_model_smoke` stage proves that the exported tensors can run through the
 same reference-aligned categorical RSSM path used by the preview trainer and
 records initial/final losses in `audit_report.json`; `world_model_train_preview`
-extends that to deterministic train/validation curves. Neither stage produces a
-useful runtime model artifact. A real offline trainer must replace that
-placeholder with trained tensors and set runtime compatibility only after
-inference is safe. The command has a configurable `--max-dataset-bytes` resource
+extends that to deterministic train/validation curves and an actor/critic
+imagination contract preview. Neither stage produces a useful runtime model
+artifact. A real offline trainer must replace that placeholder with trained
+tensors and set runtime compatibility only after inference is safe. The command
+has a configurable `--max-dataset-bytes` resource
 guard, defaulting to 8 GiB, because this skeleton validates JSONL in-process.
 That guard is not a training policy; real large-scale Dreamer training should
 use streaming or sharded dataset loading so the corpus can grow beyond one

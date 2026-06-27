@@ -231,6 +231,10 @@ class DreamerV3VectorWorldModel(nn.Module):
         self.continuation_decoder = _mlp(feature_dim, config.hidden_dim, 1)
         self.register_buffer("reward_bins", symexp_twohot_bins(config.reward_bins), persistent=False)
 
+    @property
+    def feature_dim(self) -> int:
+        return self.config.deter_dim + self.config.stoch_dim
+
     def initial_state(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         deter = torch.zeros(batch_size, self.config.deter_dim, device=device)
         stoch = torch.zeros(batch_size, self.config.stoch_size, self.config.class_size, device=device)
@@ -297,6 +301,37 @@ class DreamerV3VectorWorldModel(nn.Module):
             "posterior_logits": torch.stack(posterior_logits, dim=1),
         }
 
+    def imagine_step(
+        self,
+        deter: torch.Tensor,
+        stoch: torch.Tensor,
+        behavior: torch.Tensor,
+        *,
+        sample: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        action = _squash_action(behavior)
+        action_embed = self.behavior_encoder(action)
+        next_deter = self.gru(torch.cat([stoch.flatten(start_dim=-2), action_embed], dim=-1), deter)
+        prior = self.prior(next_deter).reshape(
+            next_deter.shape[0],
+            self.config.stoch_size,
+            self.config.class_size,
+        )
+        next_stoch = straight_through_onehot(prior, unimix=self.config.unimix, sample=sample)
+        features = torch.cat([next_deter, next_stoch.flatten(start_dim=-2)], dim=-1)
+        return {
+            "deter": next_deter,
+            "stoch": next_stoch,
+            "features": features,
+            "prior_logits": prior,
+        }
+
+    def reward_prediction(self, features: torch.Tensor) -> torch.Tensor:
+        return twohot_prediction(self.reward_decoder(features), self.reward_bins)
+
+    def continuation_probability(self, features: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(self.continuation_decoder(features).squeeze(-1))
+
     def losses(self, batch: dict[str, torch.Tensor], *, sample: bool = True) -> dict[str, torch.Tensor]:
         observed = self.observe(batch, sample=sample)
         features = observed["features"]
@@ -353,15 +388,36 @@ def _mlp(input_dim: int, hidden_dim: int, output_dim: int) -> nn.Sequential:
 
 
 def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    return behavior_tensor_from_parts(
+        observed_profile_targets=batch["observed_profile_targets"],
+        observed_profile_target_mask=batch["observed_profile_target_mask"],
+        dynamic_actions=batch["dynamic_actions"],
+        dynamic_action_mask=batch["dynamic_action_mask"],
+        control_action_mask=batch["control_action_mask"],
+        constraints=batch["constraints"],
+        decision_step_mask=batch["decision_step_mask"],
+    )
+
+
+def behavior_tensor_from_parts(
+    *,
+    observed_profile_targets: torch.Tensor,
+    observed_profile_target_mask: torch.Tensor,
+    dynamic_actions: torch.Tensor,
+    dynamic_action_mask: torch.Tensor,
+    control_action_mask: torch.Tensor,
+    constraints: torch.Tensor,
+    decision_step_mask: torch.Tensor,
+) -> torch.Tensor:
     return torch.cat(
         [
-            batch["observed_profile_targets"],
-            batch["observed_profile_target_mask"],
-            batch["dynamic_actions"],
-            batch["dynamic_action_mask"],
-            batch["control_action_mask"],
-            batch["constraints"],
-            batch["decision_step_mask"].unsqueeze(-1),
+            observed_profile_targets,
+            observed_profile_target_mask,
+            dynamic_actions,
+            dynamic_action_mask,
+            control_action_mask,
+            constraints,
+            decision_step_mask.unsqueeze(-1),
         ],
         dim=-1,
     )

@@ -380,6 +380,18 @@ def _world_model_train_preview_metrics(
                 ),
                 validation_split=float(training_config["world_model_preview_validation_split"]),
                 early_stop_patience=int(training_config["world_model_preview_early_stop_patience"]),
+                imagination_horizon=int(training_config["world_model_preview_imagination_horizon"]),
+                imagination_actor_hidden_dim=int(
+                    training_config["world_model_preview_imagination_actor_hidden_dim"]
+                ),
+                imagination_critic_hidden_dim=int(
+                    training_config["world_model_preview_imagination_critic_hidden_dim"]
+                ),
+                imagination_actor_entropy_scale=float(
+                    training_config["world_model_preview_imagination_actor_entropy_scale"]
+                ),
+                imagination_lambda_return=float(training_config["world_model_preview_imagination_lambda_return"]),
+                imagination_discount=float(training_config["world_model_preview_imagination_discount"]),
             ),
             dataset_split=split["summary"],
         ).to_dict()

@@ -44,6 +44,12 @@ _TRAINING_CONFIG_FIELDS = frozenset(
         "world_model_preview_gradient_steps_per_epoch",
         "world_model_preview_validation_split",
         "world_model_preview_early_stop_patience",
+        "world_model_preview_imagination_horizon",
+        "world_model_preview_imagination_actor_hidden_dim",
+        "world_model_preview_imagination_critic_hidden_dim",
+        "world_model_preview_imagination_actor_entropy_scale",
+        "world_model_preview_imagination_lambda_return",
+        "world_model_preview_imagination_discount",
         "seed",
         "notes",
     }
@@ -119,6 +125,12 @@ def default_training_config(
                 "world_model_preview_gradient_steps_per_epoch": 1,
                 "world_model_preview_validation_split": 0.25,
                 "world_model_preview_early_stop_patience": 2,
+                "world_model_preview_imagination_horizon": 3,
+                "world_model_preview_imagination_actor_hidden_dim": 32,
+                "world_model_preview_imagination_critic_hidden_dim": 32,
+                "world_model_preview_imagination_actor_entropy_scale": 0.0003,
+                "world_model_preview_imagination_lambda_return": 0.95,
+                "world_model_preview_imagination_discount": 0.997,
             }
         )
     errors = validate_training_config(config)
@@ -144,6 +156,12 @@ def _validate_preview_config(config: dict[str, Any], artifact_stage: object, err
         "world_model_preview_gradient_steps_per_epoch",
         "world_model_preview_validation_split",
         "world_model_preview_early_stop_patience",
+        "world_model_preview_imagination_horizon",
+        "world_model_preview_imagination_actor_hidden_dim",
+        "world_model_preview_imagination_critic_hidden_dim",
+        "world_model_preview_imagination_actor_entropy_scale",
+        "world_model_preview_imagination_lambda_return",
+        "world_model_preview_imagination_discount",
     }
     has_preview_fields = any(key in config for key in preview_keys)
     if artifact_stage == TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
@@ -184,6 +202,48 @@ def _validate_preview_config(config: dict[str, Any], artifact_stage: object, err
         "world_model_preview_early_stop_patience",
         1,
         20,
+        errors,
+    )
+    _require_int_range(
+        config.get("world_model_preview_imagination_horizon"),
+        "world_model_preview_imagination_horizon",
+        1,
+        32,
+        errors,
+    )
+    _require_int_range(
+        config.get("world_model_preview_imagination_actor_hidden_dim"),
+        "world_model_preview_imagination_actor_hidden_dim",
+        8,
+        2048,
+        errors,
+    )
+    _require_int_range(
+        config.get("world_model_preview_imagination_critic_hidden_dim"),
+        "world_model_preview_imagination_critic_hidden_dim",
+        8,
+        2048,
+        errors,
+    )
+    _require_float_range(
+        config.get("world_model_preview_imagination_actor_entropy_scale"),
+        "world_model_preview_imagination_actor_entropy_scale",
+        0.0,
+        1.0,
+        errors,
+    )
+    _require_float_range(
+        config.get("world_model_preview_imagination_lambda_return"),
+        "world_model_preview_imagination_lambda_return",
+        0.0,
+        1.0,
+        errors,
+    )
+    _require_float_range(
+        config.get("world_model_preview_imagination_discount"),
+        "world_model_preview_imagination_discount",
+        0.0,
+        1.0,
         errors,
     )
 

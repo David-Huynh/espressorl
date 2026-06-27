@@ -9,6 +9,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from espresso_rl.dreamer.imagination import DreamerV3ImaginationConfig, run_dreamer_v3_imagination_preview
 from espresso_rl.dreamer.reference_world_model import (
     DreamerV3VectorWorldModel,
     DreamerV3WorldModelConfig,
@@ -54,6 +55,12 @@ class WorldModelTrainPreviewConfig:
     model: DreamerV3WorldModelConfig
     validation_split: float
     early_stop_patience: int
+    imagination_horizon: int = 3
+    imagination_actor_hidden_dim: int = 32
+    imagination_critic_hidden_dim: int = 32
+    imagination_actor_entropy_scale: float = 0.0003
+    imagination_lambda_return: float = 0.95
+    imagination_discount: float = 0.997
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,7 @@ class WorldModelTrainPreviewResult:
     best_epoch: int
     epochs_completed: int
     early_stopped: bool
+    imagination_preview: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +89,12 @@ class WorldModelTrainPreviewResult:
             "model_config": self.config.model.to_dict(),
             "validation_split": self.config.validation_split,
             "early_stop_patience": self.config.early_stop_patience,
+            "imagination_horizon": self.config.imagination_horizon,
+            "imagination_actor_hidden_dim": self.config.imagination_actor_hidden_dim,
+            "imagination_critic_hidden_dim": self.config.imagination_critic_hidden_dim,
+            "imagination_actor_entropy_scale": self.config.imagination_actor_entropy_scale,
+            "imagination_lambda_return": self.config.imagination_lambda_return,
+            "imagination_discount": self.config.imagination_discount,
             "best_epoch": self.best_epoch,
             "early_stopped": self.early_stopped,
             "dataset_split": self.dataset_split,
@@ -89,6 +103,7 @@ class WorldModelTrainPreviewResult:
             ),
             "train_loss_curve": list(self.train_loss_curve),
             "validation_loss_curve": list(self.validation_loss_curve),
+            "imagination_preview": self.imagination_preview,
         }
 
 
@@ -192,6 +207,19 @@ def run_fixed_cadence_world_model_train_preview(
                 if epochs_without_improvement >= config.early_stop_patience:
                     early_stopped = True
                     break
+        imagination_preview = run_dreamer_v3_imagination_preview(
+            world_model=model,
+            batch=validation_tensors,
+            config=DreamerV3ImaginationConfig(
+                horizon=config.imagination_horizon,
+                actor_hidden_dim=config.imagination_actor_hidden_dim,
+                critic_hidden_dim=config.imagination_critic_hidden_dim,
+                value_bins=config.model.reward_bins,
+                discount=config.imagination_discount,
+                lambda_return=config.imagination_lambda_return,
+                actor_entropy_scale=config.imagination_actor_entropy_scale,
+            ),
+        )
     finally:
         torch.use_deterministic_algorithms(old_deterministic)
         torch.set_num_threads(old_threads)
@@ -204,6 +232,7 @@ def run_fixed_cadence_world_model_train_preview(
         best_epoch=best_epoch,
         epochs_completed=len(train_curve),
         early_stopped=early_stopped,
+        imagination_preview=imagination_preview,
     )
 
 
@@ -288,6 +317,12 @@ def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
         or not 1 <= config.early_stop_patience <= 20
     ):
         raise FixedCadenceWorldModelTrainingError("world model preview early_stop_patience must be 1..20")
+    _range_int(config.imagination_horizon, "imagination_horizon", 1, 32)
+    _range_int(config.imagination_actor_hidden_dim, "imagination_actor_hidden_dim", 8, 2048)
+    _range_int(config.imagination_critic_hidden_dim, "imagination_critic_hidden_dim", 8, 2048)
+    _range_float(config.imagination_actor_entropy_scale, "imagination_actor_entropy_scale", 0.0, 1.0)
+    _range_float(config.imagination_lambda_return, "imagination_lambda_return", 0.0, 1.0)
+    _range_float(config.imagination_discount, "imagination_discount", 0.0, 1.0)
     _validate_reference_model_config(config.model)
     _validate_learning_rate(config.learning_rate, "world model preview")
 
