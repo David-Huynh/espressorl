@@ -78,6 +78,7 @@ _DREAMER_TENSOR_KEYS = (
     "context_static",
     "context_terminal",
     "context_time",
+    "context_trajectory_embedding",
     "context_mask",
     "context_source_training_row_ids",
     "episode_weights",

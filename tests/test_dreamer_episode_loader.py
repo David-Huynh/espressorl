@@ -6,6 +6,8 @@ import unittest
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
 from espresso_rl.domain.dreamer_episodes import DREAMER_EPISODE_FORMAT, validate_dreamer_episode
 from espresso_rl.dreamer.dataset import (
+    DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
+    DREAMER_CONTEXT_WINDOW_SIZE,
     DREAMER_DYNAMIC_ACTION_FEATURES,
     DREAMER_OBSERVATION_FEATURES,
     DREAMER_OBSERVED_TARGET_FEATURES,
@@ -213,16 +215,24 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(tuple(batch["control_action_mask"].shape), (2, 4, len(DREAMER_DYNAMIC_ACTION_FEATURES)))
         self.assertEqual(tuple(batch["decision_step_mask"].shape), (2, 4))
         self.assertEqual(tuple(batch["static_context"].shape), (2, len(DREAMER_STATIC_CONTEXT_FEATURES)))
-        self.assertEqual(tuple(batch["context_static"].shape), (2, 8, len(DREAMER_STATIC_CONTEXT_FEATURES)))
-        self.assertEqual(tuple(batch["context_terminal"].shape), (2, 8, len(DREAMER_TERMINAL_FEATURES)))
-        self.assertEqual(tuple(batch["context_time"].shape), (2, 8, 1))
-        self.assertEqual(tuple(batch["context_mask"].shape), (2, 8))
-        self.assertEqual(tuple(batch["context_source_training_row_ids"].shape), (2, 8))
+        self.assertEqual(tuple(batch["context_static"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE, len(DREAMER_STATIC_CONTEXT_FEATURES)))
+        self.assertEqual(tuple(batch["context_terminal"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE, len(DREAMER_TERMINAL_FEATURES)))
+        self.assertEqual(tuple(batch["context_time"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE, 1))
+        self.assertEqual(
+            tuple(batch["context_trajectory_embedding"].shape),
+            (2, DREAMER_CONTEXT_WINDOW_SIZE, len(DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES)),
+        )
+        self.assertEqual(tuple(batch["context_mask"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE))
+        self.assertEqual(tuple(batch["context_source_training_row_ids"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE))
         self.assertEqual(batch["feature_names"]["observations"], DREAMER_OBSERVATION_FEATURES)
         self.assertEqual(batch["feature_names"]["observed_profile_target_mask"], DREAMER_OBSERVED_TARGET_FEATURES)
         self.assertEqual(batch["feature_names"]["control_action_mask"], DREAMER_DYNAMIC_ACTION_FEATURES)
         self.assertEqual(batch["feature_names"]["context_static"], DREAMER_STATIC_CONTEXT_FEATURES)
         self.assertEqual(batch["feature_names"]["context_terminal"], DREAMER_TERMINAL_FEATURES)
+        self.assertEqual(
+            batch["feature_names"]["context_trajectory_embedding"],
+            DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
+        )
 
         pressure_index = DREAMER_OBSERVATION_FEATURES.index("pressure_bar")
         weight_index = DREAMER_OBSERVATION_FEATURES.index("weight_g")
@@ -285,6 +295,20 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         grind_observed_index = DREAMER_STATIC_CONTEXT_FEATURES.index("grind_observed")
         self.assertEqual(batch["context_static"][1, 0, grind_observed_index].item(), 0.0)
         self.assertEqual(batch["context_static"][2, 0, grind_observed_index].item(), 1.0)
+        sample_count_index = DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES.index("trajectory_sample_count")
+        duration_index = DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES.index("trajectory_duration_seconds")
+        pressure_mean_index = DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES.index("observation_pressure_bar_mean")
+        pressure_last_index = DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES.index("observation_pressure_bar_last")
+        pressure_delta_index = DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES.index("observation_pressure_bar_delta")
+        target_pressure_mask_index = DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES.index(
+            "target_mask_pressure_target_bar_mean"
+        )
+        self.assertEqual(batch["context_trajectory_embedding"][1, 0, sample_count_index].item(), 4.0)
+        self.assertEqual(batch["context_trajectory_embedding"][1, 0, duration_index].item(), 1.0)
+        self.assertEqual(batch["context_trajectory_embedding"][1, 0, pressure_mean_index].item(), 2.5)
+        self.assertEqual(batch["context_trajectory_embedding"][1, 0, pressure_last_index].item(), 4.0)
+        self.assertEqual(batch["context_trajectory_embedding"][1, 0, pressure_delta_index].item(), 3.0)
+        self.assertEqual(batch["context_trajectory_embedding"][1, 0, target_pressure_mask_index].item(), 1.0)
 
     def test_episode_batch_encodes_temperature_when_present(self) -> None:
         episode = build_dreamer_episodes_from_training_rows(

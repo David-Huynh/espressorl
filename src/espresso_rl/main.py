@@ -86,6 +86,7 @@ from espresso_rl.domain.events import (
 from espresso_rl.domain.models import SafetyBounds, UploadQueueStatus
 from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW
+from espresso_rl.dreamer.dataset import DREAMER_CONTEXT_WINDOW_SIZE
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import LocalDataRepository, RecommendationRepository, ShotRepository, UploadQueueRepository
@@ -1167,7 +1168,7 @@ def local_context_transitions_for_shadow_replay(
     shot,
     *,
     shot_repo: ShotRepository | None,
-    limit: int = 8,
+    limit: int = DREAMER_CONTEXT_WINDOW_SIZE,
 ) -> list[dict]:
     if shot_repo is None or not shot.bean_context_id or not shot.grinder_context_id:
         return []

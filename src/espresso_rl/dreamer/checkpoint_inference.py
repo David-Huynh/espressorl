@@ -29,6 +29,7 @@ from espresso_rl.dreamer.reference_world_model import (
 )
 from espresso_rl.dreamer.dataset import (
     DREAMER_CONTEXT_WINDOW_SIZE,
+    DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
     DREAMER_TERMINAL_FEATURES,
 )
 
@@ -238,6 +239,7 @@ def dreamer_inference_probe_sha256(
             "context.static": batch["context_static"],
             "context.terminal": batch["context_terminal"],
             "context.time": batch["context_time"],
+            "context.trajectory_embedding": batch["context_trajectory_embedding"],
             "critic.logits": critic(features),
             "critic.value": critic.value(features),
             "probe.imagine_features": imagined["features"],
@@ -285,6 +287,7 @@ def dreamer_batch_inference_sha256(
             "context_static",
             "context_terminal",
             "context_time",
+            "context_trajectory_embedding",
         ):
             if key in batch:
                 outputs[f"context.{key}"] = batch[key].to(dtype=torch.float32)
@@ -364,6 +367,12 @@ def _probe_batch(architecture: DreamerCheckpointArchitecture) -> dict[str, torch
             scale=0.0009765625,
         ),
         "context_time": _sequence_tensor(batch_size, DREAMER_CONTEXT_WINDOW_SIZE, 1, scale=0.25),
+        "context_trajectory_embedding": _sequence_tensor(
+            batch_size,
+            DREAMER_CONTEXT_WINDOW_SIZE,
+            len(DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES),
+            scale=0.00048828125,
+        ),
         "context_mask": _probe_context_mask(batch_size),
         "context_source_training_row_ids": torch.arange(
             1,

@@ -360,6 +360,7 @@ def _cpu_float_batch(batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         "context_static",
         "context_terminal",
         "context_time",
+        "context_trajectory_embedding",
         "context_mask",
         "context_source_training_row_ids",
     ):

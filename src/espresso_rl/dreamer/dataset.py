@@ -93,8 +93,32 @@ DREAMER_TERMINAL_FEATURES = (
     "profile_temperature_c",
     "final_phase_temperature_c",
 )
-DREAMER_CONTEXT_WINDOW_SIZE = 8
+DREAMER_CONTEXT_WINDOW_SIZE = 16
 DREAMER_CONTEXT_TIME_FEATURES = ("seconds_since_context_shot",)
+DREAMER_CONTEXT_TRAJECTORY_STATISTICS = (
+    "mean",
+    "std",
+    "min",
+    "max",
+    "first",
+    "last",
+    "delta",
+)
+DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES = (
+    "trajectory_sample_count",
+    "trajectory_duration_seconds",
+    *(
+        f"observation_{feature}_{statistic}"
+        for feature in DREAMER_OBSERVATION_FEATURES
+        for statistic in DREAMER_CONTEXT_TRAJECTORY_STATISTICS
+    ),
+    *(
+        f"target_{feature}_{statistic}"
+        for feature in DREAMER_OBSERVED_TARGET_FEATURES
+        for statistic in DREAMER_CONTEXT_TRAJECTORY_STATISTICS
+    ),
+    *(f"target_mask_{feature}_mean" for feature in DREAMER_OBSERVED_TARGET_FEATURES),
+)
 _TASTE_LEVEL_VALUES = {
     None: 0.0,
     "none": 0.0,
@@ -257,6 +281,10 @@ def build_dreamer_episode_batch(
     context_static = np.zeros((batch_size, context_window_size, len(DREAMER_STATIC_CONTEXT_FEATURES)), dtype=np.float32)
     context_terminal = np.zeros((batch_size, context_window_size, len(DREAMER_TERMINAL_FEATURES)), dtype=np.float32)
     context_time = np.zeros((batch_size, context_window_size, len(DREAMER_CONTEXT_TIME_FEATURES)), dtype=np.float32)
+    context_trajectory_embedding = np.zeros(
+        (batch_size, context_window_size, len(DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES)),
+        dtype=np.float32,
+    )
     context_mask = np.zeros((batch_size, context_window_size), dtype=np.float32)
     context_source_training_row_ids = np.zeros((batch_size, context_window_size), dtype=np.int64)
     episode_weights = np.zeros(batch_size, dtype=np.float32)
@@ -280,6 +308,7 @@ def build_dreamer_episode_batch(
                 0.0,
                 float(episode["terminal"]["timestamp"]) - float(context_episode["terminal"]["timestamp"]),
             )
+            context_trajectory_embedding[batch_index, context_index] = _encode_trajectory_embedding(context_episode)
             context_mask[batch_index, context_index] = 1.0
             context_source_training_row_ids[batch_index, context_index] = int(
                 context_episode["source_training_row_id"]
@@ -347,6 +376,11 @@ def build_dreamer_episode_batch(
         "context_static": torch.tensor(context_static, dtype=torch.float32, device=target_device),
         "context_terminal": torch.tensor(context_terminal, dtype=torch.float32, device=target_device),
         "context_time": torch.tensor(context_time, dtype=torch.float32, device=target_device),
+        "context_trajectory_embedding": torch.tensor(
+            context_trajectory_embedding,
+            dtype=torch.float32,
+            device=target_device,
+        ),
         "context_mask": torch.tensor(context_mask, dtype=torch.float32, device=target_device),
         "context_source_training_row_ids": torch.tensor(
             context_source_training_row_ids,
@@ -370,6 +404,7 @@ def build_dreamer_episode_batch(
             "context_static": DREAMER_STATIC_CONTEXT_FEATURES,
             "context_terminal": DREAMER_TERMINAL_FEATURES,
             "context_time": DREAMER_CONTEXT_TIME_FEATURES,
+            "context_trajectory_embedding": DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
         },
     }
 
@@ -486,6 +521,58 @@ def _encode_terminal(terminal: dict[str, Any]) -> np.ndarray:
         value = terminal.get(feature)
         encoded[_feature_index(DREAMER_TERMINAL_FEATURES, feature)] = _bool_or_number(value)
     return encoded
+
+
+def _encode_trajectory_embedding(episode: dict[str, Any]) -> np.ndarray:
+    steps = episode["steps"]
+    embedding = np.zeros(len(DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES), dtype=np.float32)
+    if not steps:
+        return embedding
+    observation_matrix = np.asarray(
+        [_encode_object(step["observation"], DREAMER_OBSERVATION_FEATURES) for step in steps],
+        dtype=np.float32,
+    )
+    target_matrix = np.asarray(
+        [
+            _encode_object(step["observed_profile_target"], DREAMER_OBSERVED_TARGET_FEATURES)
+            for step in steps
+        ],
+        dtype=np.float32,
+    )
+    target_mask_matrix = np.asarray(
+        [
+            _encode_observed_target_mask(step["observed_profile_target"])
+            for step in steps
+        ],
+        dtype=np.float32,
+    )
+    values = [
+        float(len(steps)),
+        float(len(steps) * int(episode["sample_interval_ms"])) / 1000.0,
+        *_matrix_statistics(observation_matrix),
+        *_matrix_statistics(target_matrix),
+        *target_mask_matrix.mean(axis=0).tolist(),
+    ]
+    embedding[:] = np.asarray(values, dtype=np.float32)
+    return embedding
+
+
+def _matrix_statistics(matrix: np.ndarray) -> list[float]:
+    values: list[float] = []
+    for feature_index in range(matrix.shape[1]):
+        column = matrix[:, feature_index]
+        values.extend(
+            [
+                float(column.mean()),
+                float(column.std()),
+                float(column.min()),
+                float(column.max()),
+                float(column[0]),
+                float(column[-1]),
+                float(column[-1] - column[0]),
+            ]
+        )
+    return values
 
 
 def _encode_object(value: dict[str, Any], features: tuple[str, ...]) -> np.ndarray:
