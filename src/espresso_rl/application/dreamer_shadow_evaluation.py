@@ -25,6 +25,7 @@ from espresso_rl.domain.shadow_evaluation import (
 )
 from espresso_rl.domain.training import validate_training_transition
 from espresso_rl.dreamer.dataset import (
+    DREAMER_CONTEXT_WINDOW_SIZE,
     DreamerEpisodeDatasetError,
     build_dreamer_episode_batch,
     build_dreamer_episodes_from_training_rows,
@@ -114,6 +115,7 @@ class DreamerShadowEvaluationService:
         transition: dict[str, Any],
         *,
         bo_recommendation: Recommendation | None = None,
+        context_transitions: list[dict[str, Any]] | None = None,
     ) -> DreamerShadowEvaluationResult:
         errors = validate_training_transition(transition)
         if errors:
@@ -163,8 +165,15 @@ class DreamerShadowEvaluationService:
                 created=False,
             )
 
-        batch = self._episode_batch(transition)
-        dreamer_proposal = self._dreamer_proposal(batch, current_recipe=current_recipe)
+        batch, current_episode_index = self._episode_batch(
+            transition,
+            context_transitions=context_transitions or [],
+        )
+        dreamer_proposal = self._dreamer_proposal(
+            batch,
+            current_episode_index=current_episode_index,
+            current_recipe=current_recipe,
+        )
         bo_proposal = self._bo_proposal(
             bo_recommendation,
             current_recipe=current_recipe,
@@ -203,9 +212,15 @@ class DreamerShadowEvaluationService:
             resolved_previous=resolved_previous,
         )
 
-    def _episode_batch(self, transition: dict[str, Any]) -> dict[str, Any]:
+    def _episode_batch(
+        self,
+        transition: dict[str, Any],
+        *,
+        context_transitions: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], int]:
         try:
-            episodes = build_dreamer_episodes_from_training_rows([transition])
+            replay_rows = _context_replay_rows(transition, context_transitions)
+            episodes = build_dreamer_episodes_from_training_rows(replay_rows)
             architecture = self._session.checkpoint.architecture
             if architecture is None:
                 raise DreamerShadowEvaluationError("checkpoint runtime architecture is missing")
@@ -223,22 +238,27 @@ class DreamerShadowEvaluationService:
             or batch["dynamic_actions"].shape[-1] != expected.dynamic_action_dim
         ):
             raise DreamerShadowEvaluationError("shadow episode feature layout is incompatible with checkpoint")
-        return batch
+        source_ids = [int(item) for item in batch["source_training_row_ids"].tolist()]
+        current_row_id = int(transition["training_row_id"])
+        if current_row_id not in source_ids:
+            raise DreamerShadowEvaluationError("shadow context replay omitted the current transition")
+        return batch, source_ids.index(current_row_id)
 
     @torch.no_grad()
     def _dreamer_proposal(
         self,
         batch: dict[str, Any],
         *,
+        current_episode_index: int,
         current_recipe: Recipe,
     ) -> ShadowRecipeProposal:
         models = self._session.models
         observed = models.world_model.observe(batch, sample=False)
-        valid_index = int(batch["step_mask"][0].sum().item()) - 1
+        valid_index = int(batch["step_mask"][current_episode_index].sum().item()) - 1
         if valid_index < 0:
             raise DreamerShadowEvaluationError("shadow episode contains no valid observation steps")
-        features = observed["features"][:, valid_index]
-        control_mask = batch["control_action_mask"][:, valid_index]
+        features = observed["features"][current_episode_index : current_episode_index + 1, valid_index]
+        control_mask = batch["control_action_mask"][current_episode_index : current_episode_index + 1, valid_index]
         actor_output = models.actor(features, control_mask)
         static_actions = actor_output["static_actions"][0].detach().cpu()
         static_logits = actor_output["static_logits"][0].detach().cpu()
@@ -380,6 +400,53 @@ def _proposal(
         confidence=max(0.0, min(1.0, confidence)),
         safety_valid=not safety_errors,
         safety_errors=safety_errors,
+    )
+
+
+def _context_replay_rows(
+    transition: dict[str, Any],
+    context_transitions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not context_transitions:
+        return [transition]
+    current_context = _transition_context_key(transition)
+    current_row_id = int(transition["training_row_id"])
+    current_timestamp = float(transition["observation"]["timestamp"])
+    history: list[dict[str, Any]] = []
+    seen_row_ids: set[int] = {current_row_id}
+    seen_shot_ids: set[str] = {str(transition["observation"]["shot_id"])}
+    for candidate in context_transitions:
+        errors = validate_training_transition(candidate)
+        if errors:
+            raise DreamerShadowEvaluationError(
+                f"shadow context transition is invalid: {'; '.join(errors[:10])}"
+            )
+        row_id = int(candidate["training_row_id"])
+        shot_id = str(candidate["observation"]["shot_id"])
+        if row_id in seen_row_ids or shot_id in seen_shot_ids:
+            raise DreamerShadowEvaluationError("shadow context replay contains duplicate shots")
+        if _transition_context_key(candidate) != current_context:
+            raise DreamerShadowEvaluationError("shadow context replay mixes bean or grinder contexts")
+        if float(candidate["observation"]["timestamp"]) >= current_timestamp:
+            raise DreamerShadowEvaluationError("shadow context replay contains stale or future context")
+        seen_row_ids.add(row_id)
+        seen_shot_ids.add(shot_id)
+        history.append(candidate)
+    history = sorted(
+        history,
+        key=lambda row: (float(row["observation"]["timestamp"]), int(row["training_row_id"])),
+    )
+    return [*history[-DREAMER_CONTEXT_WINDOW_SIZE:], transition]
+
+
+def _transition_context_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
+    source = row["source"]
+    context = row["context"]
+    return (
+        _required_context(source.get("install_id"), "install_id"),
+        _required_context(context.get("machine_id"), "machine_id"),
+        _required_context(context.get("bean_context_id"), "bean_context_id"),
+        _required_context(context.get("grinder_context_id"), "grinder_context_id"),
     )
 
 

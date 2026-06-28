@@ -213,6 +213,7 @@ def main() -> None:
             shadow_evaluation_service,
             shot=shot,
             recommendation=recommendation,
+            shot_repo=shot_repo,
         )
         if result is not None:
             try_build_shadow_quality_report(shadow_quality_service, result.evaluation)
@@ -1130,6 +1131,7 @@ def try_record_shadow_evaluation(
     *,
     shot,
     recommendation,
+    shot_repo: ShotRepository | None = None,
 ):
     if shadow_service is None:
         return None
@@ -1137,9 +1139,14 @@ def try_record_shadow_evaluation(
         transition = local_training_transition_from_shot(shot)
         if transition is None:
             return None
+        context_transitions = local_context_transitions_for_shadow_replay(
+            shot,
+            shot_repo=shot_repo,
+        )
         result = shadow_service.evaluate_transition(
             transition,
             bo_recommendation=recommendation,
+            context_transitions=context_transitions,
         )
     except DreamerShadowEvaluationError as exc:
         logger.warning("DreamerV3 shadow evaluation skipped for shot %s: %s", shot.shot_id, exc)
@@ -1154,6 +1161,31 @@ def try_record_shadow_evaluation(
         result.evaluation.dreamer_proposal.safety_valid,
     )
     return result
+
+
+def local_context_transitions_for_shadow_replay(
+    shot,
+    *,
+    shot_repo: ShotRepository | None,
+    limit: int = 8,
+) -> list[dict]:
+    if shot_repo is None or not shot.bean_context_id or not shot.grinder_context_id:
+        return []
+    recent = shot_repo.list_recent(
+        shot.install_id,
+        shot.machine_id,
+        bean_context_id=shot.bean_context_id,
+        grinder_context_id=shot.grinder_context_id,
+        limit=limit + 1,
+    )
+    context_rows = []
+    for candidate in sorted(recent, key=lambda item: (item.timestamp, item.shot_id)):
+        if candidate.shot_id == shot.shot_id or candidate.timestamp >= shot.timestamp:
+            continue
+        transition = local_training_transition_from_shot(candidate)
+        if transition is not None:
+            context_rows.append(transition)
+    return context_rows[-limit:]
 
 
 def try_build_shadow_quality_report(

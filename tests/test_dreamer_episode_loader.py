@@ -213,9 +213,16 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(tuple(batch["control_action_mask"].shape), (2, 4, len(DREAMER_DYNAMIC_ACTION_FEATURES)))
         self.assertEqual(tuple(batch["decision_step_mask"].shape), (2, 4))
         self.assertEqual(tuple(batch["static_context"].shape), (2, len(DREAMER_STATIC_CONTEXT_FEATURES)))
+        self.assertEqual(tuple(batch["context_static"].shape), (2, 8, len(DREAMER_STATIC_CONTEXT_FEATURES)))
+        self.assertEqual(tuple(batch["context_terminal"].shape), (2, 8, len(DREAMER_TERMINAL_FEATURES)))
+        self.assertEqual(tuple(batch["context_time"].shape), (2, 8, 1))
+        self.assertEqual(tuple(batch["context_mask"].shape), (2, 8))
+        self.assertEqual(tuple(batch["context_source_training_row_ids"].shape), (2, 8))
         self.assertEqual(batch["feature_names"]["observations"], DREAMER_OBSERVATION_FEATURES)
         self.assertEqual(batch["feature_names"]["observed_profile_target_mask"], DREAMER_OBSERVED_TARGET_FEATURES)
         self.assertEqual(batch["feature_names"]["control_action_mask"], DREAMER_DYNAMIC_ACTION_FEATURES)
+        self.assertEqual(batch["feature_names"]["context_static"], DREAMER_STATIC_CONTEXT_FEATURES)
+        self.assertEqual(batch["feature_names"]["context_terminal"], DREAMER_TERMINAL_FEATURES)
 
         pressure_index = DREAMER_OBSERVATION_FEATURES.index("pressure_bar")
         weight_index = DREAMER_OBSERVATION_FEATURES.index("weight_g")
@@ -249,6 +256,35 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(batch["control_action_mask"][0].sum().item(), 0.0)
         self.assertEqual(batch["control_spec"]["decision_interval_ms"], 1000)
         self.assertAlmostEqual(batch["episode_weights"][0].item(), 0.2, places=6)
+        self.assertEqual(batch["context_mask"][0].sum().item(), 0.0)
+        self.assertEqual(batch["context_source_training_row_ids"][1, 0].item(), 1)
+        self.assertEqual(batch["context_mask"][1, 0].item(), 1.0)
+        self.assertEqual(batch["context_time"][1, 0, 0].item(), 1.0)
+
+    def test_episode_batch_context_window_is_exact_context_bounded_and_chronological(self) -> None:
+        episodes = build_dreamer_episodes_from_training_rows(
+            [
+                training_row(
+                    1,
+                    timestamp=1_800_000_001,
+                    action_overrides={"observed": {"grind": False, "dose": True, "target_yield": True}},
+                ),
+                training_row(2, bean_context_id="bean_other", timestamp=1_800_000_002),
+                training_row(3, grinder_context_id="grinder_other", timestamp=1_800_000_003),
+                training_row(4, timestamp=1_800_000_004),
+                training_row(5, timestamp=1_800_000_005),
+            ]
+        )
+
+        batch = build_dreamer_episode_batch(episodes, context_window_size=1)
+
+        self.assertEqual(tuple(batch["source_training_row_ids"].tolist()), (1, 4, 5, 3, 2))
+        self.assertEqual(batch["context_window_size"], 1)
+        self.assertEqual(batch["context_mask"][:, 0].tolist(), [0.0, 1.0, 1.0, 0.0, 0.0])
+        self.assertEqual(batch["context_source_training_row_ids"][:, 0].tolist(), [0, 1, 4, 0, 0])
+        grind_observed_index = DREAMER_STATIC_CONTEXT_FEATURES.index("grind_observed")
+        self.assertEqual(batch["context_static"][1, 0, grind_observed_index].item(), 0.0)
+        self.assertEqual(batch["context_static"][2, 0, grind_observed_index].item(), 1.0)
 
     def test_episode_batch_encodes_temperature_when_present(self) -> None:
         episode = build_dreamer_episodes_from_training_rows(

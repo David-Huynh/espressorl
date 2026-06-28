@@ -27,6 +27,10 @@ from espresso_rl.dreamer.reference_world_model import (
     DreamerV3WorldModelConfig,
     behavior_tensor_from_parts,
 )
+from espresso_rl.dreamer.dataset import (
+    DREAMER_CONTEXT_WINDOW_SIZE,
+    DREAMER_TERMINAL_FEATURES,
+)
 
 _COMPONENT_BUFFER_NAMES = {
     "world_model": "reward_bins",
@@ -229,6 +233,11 @@ def dreamer_inference_probe_sha256(
             "actor.dynamic_actions": actor_output["dynamic_actions"],
             "actor.static_actions": actor_output["static_actions"],
             "actor.static_logits": actor_output["static_logits"],
+            "context.mask": batch["context_mask"],
+            "context.source_training_row_ids": batch["context_source_training_row_ids"].to(dtype=torch.float32),
+            "context.static": batch["context_static"],
+            "context.terminal": batch["context_terminal"],
+            "context.time": batch["context_time"],
             "critic.logits": critic(features),
             "critic.value": critic.value(features),
             "probe.imagine_features": imagined["features"],
@@ -270,6 +279,15 @@ def dreamer_batch_inference_sha256(
             "world.prior_logits": observed["prior_logits"],
             "world.reward": world_model.reward_prediction(features),
         }
+        for key in (
+            "context_mask",
+            "context_source_training_row_ids",
+            "context_static",
+            "context_terminal",
+            "context_time",
+        ):
+            if key in batch:
+                outputs[f"context.{key}"] = batch[key].to(dtype=torch.float32)
     return _tensor_output_sha256("espresso_rl_dreamer_v3_heldout_inference_v1", outputs)
 
 
@@ -333,6 +351,25 @@ def _probe_batch(architecture: DreamerCheckpointArchitecture) -> dict[str, torch
         "continuations": torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 0.0]], dtype=torch.float32),
         "step_mask": torch.ones((batch_size, step_count), dtype=torch.float32),
         "static_context": _sequence_tensor(batch_size, 1, architecture.static_dim, scale=0.00390625)[:, 0],
+        "context_static": _sequence_tensor(
+            batch_size,
+            DREAMER_CONTEXT_WINDOW_SIZE,
+            architecture.static_dim,
+            scale=0.001953125,
+        ),
+        "context_terminal": _sequence_tensor(
+            batch_size,
+            DREAMER_CONTEXT_WINDOW_SIZE,
+            len(DREAMER_TERMINAL_FEATURES),
+            scale=0.0009765625,
+        ),
+        "context_time": _sequence_tensor(batch_size, DREAMER_CONTEXT_WINDOW_SIZE, 1, scale=0.25),
+        "context_mask": _probe_context_mask(batch_size),
+        "context_source_training_row_ids": torch.arange(
+            1,
+            batch_size * DREAMER_CONTEXT_WINDOW_SIZE + 1,
+            dtype=torch.long,
+        ).reshape(batch_size, DREAMER_CONTEXT_WINDOW_SIZE),
     }
 
 
@@ -340,6 +377,14 @@ def _sequence_tensor(batch_size: int, step_count: int, feature_dim: int, *, scal
     count = batch_size * step_count * feature_dim
     values = torch.arange(1, count + 1, dtype=torch.float32) * scale
     return values.reshape(batch_size, step_count, feature_dim)
+
+
+def _probe_context_mask(batch_size: int) -> torch.Tensor:
+    row = [
+        1.0 if index < DREAMER_CONTEXT_WINDOW_SIZE // 2 else 0.0
+        for index in range(DREAMER_CONTEXT_WINDOW_SIZE)
+    ]
+    return torch.tensor([row] * batch_size, dtype=torch.float32)
 
 
 def _decode_tensor(checkpoint: VerifiedDreamerCheckpoint, name: str) -> torch.Tensor:

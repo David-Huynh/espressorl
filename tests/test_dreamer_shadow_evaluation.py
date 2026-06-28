@@ -34,6 +34,7 @@ from espresso_rl.domain.trainer_artifacts import (
     default_training_config,
 )
 from espresso_rl.main import try_record_shadow_evaluation
+from espresso_rl.main import local_context_transitions_for_shadow_replay
 from tests.test_trainer_artifacts import (
     canonical_json,
     dataset_export_text,
@@ -94,6 +95,29 @@ class IncrementingClock:
 class FailingShadowService:
     def evaluate_transition(self, transition, *, bo_recommendation=None):
         raise RuntimeError("shadow storage unavailable")
+
+
+class MemoryShotRepository:
+    def __init__(self, shots) -> None:
+        self.shots = shots
+
+    def list_recent(
+        self,
+        install_id,
+        machine_id,
+        bean_context_id=None,
+        limit=200,
+        grinder_context_id=None,
+    ):
+        matches = [
+            shot
+            for shot in self.shots
+            if shot.install_id == install_id
+            and shot.machine_id == machine_id
+            and shot.bean_context_id == bean_context_id
+            and shot.grinder_context_id == grinder_context_id
+        ]
+        return sorted(matches, key=lambda shot: shot.timestamp, reverse=True)[:limit]
 
 
 class DreamerShadowEvaluationTests(unittest.TestCase):
@@ -218,6 +242,36 @@ class DreamerShadowEvaluationTests(unittest.TestCase):
         self.assertEqual(first.evaluation.evaluation_id, second.evaluation.evaluation_id)
         self.assertEqual(len(self.repository.records), 1)
 
+    def test_context_history_replay_is_exact_context_and_current_episode_scoped(self) -> None:
+        first = training_row(81)
+        second = training_row(82)
+        current = training_row(83)
+
+        batch, current_index = self.service._episode_batch(
+            current,
+            context_transitions=[second, first],
+        )
+
+        self.assertEqual(current_index, 2)
+        self.assertEqual(tuple(batch["source_training_row_ids"].tolist()), (81, 82, 83))
+        self.assertEqual(batch["context_source_training_row_ids"][2, :2].tolist(), [81, 82])
+        self.assertEqual(batch["context_mask"][2, :2].tolist(), [1.0, 1.0])
+
+        result = self.service.evaluate_transition(current, context_transitions=[second, first])
+        self.assertTrue(result.created)
+
+    def test_context_history_replay_rejects_mixed_or_future_context(self) -> None:
+        current = training_row(90)
+        mixed = copy.deepcopy(training_row(89))
+        mixed["context"]["bean_context_id"] = "other_bean"
+        with self.assertRaisesRegex(DreamerShadowEvaluationError, "mixes bean or grinder"):
+            self.service.evaluate_transition(current, context_transitions=[mixed])
+
+        future = copy.deepcopy(training_row(91))
+        future["observation"]["timestamp"] = current["observation"]["timestamp"] + 1
+        with self.assertRaisesRegex(DreamerShadowEvaluationError, "future context"):
+            self.service.evaluate_transition(current, context_transitions=[future])
+
     def test_late_older_transition_does_not_resolve_newer_pending_record(self) -> None:
         newer = copy.deepcopy(training_row(45))
         newer["observation"]["timestamp"] = 1_900_000_100
@@ -311,6 +365,29 @@ class DreamerShadowEvaluationTests(unittest.TestCase):
 
         self.assertIsNone(result)
         log_exception.assert_called_once()
+
+    def test_runtime_context_history_uses_recent_local_exact_context_only(self) -> None:
+        first = local_shot()
+        first.shot_id = "shot_first"
+        first.timestamp = 1_800_000_010
+        second = copy.deepcopy(first)
+        second.shot_id = "shot_second"
+        second.timestamp = 1_800_000_020
+        other = copy.deepcopy(first)
+        other.shot_id = "shot_other"
+        other.timestamp = 1_800_000_030
+        other.bean_context_id = "other_bean"
+        current = copy.deepcopy(first)
+        current.shot_id = "shot_current"
+        current.timestamp = 1_800_000_040
+
+        rows = local_context_transitions_for_shadow_replay(
+            current,
+            shot_repo=MemoryShotRepository([current, other, second, first]),
+            limit=8,
+        )
+
+        self.assertEqual([row["observation"]["shot_id"] for row in rows], ["shot_first", "shot_second"])
 
 
 def bo_recommendation(row: dict) -> Recommendation:

@@ -93,6 +93,8 @@ DREAMER_TERMINAL_FEATURES = (
     "profile_temperature_c",
     "final_phase_temperature_c",
 )
+DREAMER_CONTEXT_WINDOW_SIZE = 8
+DREAMER_CONTEXT_TIME_FEATURES = ("seconds_since_context_shot",)
 _TASTE_LEVEL_VALUES = {
     None: 0.0,
     "none": 0.0,
@@ -220,12 +222,15 @@ def build_dreamer_episode_batch(
     *,
     pad_to_step_count: int | None = None,
     control_spec: DreamerControlSpec | dict[str, Any] | None = None,
+    context_window_size: int = DREAMER_CONTEXT_WINDOW_SIZE,
     device: torch.device | str | None = None,
 ) -> dict[str, Any]:
     sorted_episodes = sorted(_validated_episodes(episodes), key=_episode_sort_key)
     if not sorted_episodes:
         raise DreamerEpisodeDatasetError("Dreamer episode batch must contain at least one episode")
     resolved_control_spec = _resolve_control_spec(control_spec)
+    context_window_size = _context_window_size(context_window_size)
+    context_windows = _context_windows(sorted_episodes, context_window_size)
 
     max_steps = max(len(episode["steps"]) for episode in sorted_episodes)
     if pad_to_step_count is not None:
@@ -249,6 +254,11 @@ def build_dreamer_episode_batch(
     rewards = np.zeros((batch_size, max_steps), dtype=np.float32)
     static_context = np.zeros((batch_size, len(DREAMER_STATIC_CONTEXT_FEATURES)), dtype=np.float32)
     terminal = np.zeros((batch_size, len(DREAMER_TERMINAL_FEATURES)), dtype=np.float32)
+    context_static = np.zeros((batch_size, context_window_size, len(DREAMER_STATIC_CONTEXT_FEATURES)), dtype=np.float32)
+    context_terminal = np.zeros((batch_size, context_window_size, len(DREAMER_TERMINAL_FEATURES)), dtype=np.float32)
+    context_time = np.zeros((batch_size, context_window_size, len(DREAMER_CONTEXT_TIME_FEATURES)), dtype=np.float32)
+    context_mask = np.zeros((batch_size, context_window_size), dtype=np.float32)
+    context_source_training_row_ids = np.zeros((batch_size, context_window_size), dtype=np.int64)
     episode_weights = np.zeros(batch_size, dtype=np.float32)
     source_training_row_ids = np.zeros(batch_size, dtype=np.int64)
     episode_ids: list[str] = []
@@ -263,6 +273,17 @@ def build_dreamer_episode_batch(
         episode_weights[batch_index] = _episode_weight(episode)
         source_training_row_ids[batch_index] = int(episode["source_training_row_id"])
         episode_ids.append(str(episode["episode_id"]))
+        for context_index, context_episode in enumerate(context_windows[batch_index]):
+            context_static[batch_index, context_index] = _encode_static_context(context_episode["static_context"])
+            context_terminal[batch_index, context_index] = _encode_terminal(context_episode["terminal"])
+            context_time[batch_index, context_index, 0] = max(
+                0.0,
+                float(episode["terminal"]["timestamp"]) - float(context_episode["terminal"]["timestamp"]),
+            )
+            context_mask[batch_index, context_index] = 1.0
+            context_source_training_row_ids[batch_index, context_index] = int(
+                context_episode["source_training_row_id"]
+            )
 
         for step_index, step in enumerate(steps):
             observations[batch_index, step_index] = _encode_object(
@@ -323,9 +344,19 @@ def build_dreamer_episode_batch(
         "rewards": torch.tensor(rewards, dtype=torch.float32, device=target_device),
         "static_context": torch.tensor(static_context, dtype=torch.float32, device=target_device),
         "terminal": torch.tensor(terminal, dtype=torch.float32, device=target_device),
+        "context_static": torch.tensor(context_static, dtype=torch.float32, device=target_device),
+        "context_terminal": torch.tensor(context_terminal, dtype=torch.float32, device=target_device),
+        "context_time": torch.tensor(context_time, dtype=torch.float32, device=target_device),
+        "context_mask": torch.tensor(context_mask, dtype=torch.float32, device=target_device),
+        "context_source_training_row_ids": torch.tensor(
+            context_source_training_row_ids,
+            dtype=torch.long,
+            device=target_device,
+        ),
         "episode_weights": torch.tensor(episode_weights, dtype=torch.float32, device=target_device),
         "source_training_row_ids": torch.tensor(source_training_row_ids, dtype=torch.long, device=target_device),
         "episode_ids": tuple(episode_ids),
+        "context_window_size": context_window_size,
         "control_spec": resolved_control_spec.to_dict(),
         "feature_names": {
             "observations": DREAMER_OBSERVATION_FEATURES,
@@ -336,6 +367,9 @@ def build_dreamer_episode_batch(
             "constraints": DREAMER_CONSTRAINT_FEATURES,
             "static_context": DREAMER_STATIC_CONTEXT_FEATURES,
             "terminal": DREAMER_TERMINAL_FEATURES,
+            "context_static": DREAMER_STATIC_CONTEXT_FEATURES,
+            "context_terminal": DREAMER_TERMINAL_FEATURES,
+            "context_time": DREAMER_CONTEXT_TIME_FEATURES,
         },
     }
 
@@ -359,6 +393,35 @@ def _resolve_control_spec(control_spec: DreamerControlSpec | dict[str, Any] | No
     if isinstance(control_spec, DreamerControlSpec):
         return control_spec
     return DreamerControlSpec.from_dict(control_spec)
+
+
+def _context_window_size(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 64:
+        raise DreamerEpisodeDatasetError("context_window_size must be an integer in 0..64")
+    return value
+
+
+def _context_windows(episodes: list[dict[str, Any]], context_window_size: int) -> list[list[dict[str, Any]]]:
+    if context_window_size == 0:
+        return [[] for _ in episodes]
+    windows: list[list[dict[str, Any]]] = []
+    previous_by_context: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for episode in episodes:
+        key = _context_group_key(episode)
+        previous = previous_by_context.setdefault(key, [])
+        windows.append(previous[-context_window_size:])
+        previous.append(episode)
+    return windows
+
+
+def _context_group_key(episode: dict[str, Any]) -> tuple[str, str, str, str]:
+    group_key = episode["group_key"]
+    return (
+        str(group_key.get("install_id") or ""),
+        str(group_key.get("machine_id") or ""),
+        str(group_key.get("bean_context_id") or ""),
+        str(group_key.get("grinder_context_id") or ""),
+    )
 
 
 def _encode_static_context(static_context: dict[str, Any]) -> np.ndarray:

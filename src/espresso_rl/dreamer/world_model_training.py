@@ -356,6 +356,16 @@ def _cpu_float_batch(batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         if not isinstance(value, torch.Tensor):
             raise FixedCadenceWorldModelTrainingError(f"world model training batch is missing tensor {key}")
         converted[key] = value.detach().to(device="cpu", dtype=torch.float32)
+    for key in (
+        "context_static",
+        "context_terminal",
+        "context_time",
+        "context_mask",
+        "context_source_training_row_ids",
+    ):
+        value = batch.get(key)
+        if isinstance(value, torch.Tensor):
+            converted[key] = value.detach().to(device="cpu", dtype=torch.float32)
     return converted
 
 
