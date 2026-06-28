@@ -57,6 +57,9 @@ _STATIC_CONTEXT_FIELDS = frozenset(
         "dose_g",
         "initial_target_yield_g",
         "target_ratio",
+        "grind_observed",
+        "dose_observed",
+        "initial_target_yield_observed",
         "microns_per_step",
         "step_direction",
         "profile_id",
@@ -264,6 +267,13 @@ def _validate_static_context(static_context: dict[str, Any], errors: list[str]) 
         errors,
     )
     _require_number_range(static_context.get("target_ratio"), "episode.static_context.target_ratio", 1.2, 3.5, errors)
+    _require_bool(static_context.get("grind_observed"), "episode.static_context.grind_observed", errors)
+    _require_bool(static_context.get("dose_observed"), "episode.static_context.dose_observed", errors)
+    _require_bool(
+        static_context.get("initial_target_yield_observed"),
+        "episode.static_context.initial_target_yield_observed",
+        errors,
+    )
     _require_number_range(static_context.get("microns_per_step"), "episode.static_context.microns_per_step", 0.1, 100.0, errors)
     if static_context.get("step_direction") not in {"higher_is_finer", "higher_is_coarser"}:
         errors.append("episode.static_context.step_direction is invalid")

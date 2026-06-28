@@ -209,7 +209,27 @@ class GaggimateMQTTClient:
         pump_target_mode = _optional_int_channel(payload, "pump_target_mode", n)
         valve_open = _optional_bool_channel(payload, "valve_open", n)
         weight = _channel({"weight": weight}, "weight", n)
-        target_yield_g = float(payload.get("target_yield_g", self._config.initial_target_yield_g))
+        payload_target_yield_g = _positive_optional_float(payload.get("target_yield_g"))
+        target_yield_observed = payload_target_yield_g is not None
+        target_yield_g = payload_target_yield_g or self._config.initial_target_yield_g
+        payload_dose_in_g = _positive_optional_float(payload.get("dose_in_g"))
+        payload_dose_target_g = _positive_optional_float(payload.get("dose_target_g"))
+        declared_dose_observed = _optional_bool(payload.get("dose_observed"))
+        dose_observed = payload_dose_in_g is not None and declared_dose_observed is not False
+        dose_in_g = payload_dose_in_g or payload_dose_target_g or self._config.initial_dose_g
+        relative_grind_steps = _relative_grind_steps_from_payload(
+            payload,
+            self._config.initial_relative_grind_steps_from_reference,
+        )
+        inferred_grind_observed = (
+            _optional_float(payload.get("relative_grind_steps_from_reference")) is not None
+            or (
+                _optional_float(payload.get("current_absolute_step")) is not None
+                and _optional_float(payload.get("absolute_reference_step")) is not None
+            )
+        )
+        declared_grind_observed = _optional_bool(payload.get("grind_observed"))
+        grind_observed = inferred_grind_observed and declared_grind_observed is not False
         beverage_out_g = payload.get("beverage_out_g")
         if beverage_out_g is None and weight:
             beverage_out_g = float(weight[-1])
@@ -235,12 +255,12 @@ class GaggimateMQTTClient:
             valve_open=valve_open,
             weight=weight,
             microns_per_step=float(payload.get("microns_per_step", self._config.microns_per_step)),
-            relative_grind_steps_from_reference=_relative_grind_steps_from_payload(
-                payload,
-                self._config.initial_relative_grind_steps_from_reference,
-            ),
-            dose_in_g=float(payload.get("dose_in_g", self._config.initial_dose_g)),
+            relative_grind_steps_from_reference=relative_grind_steps,
+            grind_observed=grind_observed,
+            dose_in_g=dose_in_g,
+            dose_observed=dose_observed,
             target_yield_g=target_yield_g,
+            target_yield_observed=target_yield_observed,
             beverage_out_g=beverage_out_g,
             shot_time_s=_optional_float(shot_time_s),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),

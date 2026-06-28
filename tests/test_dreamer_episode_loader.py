@@ -109,6 +109,37 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertNotIn("dose_g", episode["steps"][0]["observed_profile_target"])
         self.assertNotIn("relative_grind_steps_from_reference", json.dumps(episode["steps"]))
 
+    def test_partial_static_action_is_masked_without_discarding_episode(self) -> None:
+        episode = build_dreamer_episodes_from_training_rows(
+            [
+                training_row(
+                    1,
+                    action_overrides={
+                        "observed": {
+                            "grind": False,
+                            "dose": False,
+                            "target_yield": True,
+                        }
+                    },
+                    observation_overrides={"beverage_out_g": 41.5},
+                )
+            ]
+        )[0]
+
+        self.assertFalse(episode["static_context"]["grind_observed"])
+        self.assertFalse(episode["static_context"]["dose_observed"])
+        self.assertTrue(episode["static_context"]["initial_target_yield_observed"])
+        self.assertEqual(episode["terminal"]["beverage_out_g"], 41.5)
+        self.assertEqual(len(episode["steps"]), 4)
+
+        batch = build_dreamer_episode_batch([episode])
+        grind_mask_index = DREAMER_STATIC_CONTEXT_FEATURES.index("grind_observed")
+        dose_mask_index = DREAMER_STATIC_CONTEXT_FEATURES.index("dose_observed")
+        yield_mask_index = DREAMER_STATIC_CONTEXT_FEATURES.index("initial_target_yield_observed")
+        self.assertEqual(batch["static_context"][0, grind_mask_index].item(), 0.0)
+        self.assertEqual(batch["static_context"][0, dose_mask_index].item(), 0.0)
+        self.assertEqual(batch["static_context"][0, yield_mask_index].item(), 1.0)
+
     def test_future_dynamic_yield_stop_target_is_not_initial_static_yield(self) -> None:
         episode = build_dreamer_episodes_from_training_rows([training_row(1)])[0]
 

@@ -413,6 +413,9 @@ class ShotRecord:
     microns_per_step: float
     dose_in_g: float
     target_yield_g: float
+    grind_observed: bool = True
+    dose_observed: bool = True
+    target_yield_observed: bool = True
     relative_grind_steps_from_reference: float | None = None
     relative_grind_um_from_reference: float | None = None
     beverage_out_g: float | None = None
@@ -526,6 +529,9 @@ class ShotRecord:
         self.optimization_weight = float(self.optimization_weight)
         if not 0.0 <= self.optimization_weight <= 1.0:
             raise ValueError("optimization_weight must be between 0 and 1")
+        for field_name in ("grind_observed", "dose_observed", "target_yield_observed"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ValueError(f"{field_name} must be boolean")
         if self.microns_per_step <= 0:
             raise ValueError("microns_per_step must be positive")
         if self.dose_in_g <= 0:
@@ -540,7 +546,9 @@ class ShotRecord:
             self.relative_grind_steps_from_reference = (
                 self.relative_grind_um_from_reference / self.microns_per_step / self.grinder_direction_sign
             )
-        if self.beverage_out_g is not None and self.brew_ratio is None:
+        if self.relative_grind_steps_from_reference is None:
+            self.grind_observed = False
+        if self.beverage_out_g is not None and self.brew_ratio is None and self.dose_observed:
             self.brew_ratio = self.beverage_out_g / self.dose_in_g
         if self.target_ratio is None:
             self.target_ratio = self.target_yield_g / self.dose_in_g
@@ -609,6 +617,26 @@ class ShotRecord:
             target_ratio=self.target_ratio,
             grinder_step_direction=self.grinder_step_direction,
         )
+
+    @property
+    def realized_yield_g(self) -> float:
+        if self.beverage_out_g is not None and self.beverage_out_g > 0:
+            return self.beverage_out_g
+        return self.target_yield_g
+
+    @property
+    def realized_yield_observed(self) -> bool:
+        return (
+            self.beverage_out_g is not None and self.beverage_out_g > 0
+        ) or self.target_yield_observed
+
+    @property
+    def action_observed(self) -> dict[str, bool]:
+        return {
+            "grind": self.grind_observed,
+            "dose": self.dose_observed,
+            "target_yield": self.target_yield_observed,
+        }
 
     @property
     def grinder_direction_sign(self) -> int:

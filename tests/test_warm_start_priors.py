@@ -28,6 +28,29 @@ from tests.test_application_service import (
 
 
 class WarmStartPriorTests(unittest.TestCase):
+    def test_partial_action_distance_uses_achieved_yield_and_masks_unknown_dimensions(self) -> None:
+        optimizer = ConservativeBOOptimizer()
+        shot = shot_record("partial", timestamp=1)
+        shot.grind_observed = False
+        shot.dose_observed = False
+        shot.beverage_out_g = 40.0
+        at_achieved_yield = Recipe(
+            relative_grind_steps_from_reference=5,
+            microns_per_step=12.5,
+            dose_g=21.0,
+            target_yield_g=40.0,
+        )
+        at_intended_yield = Recipe(
+            relative_grind_steps_from_reference=42,
+            microns_per_step=12.5,
+            dose_g=18.0,
+            target_yield_g=36.0,
+        )
+
+        self.assertEqual(optimizer._action_coverage(shot), 1 / 3)
+        self.assertEqual(optimizer._distance(at_achieved_yield, shot, 5, 4.0, 1.0), 0.0)
+        self.assertEqual(optimizer._distance(at_intended_yield, shot, 5, 4.0, 1.0), 1.0)
+
     def test_external_prior_enables_warm_started_mode_inside_safety_bounds(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()

@@ -137,10 +137,14 @@ class CommunityPriorGenerationService:
         validation = validate_upload_payload(payload)
         if not validation.ok:
             return None
+        if not _action_field_observed(payload, "dose"):
+            # Partial-action rows remain valid Dreamer/world-model data, but
+            # a dose/ratio context cannot be formed without an observed dose.
+            return None
 
         dose = _number(payload.get("dose_in_g"))
-        target_yield = _number(payload.get("target_yield_g"))
-        target_ratio = _number(payload.get("target_ratio"))
+        target_yield = _realized_yield(payload)
+        target_ratio = target_yield / dose if target_yield is not None and dose is not None else None
         if target_ratio is None and dose is not None and target_yield is not None:
             target_ratio = target_yield / dose
         reward = _number(payload.get("reward"))
@@ -190,10 +194,8 @@ class CommunityPriorGenerationService:
 def community_prior_context_key(payload: dict[str, Any]) -> str:
     adapter = _slug(str(payload.get("machine_adapter") or "unknown"))
     dose = _number(payload.get("dose_in_g"))
-    target_ratio = _number(payload.get("target_ratio"))
-    target_yield = _number(payload.get("target_yield_g"))
-    if target_ratio is None and dose is not None and target_yield is not None:
-        target_ratio = target_yield / dose
+    target_yield = _realized_yield(payload)
+    target_ratio = target_yield / dose if target_yield is not None and dose is not None else None
     dose_bucket = _bucket(dose or 0.0, 0.5)
     ratio_bucket = _bucket(target_ratio or 0.0, 0.1)
     return f"adapter:{adapter}|dose:{dose_bucket:.1f}|ratio:{ratio_bucket:.1f}"
@@ -203,13 +205,10 @@ def community_prior_contribution_bucket(payload: dict[str, Any]) -> str:
     bean_context = str(payload.get("bean_context_id") or "none")
     grinder_context = str(payload.get("grinder_context_id") or "none")
     dose = _bucket(_number(payload.get("dose_in_g")) or 0.0, 0.5)
-    target_yield = _bucket(_number(payload.get("target_yield_g")) or 0.0, 2.0)
-    target_ratio = _number(payload.get("target_ratio"))
-    if target_ratio is None:
-        dose_value = _number(payload.get("dose_in_g"))
-        yield_value = _number(payload.get("target_yield_g"))
-        if dose_value is not None and yield_value is not None:
-            target_ratio = yield_value / dose_value
+    realized_yield = _realized_yield(payload)
+    target_yield = _bucket(realized_yield or 0.0, 2.0)
+    dose_value = _number(payload.get("dose_in_g"))
+    target_ratio = realized_yield / dose_value if realized_yield is not None and dose_value is not None else None
     ratio = _bucket(target_ratio or 0.0, 0.1)
 
     grind_delta_um_from_current = _number(payload.get("recommended_grind_delta_um_from_current")) or 0.0
@@ -293,6 +292,9 @@ def aggregate_community_prior(
             "independent_install_count": install_count,
             "contribution_bucket_count": diversity_count,
             "kind": "aggregate",
+            "grind_observed": False,
+            "dose_observed": True,
+            "target_yield_observed": True,
         }
     ]
     points.extend(
@@ -402,10 +404,7 @@ def _support_prior_points(
             continue
         points.append(
             {
-                "grind_delta_um_from_current": round(
-                    _number(payload.get("recommended_grind_delta_um_from_current")) or 0.0,
-                    4,
-                ),
+                "grind_delta_um_from_current": 0.0,
                 "dose_g": round(candidate.dose_g, 3),
                 "target_yield_g": round(candidate.target_yield_g, 3),
                 "target_ratio": round(target_ratio, 4),
@@ -416,6 +415,9 @@ def _support_prior_points(
                 "independent_install_count": 1,
                 "contribution_bucket_count": 1,
                 "kind": "support",
+                "grind_observed": False,
+                "dose_observed": True,
+                "target_yield_observed": True,
             }
         )
     return points
@@ -427,6 +429,34 @@ def _number(value: Any) -> float | None:
     if not math.isfinite(float(value)):
         return None
     return float(value)
+
+
+def _realized_yield(payload: dict[str, Any]) -> float | None:
+    beverage_out = _number(payload.get("beverage_out_g"))
+    if beverage_out is not None and beverage_out > 0:
+        return beverage_out
+    if _action_field_observed(payload, "target_yield"):
+        return _number(payload.get("target_yield_g"))
+    return None
+
+
+def _action_field_observed(payload: dict[str, Any], field_name: str) -> bool:
+    declared = payload.get("action_observed")
+    if isinstance(declared, dict):
+        return declared.get(field_name) is True
+    if field_name == "grind":
+        return (
+            _number(payload.get("relative_grind_steps_from_reference")) is not None
+            or (
+                _number(payload.get("current_absolute_step")) is not None
+                and _number(payload.get("absolute_reference_step")) is not None
+            )
+        )
+    if field_name == "dose":
+        return _number(payload.get("dose_in_g")) is not None
+    if field_name == "target_yield":
+        return _number(payload.get("target_yield_g")) is not None
+    return False
 
 
 def _bucket(value: float, step: float) -> float:

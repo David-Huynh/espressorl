@@ -102,8 +102,10 @@ class CommunityPriorTests(unittest.TestCase):
         points = warehouse.priors[0].prior_json["points"]
         self.assertEqual(len(points), DEFAULT_MAX_PRIOR_POINTS_PER_CONTEXT)
         self.assertEqual(points[0]["kind"], "aggregate")
+        self.assertFalse(points[0]["grind_observed"])
         support_points = [point for point in points if point.get("kind") == "support"]
         self.assertGreater(len(support_points), 5)
+        self.assertTrue(all(point["grind_observed"] is False for point in support_points))
         self.assertLessEqual(
             max(point["confidence"] for point in support_points),
             MAX_COMMUNITY_PRIOR_POINT_CONFIDENCE,

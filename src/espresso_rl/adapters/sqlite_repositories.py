@@ -61,9 +61,12 @@ class SQLiteStore:
                 relative_grind_um_from_reference REAL,
                 microns_per_step REAL NOT NULL,
                 dose_in_g REAL NOT NULL,
+                grind_observed INTEGER NOT NULL DEFAULT 1,
+                dose_observed INTEGER NOT NULL DEFAULT 1,
                 beverage_out_g REAL,
                 brew_ratio REAL,
                 target_yield_g REAL NOT NULL,
+                target_yield_observed INTEGER NOT NULL DEFAULT 1,
                 target_ratio REAL,
                 shot_time_s REAL,
                 recommendation_id TEXT,
@@ -244,6 +247,9 @@ class SQLiteStore:
         self._ensure_column("shots", "exclude_from_local_optimization", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("shots", "optimization_weight", "REAL NOT NULL DEFAULT 1.0")
         self._ensure_column("shots", "rating_prompt_allowed", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("shots", "grind_observed", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("shots", "dose_observed", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("shots", "target_yield_observed", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("shots", "feedback_recorded", "INTEGER NOT NULL DEFAULT 0")
         self.conn.execute(
             "UPDATE shots SET feedback_recorded=1 WHERE feedback_recorded=0 AND human_rating IS NOT NULL"
@@ -332,7 +338,8 @@ class SQLiteShotRepository:
                 shot_id, timestamp, install_id, machine_id, machine_adapter,
                 bean_context_id, bean_context_name, grinder_context_id, profile_resampled_blob, raw_profile_available,
                 raw_profile_hash, relative_grind_steps_from_reference, relative_grind_um_from_reference, microns_per_step,
-                dose_in_g, beverage_out_g, brew_ratio, target_yield_g,
+                dose_in_g, grind_observed, dose_observed,
+                beverage_out_g, brew_ratio, target_yield_g, target_yield_observed,
                 target_ratio, shot_time_s, recommendation_id,
                 recommended_grind_delta_steps_from_current, recommended_grind_delta_um_from_current,
                 recommended_projected_relative_step_from_reference, recommended_dose_g,
@@ -363,7 +370,8 @@ class SQLiteShotRepository:
                 :shot_id, :timestamp, :install_id, :machine_id, :machine_adapter,
                 :bean_context_id, :bean_context_name, :grinder_context_id, :profile_resampled_blob, :raw_profile_available,
                 :raw_profile_hash, :relative_grind_steps_from_reference, :relative_grind_um_from_reference, :microns_per_step,
-                :dose_in_g, :beverage_out_g, :brew_ratio, :target_yield_g,
+                :dose_in_g, :grind_observed, :dose_observed,
+                :beverage_out_g, :brew_ratio, :target_yield_g, :target_yield_observed,
                 :target_ratio, :shot_time_s, :recommendation_id,
                 :recommended_grind_delta_steps_from_current, :recommended_grind_delta_um_from_current,
                 :recommended_projected_relative_step_from_reference, :recommended_dose_g,
@@ -1225,9 +1233,12 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "relative_grind_um_from_reference": shot.relative_grind_um_from_reference,
         "microns_per_step": shot.microns_per_step,
         "dose_in_g": shot.dose_in_g,
+        "grind_observed": bool(shot.grind_observed),
+        "dose_observed": bool(shot.dose_observed),
         "beverage_out_g": shot.beverage_out_g,
         "brew_ratio": shot.brew_ratio,
         "target_yield_g": shot.target_yield_g,
+        "target_yield_observed": bool(shot.target_yield_observed),
         "target_ratio": shot.target_ratio,
         "shot_time_s": shot.shot_time_s,
         "recommendation_id": shot.recommendation_id,
@@ -1313,9 +1324,12 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         relative_grind_um_from_reference=row["relative_grind_um_from_reference"],
         microns_per_step=row["microns_per_step"],
         dose_in_g=row["dose_in_g"],
+        grind_observed=bool(row["grind_observed"]),
+        dose_observed=bool(row["dose_observed"]),
         beverage_out_g=row["beverage_out_g"],
         brew_ratio=row["brew_ratio"],
         target_yield_g=row["target_yield_g"],
+        target_yield_observed=bool(row["target_yield_observed"]),
         target_ratio=row["target_ratio"],
         shot_time_s=row["shot_time_s"],
         recommendation_id=row["recommendation_id"],

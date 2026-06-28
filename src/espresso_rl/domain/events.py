@@ -121,6 +121,9 @@ class ShotProfileEvent:
     dose_in_g: float
     target_yield_g: float
     schema_version: int = 1
+    grind_observed: bool = True
+    dose_observed: bool = True
+    target_yield_observed: bool = True
     temperature: list[float] | None = None
     target_temperature: list[float] | None = None
     pump_target_mode: list[int] | None = None
@@ -187,8 +190,13 @@ class ShotProfileEvent:
         object.__setattr__(self, "microns_per_step", _number(self.microns_per_step, "microns_per_step"))
         object.__setattr__(self, "dose_in_g", _number(self.dose_in_g, "dose_in_g"))
         object.__setattr__(self, "target_yield_g", _number(self.target_yield_g, "target_yield_g"))
+        for field_name in ("grind_observed", "dose_observed", "target_yield_observed"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ValueError(f"{field_name} must be boolean")
         if self.relative_grind_steps_from_reference is not None:
             object.__setattr__(self, "relative_grind_steps_from_reference", _number(self.relative_grind_steps_from_reference, "relative_grind_steps_from_reference"))
+        else:
+            object.__setattr__(self, "grind_observed", False)
         object.__setattr__(
             self,
             "grinder_calibration_mode",

@@ -23,6 +23,8 @@ class ProfileResampler:
         self.n_points = n_points
 
     def resample(self, payload: dict[str, Any]) -> np.ndarray:
+        dose_observed = payload.get("dose_in_g") is not None
+        target_yield_observed = payload.get("target_yield_g") is not None
         event = ShotProfileEvent(
             shot_id=str(payload.get("shot_id", "compat")),
             install_id=str(payload.get("install_id", "compat")),
@@ -38,7 +40,10 @@ class ProfileResampler:
             weight=list(payload.get("weight", [])),
             microns_per_step=float(payload.get("microns_per_step", 10.0)),
             dose_in_g=float(payload.get("dose_in_g", 18.0)),
+            dose_observed=dose_observed,
             target_yield_g=float(payload.get("target_yield_g", 36.0)),
+            target_yield_observed=target_yield_observed,
+            grind_observed=False,
         )
         return resample_profile(event, self.n_points)
 

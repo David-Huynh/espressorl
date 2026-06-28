@@ -27,12 +27,9 @@ def compute_reward(
     if human_rating is None and taste_tags:
         confidence *= 1.25
 
-    if follow_through == FollowThroughState.PARTIALLY_FOLLOWED:
-        confidence *= 0.6
-    elif follow_through == FollowThroughState.NOT_FOLLOWED:
-        confidence *= 0.2
-    elif follow_through == FollowThroughState.UNKNOWN:
-        confidence *= 0.5
+    # Follow-through controls recommendation attribution, not confidence in
+    # the taste/profile outcome of the shot that was actually pulled.
+    _ = follow_through
 
     if taste_tags and "channeling_suspected" in taste_tags:
         confidence *= 0.7

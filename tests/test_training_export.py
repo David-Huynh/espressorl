@@ -8,12 +8,43 @@ from pathlib import Path
 from typing import Any
 
 from espresso_rl.adapters.file_artifacts import LocalTextArtifactWriter
-from espresso_rl.application.training_export import TrainingDatasetExportService
+from espresso_rl.application.training_export import TrainingDatasetExportService, _export_training_row
 from espresso_rl.domain.community import CommunityTrainingRow
 from espresso_rl.domain.training import FORBIDDEN_TRAINING_FIELD_NAMES, validate_training_transition
 
 
 class TrainingDatasetExportTests(unittest.TestCase):
+    def test_partial_action_row_keeps_telemetry_and_explicit_observation_mask(self) -> None:
+        exported = _export_training_row(
+            training_row(
+                1,
+                payload_overrides={
+                    "relative_grind_steps_from_reference": None,
+                    "relative_grind_um_from_reference": None,
+                    "action_observed": {
+                        "grind": False,
+                        "dose": False,
+                        "target_yield": True,
+                    },
+                    "beverage_out_g": 41.5,
+                    "temperature_profile": [93.0 for _ in range(100)],
+                    "target_temperature_profile": [92.5 for _ in range(100)],
+                    "fixed_cadence_sequence": fixed_cadence_sequence(),
+                },
+            )
+        )
+
+        self.assertIsNotNone(exported)
+        assert exported is not None
+        self.assertEqual(
+            exported["action"]["observed"],
+            {"grind": False, "dose": False, "target_yield": True},
+        )
+        self.assertEqual(exported["action"]["relative_grind_steps_from_reference"], 0.0)
+        self.assertEqual(exported["observation"]["beverage_out_g"], 41.5)
+        self.assertEqual(exported["observation"]["temperature_profile"][0], 93.0)
+        self.assertEqual(validate_training_transition(exported), [])
+
     def test_export_writes_plain_text_jsonl_csv_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = TrainingDatasetExportService(

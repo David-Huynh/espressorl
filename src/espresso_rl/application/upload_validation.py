@@ -15,6 +15,7 @@ SUPPORTED_SCHEMA_VERSION = 1
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,160}$")
 SAFE_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 CONTROL_OR_HTML_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f<>]")
+ACTION_OBSERVED_FIELDS = frozenset({"grind", "dose", "target_yield"})
 
 SHOT_RECORD_FIELDS = frozenset(
     {
@@ -38,6 +39,7 @@ SHOT_RECORD_FIELDS = frozenset(
         "relative_grind_um_from_reference",
         "current_absolute_step",
         "absolute_reference_step",
+        "action_observed",
         "dose_in_g",
         "beverage_out_g",
         "brew_ratio",
@@ -320,6 +322,16 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_number_range(payload, "relative_grind_um_from_reference", -1_000_000, 1_000_000, errors)
     _optional_number_range(payload, "current_absolute_step", -10_000, 10_000, errors)
     _optional_number_range(payload, "absolute_reference_step", -10_000, 10_000, errors)
+    _optional_action_observed(payload.get("action_observed"), errors)
+    action_observed = payload.get("action_observed")
+    if isinstance(action_observed, dict) and action_observed.get("grind") is True:
+        has_relative_grind = payload.get("relative_grind_steps_from_reference") is not None
+        has_absolute_pair = (
+            payload.get("current_absolute_step") is not None
+            and payload.get("absolute_reference_step") is not None
+        )
+        if not has_relative_grind and not has_absolute_pair:
+            errors.append("action_observed.grind cannot be true without a grind measurement")
     _optional_identifier(payload, "recommendation_id", errors)
     _optional_number_range(payload, "recommended_grind_delta_steps_from_current", -1000, 1000, errors)
     _optional_number_range(payload, "recommended_grind_delta_um_from_current", -100_000, 100_000, errors)
@@ -631,6 +643,20 @@ def _optional_bool(payload: dict[str, Any], key: str, errors: list[str]) -> None
         return
     if not isinstance(payload.get(key), bool):
         errors.append(f"{key} must be boolean")
+
+
+def _optional_action_observed(value: object, errors: list[str]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        errors.append("action_observed must be an object")
+        return
+    unknown = sorted(str(key) for key in value if key not in ACTION_OBSERVED_FIELDS)
+    if unknown:
+        errors.append(f"action_observed contains unknown fields: {', '.join(unknown[:10])}")
+    for field_name in ACTION_OBSERVED_FIELDS:
+        if field_name not in value or not isinstance(value[field_name], bool):
+            errors.append(f"action_observed.{field_name} must be boolean")
 
 
 def _optional_string(payload: dict[str, Any], key: str, max_len: int, errors: list[str]) -> None:

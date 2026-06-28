@@ -39,19 +39,24 @@ class LocalHistoryPriorProvider:
         shots = [
             shot
             for shot in context.shots
-            if _shot_is_usable_local_prior(shot) and shot.relative_grind_steps_from_reference is not None
+            if _shot_is_usable_local_prior(shot)
+            and shot.grind_observed
+            and shot.relative_grind_steps_from_reference is not None
+            and shot.dose_observed
+            and shot.realized_yield_observed
         ]
         shots = sorted(shots, key=_shot_prior_score, reverse=True)[: self._limit]
         points: list[PriorPoint] = []
         for rank, shot in enumerate(shots, start=1):
             rank_scale = max(MIN_LOCAL_HISTORY_RANK_SCALE, 1.0 / (rank ** 0.5))
-            target_ratio = shot.target_ratio or shot.target_yield_g / shot.dose_in_g
+            target_yield_g = shot.realized_yield_g
+            target_ratio = target_yield_g / shot.dose_in_g
             points.append(
                 PriorPoint(
                     grind_delta_um_from_current=(shot.relative_grind_steps_from_reference - context.current_recipe.relative_grind_steps_from_reference)
                     * context.current_recipe.microns_per_step,
                     dose_g=shot.dose_in_g,
-                    target_yield_g=shot.target_yield_g,
+                    target_yield_g=target_yield_g,
                     target_ratio=target_ratio,
                     predicted_reward=max(0.0, min(1.0, shot.reward or 0.0)),
                     confidence=max(0.0, min(0.8, shot.reward_confidence * 0.8)) * rank_scale,
@@ -140,7 +145,12 @@ def _community_point_from_json(point: dict[str, Any], prior_confidence: float) -
     predicted_reward = _number(point.get("predicted_reward"))
     confidence = _number(point.get("confidence"))
     observation_noise = _number(point.get("observation_noise"))
+    grind_observed = point.get("grind_observed", True)
+    dose_observed = point.get("dose_observed", True)
+    target_yield_observed = point.get("target_yield_observed", True)
     if None in {grind_delta_um_from_current, dose_g, target_yield_g, target_ratio, predicted_reward, confidence, observation_noise}:
+        return None
+    if not all(isinstance(value, bool) for value in (grind_observed, dose_observed, target_yield_observed)):
         return None
     if not 5.0 <= dose_g <= 30.0:
         return None
@@ -166,6 +176,9 @@ def _community_point_from_json(point: dict[str, Any], prior_confidence: float) -
         observation_noise=capped_noise,
         source="community",
         reason="Weak zero-trust community prior.",
+        grind_observed=grind_observed,
+        dose_observed=dose_observed,
+        target_yield_observed=target_yield_observed,
     )
 
 

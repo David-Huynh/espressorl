@@ -225,14 +225,6 @@ def payload_trust_weight(payload: dict[str, Any], install_trust: float) -> float
         quality *= 0.4
     quality *= _optional_float(payload.get("reward_confidence"), default=0.5)
 
-    followed = payload.get("recommendation_followed")
-    if followed == "not_followed":
-        quality *= 0.2
-    elif followed == "partially_followed":
-        quality *= 0.6
-    elif followed == "unknown":
-        quality *= 0.5
-
     taste_tags = payload.get("taste_tags")
     if isinstance(taste_tags, list) and "channeling_suspected" in taste_tags:
         quality *= 0.7

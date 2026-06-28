@@ -158,6 +158,9 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         target_temperature=[86.5, 86.5, 87.0],
                         pump_target_mode=[1, 1, 2],
                         valve_open=[False, True, True],
+                        grind_observed=False,
+                        dose_observed=False,
+                        target_yield_observed=False,
                     )
                 )
                 self.assertIsNotNone(result.shot.temperature_profile)
@@ -202,6 +205,9 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertEqual(stored_shot.fixed_cadence_sequence.step_count, 5)  # type: ignore[union-attr]
                 self.assertEqual(stored_shot.fixed_cadence_sequence.valve_open.tolist(), [0, 0, 1, 1, 1])  # type: ignore[union-attr]
                 self.assertTrue(stored_shot.feedback_recorded)  # type: ignore[union-attr]
+                self.assertFalse(stored_shot.grind_observed)  # type: ignore[union-attr]
+                self.assertFalse(stored_shot.dose_observed)  # type: ignore[union-attr]
+                self.assertFalse(stored_shot.target_yield_observed)  # type: ignore[union-attr]
                 self.assertEqual(stored_rec.reason, feedback.recommendation.reason)  # type: ignore[union-attr]
                 self.assertEqual(stored_rec.apply_status, RecommendationApplyStatus.MANUAL_REQUIRED)  # type: ignore[union-attr]
                 self.assertEqual(stored_rec.manual_fields, ["projected_relative_step_from_reference", "next_dose_g"])  # type: ignore[union-attr]
@@ -811,6 +817,9 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("UNIQUE (source_validation_id)", schema)
         self.assertIn("idx_community_priors_context_key", schema)
         self.assertIn("microns_per_step DOUBLE PRECISION", schema)
+        self.assertIn("grind_observed BOOLEAN NOT NULL DEFAULT TRUE", schema)
+        self.assertIn("dose_observed BOOLEAN NOT NULL DEFAULT TRUE", schema)
+        self.assertIn("target_yield_observed BOOLEAN NOT NULL DEFAULT TRUE", schema)
         self.assertIn("min_steps INTEGER", schema)
         self.assertIn("max_steps INTEGER", schema)
         self.assertIn("normalized_alias TEXT NOT NULL", schema)

@@ -58,6 +58,9 @@ class PriorPoint:
     observation_noise: float
     source: str
     reason: str | None = None
+    grind_observed: bool = True
+    dose_observed: bool = True
+    target_yield_observed: bool = True
 
     def __post_init__(self) -> None:
         if self.dose_g <= 0:
@@ -74,6 +77,11 @@ class PriorPoint:
             raise ValueError("prior observation_noise must be positive")
         if not self.source:
             raise ValueError("prior source is required")
+        for field_name in ("grind_observed", "dose_observed", "target_yield_observed"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ValueError(f"prior {field_name} must be boolean")
+        if not any((self.grind_observed, self.dose_observed, self.target_yield_observed)):
+            raise ValueError("prior must observe at least one action field")
 
 
 @dataclass(frozen=True)

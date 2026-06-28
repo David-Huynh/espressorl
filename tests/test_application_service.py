@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
 
 from espresso_rl.application.services import (
@@ -387,7 +388,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertLessEqual(abs(feedback.recommendation.grind_delta_steps_from_current), 2)
         self.assertLessEqual(abs(feedback.recommendation.target_yield_g - 36.0), 4.0)
         self.assertTrue(feedback.shot.feedback_recorded)
-        self.assertLess(shots.get("shot_1").reward_confidence, 1.0)  # type: ignore[union-attr]
+        self.assertEqual(shots.get("shot_1").reward_confidence, 1.0)  # type: ignore[union-attr]
 
     def test_previous_bag_same_bean_history_becomes_optimizer_prior_points(self) -> None:
         shots = MemoryShotRepository()
@@ -427,7 +428,7 @@ class ApplicationServiceTests(unittest.TestCase):
         point = context.prior_points[0]
         self.assertEqual(point.source, "local_bean_history")
         self.assertEqual(point.grind_delta_um_from_current, -25.0)
-        self.assertEqual(point.target_yield_g, 38.0)
+        self.assertEqual(point.target_yield_g, 36.0)
 
     def test_previous_bag_same_bean_history_keeps_bounded_diminishing_prior_cloud(self) -> None:
         shots = MemoryShotRepository()
@@ -874,12 +875,52 @@ class ApplicationServiceTests(unittest.TestCase):
 
         self.assertFalse(corrected.exclude_from_local_optimization)
         self.assertFalse(corrected.grind_followed)
+        self.assertFalse(corrected.grind_observed)
         self.assertTrue(corrected.dose_followed)
+        self.assertTrue(corrected.dose_observed)
         self.assertTrue(corrected.yield_followed)
         self.assertEqual(corrected.grind_recommendation_trust, 0.0)
         self.assertGreater(corrected.recommendation_attribution_weight, 0.0)
         self.assertLess(corrected.recommendation_attribution_weight, 1.0)
         self.assertEqual(corrected.recommendation_followed, FollowThroughState.PARTIALLY_FOLLOWED)
+
+    def test_manual_follow_confirmation_promotes_recommended_grind_and_dose_to_observed(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        recommendation = ingest_and_feedback(service, shot_event("shot_1", 1))
+        service.ingest_shot_profile(
+            shot_event(
+                "shot_2",
+                3,
+                recommendation_id=recommendation.recommendation_id,
+                relative_grind_steps_from_reference=42,
+                grind_observed=False,
+                dose_in_g=18.0,
+                dose_observed=False,
+                beverage_out_g=37.0,
+            )
+        )
+
+        corrected = service.record_shot_correction(
+            ShotCorrectionEvent(
+                shot_id="shot_2",
+                install_id="install_1",
+                machine_id="machine_1",
+                timestamp=4,
+                grind_followed=True,
+                dose_followed=True,
+            )
+        )
+
+        self.assertTrue(corrected.grind_observed)
+        self.assertTrue(corrected.dose_observed)
+        self.assertEqual(
+            corrected.relative_grind_steps_from_reference,
+            recommendation.projected_relative_step_from_reference,
+        )
+        self.assertEqual(corrected.dose_in_g, recommendation.next_dose_g)
+        self.assertAlmostEqual(corrected.brew_ratio, 37.0 / recommendation.next_dose_g)
 
     def test_utility_shot_is_not_queued_for_community_upload(self) -> None:
         shots = MemoryShotRepository()
@@ -1052,8 +1093,73 @@ class ApplicationServiceTests(unittest.TestCase):
 
         self.assertEqual(corrected.recommendation_followed, FollowThroughState.NOT_FOLLOWED)
         self.assertEqual(corrected.recommendation_attribution_weight, 0.0)
+        self.assertFalse(corrected.grind_observed)
+        self.assertFalse(corrected.dose_observed)
+        self.assertIsNone(corrected.brew_ratio)
         self.assertEqual(feedback.recommendation.source_shot_id, "shot_2")
         self.assertIn("shot_2", [shot.shot_id for shot in optimizer.contexts[-1].shots])
+
+    def test_not_followed_yield_uses_achieved_weight_and_remains_uploadable(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        uploads = RecordingUploadQueue()
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(
+            shots,
+            recs,
+            optimizer,
+            upload_queue=uploads,
+            clock=lambda: 10,
+            community_upload_enabled_default=True,
+        )
+        first = ingest_and_feedback(
+            service,
+            shot_event("shot_1", 1, profile_id="lever", target_yield_g=38.0, beverage_out_g=38.0),
+        )
+        service.record_recommendation_decision(
+            RecommendationDecisionEvent(
+                recommendation_id=first.recommendation_id,
+                decision=RecommendationDecision.ACCEPTED,
+                timestamp=2,
+            )
+        )
+        service.ingest_shot_profile(
+            shot_event(
+                "shot_2",
+                3,
+                profile_id="lever",
+                recommendation_id=first.recommendation_id,
+                relative_grind_steps_from_reference=first.projected_relative_step_from_reference,
+                dose_in_g=first.next_dose_g,
+                target_yield_g=first.target_yield_g,
+                beverage_out_g=44.0,
+                weight=[0.0, 10.0, 44.0],
+            )
+        )
+        service.record_shot_correction(
+            ShotCorrectionEvent(
+                shot_id="shot_2",
+                install_id="install_1",
+                machine_id="machine_1",
+                timestamp=4,
+                grind_followed=True,
+                dose_followed=True,
+                yield_followed=False,
+            )
+        )
+
+        feedback = service.record_feedback(feedback_event("shot_2", 5, rating=4))
+
+        self.assertEqual(feedback.recommendation.source_shot_id, "shot_2")
+        self.assertEqual(optimizer.contexts[-1].current_recipe.target_yield_g, 44.0)
+        self.assertIn("shot_2", [shot.shot_id for shot in optimizer.contexts[-1].shots])
+        payloads = [
+            json.loads(item.payload_json)
+            for item in uploads.for_record("shot", "shot_2")
+        ]
+        self.assertTrue(payloads)
+        self.assertEqual(payloads[-1]["beverage_out_g"], 44.0)
+        self.assertFalse(payloads[-1]["yield_followed"])
 
     def test_recommendations_are_scoped_to_profile_id(self) -> None:
         shots = MemoryShotRepository()

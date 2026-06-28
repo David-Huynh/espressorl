@@ -201,7 +201,9 @@ def _same_bean_previous_bag_prior_points(
             continue
         if shot.grinder_context_id != grinder_context_id:
             continue
-        if shot.relative_grind_steps_from_reference is None:
+        if not shot.grind_observed or shot.relative_grind_steps_from_reference is None:
+            continue
+        if not shot.dose_observed or not shot.realized_yield_observed:
             continue
         if not _is_optimizer_observation(shot):
             continue
@@ -224,7 +226,8 @@ def _same_bean_previous_bag_prior_points(
         confidence = _prior_confidence_from_shot(shot) * rank_scale
         if confidence <= 0:
             continue
-        target_ratio = shot.target_ratio or shot.target_yield_g / shot.dose_in_g
+        target_yield_g = shot.realized_yield_g
+        target_ratio = target_yield_g / shot.dose_in_g
         base_observation_noise = 0.25 if shot.human_rating is not None else 0.4
         observation_noise = min(
             MAX_LOCAL_BEAN_HISTORY_OBSERVATION_NOISE,
@@ -240,7 +243,7 @@ def _same_bean_previous_bag_prior_points(
                 )
                 * current_recipe.microns_per_step,
                 dose_g=shot.dose_in_g,
-                target_yield_g=shot.target_yield_g,
+                target_yield_g=target_yield_g,
                 target_ratio=target_ratio,
                 predicted_reward=max(0.0, min(1.0, shot.reward or 0.0)),
                 confidence=confidence,
@@ -305,6 +308,9 @@ class EspressoRLService:
             microns_per_step=event.microns_per_step,
             dose_in_g=event.dose_in_g,
             target_yield_g=event.target_yield_g,
+            grind_observed=event.grind_observed,
+            dose_observed=event.dose_observed,
+            target_yield_observed=event.target_yield_observed,
             relative_grind_steps_from_reference=event.relative_grind_steps_from_reference,
             beverage_out_g=event.beverage_out_g,
             shot_time_s=event.shot_time_s,
@@ -501,9 +507,33 @@ class EspressoRLService:
         if event.grind_followed is not None:
             shot.grind_followed = event.grind_followed
             shot.grind_recommendation_trust = 1.0 if event.grind_followed else 0.0
+            if event.grind_followed:
+                if shot.recommended_projected_relative_step_from_reference is not None:
+                    shot.relative_grind_steps_from_reference = shot.recommended_projected_relative_step_from_reference
+                    shot.relative_grind_um_from_reference = (
+                        shot.relative_grind_steps_from_reference
+                        * shot.microns_per_step
+                        * shot.grinder_direction_sign
+                    )
+                shot.grind_observed = shot.relative_grind_steps_from_reference is not None
+            else:
+                shot.grind_observed = False
         if event.dose_followed is not None:
             shot.dose_followed = event.dose_followed
             shot.dose_recommendation_trust = 1.0 if event.dose_followed else 0.0
+            if event.dose_followed:
+                if shot.recommended_dose_g is not None:
+                    shot.dose_in_g = shot.recommended_dose_g
+                shot.dose_observed = True
+                shot.brew_ratio = (
+                    shot.beverage_out_g / shot.dose_in_g
+                    if shot.beverage_out_g is not None
+                    else None
+                )
+                shot.target_ratio = shot.target_yield_g / shot.dose_in_g
+            else:
+                shot.dose_observed = False
+                shot.brew_ratio = None
         if event.yield_followed is not None:
             shot.yield_followed = event.yield_followed
             shot.yield_recommendation_trust = 1.0 if event.yield_followed else 0.0
@@ -511,9 +541,12 @@ class EspressoRLService:
         if "did_not_follow_grind" in tags:
             shot.grind_followed = False
             shot.grind_recommendation_trust = 0.0
+            shot.grind_observed = False
         if "did_not_follow_dose" in tags:
             shot.dose_followed = False
             shot.dose_recommendation_trust = 0.0
+            shot.dose_observed = False
+            shot.brew_ratio = None
         if "did_not_follow_yield" in tags:
             shot.yield_followed = False
             shot.yield_recommendation_trust = 0.0
@@ -897,8 +930,6 @@ class EspressoRLService:
         return recommendation
 
     def _current_recipe_for_shot(self, shot: ShotRecord) -> Recipe:
-        if shot.relative_grind_steps_from_reference is not None:
-            return shot.to_recipe()
         profile_scope = _profile_scope_key(profile_id=shot.profile_id, raw_profile_hash=None)
         recent = self._shots.list_recent(
             install_id=shot.install_id,
@@ -911,16 +942,32 @@ class EspressoRLService:
             (
                 candidate.relative_grind_steps_from_reference
                 for candidate in reversed(recent)
-                if candidate.relative_grind_steps_from_reference is not None
+                if candidate.grind_observed
+                and candidate.relative_grind_steps_from_reference is not None
                 and _shot_matches_profile_scope(candidate, profile_scope)
             ),
             0.0,
         )
+        if shot.grind_observed and shot.relative_grind_steps_from_reference is not None:
+            relative_steps = shot.relative_grind_steps_from_reference
+        dose_g = shot.dose_in_g
+        if not shot.dose_observed:
+            dose_g = next(
+                (
+                    candidate.dose_in_g
+                    for candidate in reversed(recent)
+                    if candidate.dose_observed and _shot_matches_profile_scope(candidate, profile_scope)
+                ),
+                dose_g,
+            )
         return Recipe(
             relative_grind_steps_from_reference=relative_steps,
             microns_per_step=shot.microns_per_step,
-            dose_g=shot.dose_in_g,
-            target_yield_g=shot.target_yield_g,
+            dose_g=dose_g,
+            target_yield_g=max(
+                self._safety_bounds.target_yield_min_g,
+                min(self._safety_bounds.target_yield_max_g, shot.realized_yield_g),
+            ),
             grinder_step_direction=shot.grinder_step_direction,
         )
 

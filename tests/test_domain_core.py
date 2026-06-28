@@ -312,7 +312,7 @@ class DomainCoreTests(unittest.TestCase):
         self.assertEqual(result.state, FollowThroughState.NOT_FOLLOWED)
         self.assertEqual(result.attribution_weight, 0.0)
 
-    def test_human_rating_dominates_reward_and_not_followed_lowers_confidence(self) -> None:
+    def test_not_followed_recommendation_does_not_reduce_actual_shot_rating_confidence(self) -> None:
         result = compute_reward(
             human_rating=5,
             profile_score=0.1,
@@ -320,7 +320,7 @@ class DomainCoreTests(unittest.TestCase):
             taste_tags=["balanced"],
         )
         self.assertGreater(result.reward, 0.8)
-        self.assertLess(result.confidence, 0.25)
+        self.assertEqual(result.confidence, 1.0)
 
     def test_reward_confidence_uses_tags_and_channeling_signal(self) -> None:
         untagged = compute_reward(

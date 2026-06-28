@@ -19,6 +19,7 @@ const allowedShotFields = new Set([
   'raw_profile_available', 'raw_profile_hash', 'grinder_calibration_mode', 'microns_per_step',
   'step_direction', 'reference_label', 'relative_grind_steps_from_reference',
   'relative_grind_um_from_reference', 'current_absolute_step', 'absolute_reference_step',
+  'action_observed',
   'dose_in_g', 'beverage_out_g', 'brew_ratio', 'target_yield_g', 'target_ratio',
   'shot_time_s', 'recommendation_id', 'recommended_grind_delta_steps_from_current',
   'recommended_grind_delta_um_from_current', 'recommended_projected_relative_step_from_reference',
@@ -265,6 +266,7 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalNumberRange(payload, 'relative_grind_um_from_reference', -1_000_000, 1_000_000, errors);
   optionalNumberRange(payload, 'current_absolute_step', -10_000, 10_000, errors);
   optionalNumberRange(payload, 'absolute_reference_step', -10_000, 10_000, errors);
+  optionalActionObserved(payload, errors);
   optionalIdentifier(payload, 'recommendation_id', errors);
   optionalNumberRange(payload, 'recommended_grind_delta_steps_from_current', -1000, 1000, errors);
   optionalNumberRange(payload, 'recommended_grind_delta_um_from_current', -100_000, 100_000, errors);
@@ -532,6 +534,39 @@ function optionalObject(payload: JsonRecord, key: string, errors: string[]) {
     if (typeof entryValue === 'number' && !Number.isFinite(entryValue)) {
       errors.push(`${key} contains unsafe values`);
       return;
+    }
+  }
+}
+
+function optionalActionObserved(payload: JsonRecord, errors: string[]) {
+  const value = payload.action_observed;
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (!value || Array.isArray(value) || typeof value !== 'object') {
+    errors.push('action_observed must be an object');
+    return;
+  }
+  const observed = value as JsonRecord;
+  const allowed = new Set(['grind', 'dose', 'target_yield']);
+  const unknown = Object.keys(observed).filter(key => !allowed.has(key));
+  if (unknown.length > 0) {
+    errors.push(`action_observed contains unknown fields: ${unknown.slice(0, 10).join(', ')}`);
+  }
+  for (const field of allowed) {
+    if (typeof observed[field] !== 'boolean') {
+      errors.push(`action_observed.${field} must be boolean`);
+    }
+  }
+  if (observed.grind === true) {
+    const hasRelativeGrind = payload.relative_grind_steps_from_reference !== undefined &&
+      payload.relative_grind_steps_from_reference !== null;
+    const hasAbsolutePair = payload.current_absolute_step !== undefined &&
+      payload.current_absolute_step !== null &&
+      payload.absolute_reference_step !== undefined &&
+      payload.absolute_reference_step !== null;
+    if (!hasRelativeGrind && !hasAbsolutePair) {
+      errors.push('action_observed.grind cannot be true without a grind measurement');
     }
   }
 }

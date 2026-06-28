@@ -165,9 +165,13 @@ class ConservativeBOOptimizer:
                 bounds=context.safety_bounds,
             )
 
-        center_grind = center.relative_grind_steps_from_reference if center.relative_grind_steps_from_reference is not None else current.relative_grind_steps_from_reference
-        center_dose = center.dose_in_g
-        center_yield = center.target_yield_g
+        center_grind = (
+            center.relative_grind_steps_from_reference
+            if center.grind_observed and center.relative_grind_steps_from_reference is not None
+            else current.relative_grind_steps_from_reference
+        )
+        center_dose = center.dose_in_g if center.dose_observed else current.dose_g
+        center_yield = center.realized_yield_g if center.realized_yield_observed else current.target_yield_g
         dose_offsets = [0.0] if dose_radius_g == 0 else [-dose_radius_g, 0.0, dose_radius_g]
         yield_offsets = self._yield_offsets(radius_yield_g)
 
@@ -271,7 +275,10 @@ class ConservativeBOOptimizer:
             if point.confidence <= 0 or point.observation_noise <= 0:
                 continue
             source_scale = self._prior_source_scale(point.source)
-            point_strength = min(1.0, point.confidence * source_scale / point.observation_noise)
+            point_strength = min(
+                1.0,
+                point.confidence * source_scale * self._prior_action_coverage(point) / point.observation_noise,
+            )
             strength = max(strength, point_strength)
         return strength
 
@@ -298,11 +305,10 @@ class ConservativeBOOptimizer:
         weight_sum = 0.0
         min_distance = math.inf
         for shot in eligible:
-            if shot.relative_grind_steps_from_reference is None:
-                continue
             distance = self._distance(candidate, shot, radius_steps, radius_yield_g, dose_radius_g)
             min_distance = min(min_distance, distance)
-            weight = ((shot.reward_confidence or 0.1) * shot.optimization_weight) / (0.15 + distance)
+            coverage = self._action_coverage(shot)
+            weight = ((shot.reward_confidence or 0.1) * shot.optimization_weight * coverage) / (0.15 + distance)
             observation_reward = shot.reward if shot.reward is not None else (shot.profile_score or 0.0)
             observation_reward += self._taste_candidate_adjustment(
                 candidate,
@@ -352,9 +358,14 @@ class ConservativeBOOptimizer:
         if not tags:
             return 0.0
 
-        shot_grind = shot.relative_grind_steps_from_reference if shot.relative_grind_steps_from_reference is not None else candidate.relative_grind_steps_from_reference
+        shot_grind = (
+            shot.relative_grind_steps_from_reference
+            if shot.grind_observed and shot.relative_grind_steps_from_reference is not None
+            else candidate.relative_grind_steps_from_reference
+        )
         grind_delta = (candidate.relative_grind_steps_from_reference - shot_grind) / max(radius_steps, 1)
-        yield_delta = (candidate.target_yield_g - shot.target_yield_g) / max(radius_yield_g, 1.0)
+        shot_yield = shot.realized_yield_g if shot.realized_yield_observed else candidate.target_yield_g
+        yield_delta = (candidate.target_yield_g - shot_yield) / max(radius_yield_g, 1.0)
         extraction_direction = max(-1.0, min(1.0, 0.65 * grind_delta + 0.35 * yield_delta))
 
         if {"sour", "weak", "thin", "too_fast"} & tags:
@@ -391,14 +402,24 @@ class ConservativeBOOptimizer:
                 context.current_recipe.relative_grind_steps_from_reference
                 + point.grind_delta_um_from_current / context.current_recipe.microns_per_step
             )
-            grind_d = abs(candidate.relative_grind_steps_from_reference - prior_relative_grind_steps_from_reference) / max(radius_steps, 1)
-            dose_d = abs(candidate.dose_g - point.dose_g) / max(dose_radius_g, 0.5)
-            yield_d = abs(candidate.target_yield_g - point.target_yield_g) / max(radius_yield_g, 1.0)
-            distance = math.sqrt(grind_d * grind_d + dose_d * dose_d + yield_d * yield_d)
+            distances: list[float] = []
+            if point.grind_observed:
+                distances.append(
+                    abs(candidate.relative_grind_steps_from_reference - prior_relative_grind_steps_from_reference)
+                    / max(radius_steps, 1)
+                )
+            if point.dose_observed:
+                distances.append(abs(candidate.dose_g - point.dose_g) / max(dose_radius_g, 0.5))
+            if point.target_yield_observed:
+                distances.append(
+                    abs(candidate.target_yield_g - point.target_yield_g) / max(radius_yield_g, 1.0)
+                )
+            distance = math.sqrt(sum(value * value for value in distances))
             weight = (
                 min(point.confidence, 0.8)
                 * prior_decay
                 * self._prior_source_scale(point.source)
+                * self._prior_action_coverage(point)
                 / (point.observation_noise + 0.25 + distance)
             )
             prior_weighted_reward += weight * point.predicted_reward
@@ -456,11 +477,32 @@ class ConservativeBOOptimizer:
         radius_yield_g: float,
         dose_radius_g: float,
     ) -> float:
-        shot_grind = shot.relative_grind_steps_from_reference if shot.relative_grind_steps_from_reference is not None else candidate.relative_grind_steps_from_reference
-        grind_d = abs(candidate.relative_grind_steps_from_reference - shot_grind) / max(radius_steps, 1)
-        dose_d = abs(candidate.dose_g - shot.dose_in_g) / max(dose_radius_g, 0.5)
-        yield_d = abs(candidate.target_yield_g - shot.target_yield_g) / max(radius_yield_g, 1.0)
-        return math.sqrt(grind_d * grind_d + dose_d * dose_d + yield_d * yield_d)
+        distances: list[float] = []
+        if shot.grind_observed and shot.relative_grind_steps_from_reference is not None:
+            distances.append(
+                abs(candidate.relative_grind_steps_from_reference - shot.relative_grind_steps_from_reference)
+                / max(radius_steps, 1)
+            )
+        if shot.dose_observed:
+            distances.append(abs(candidate.dose_g - shot.dose_in_g) / max(dose_radius_g, 0.5))
+        if shot.realized_yield_observed:
+            distances.append(
+                abs(candidate.target_yield_g - shot.realized_yield_g) / max(radius_yield_g, 1.0)
+            )
+        return math.sqrt(sum(distance * distance for distance in distances))
+
+    def _action_coverage(self, shot: ShotRecord) -> float:
+        observed = sum(
+            (
+                shot.grind_observed and shot.relative_grind_steps_from_reference is not None,
+                shot.dose_observed,
+                shot.realized_yield_observed,
+            )
+        )
+        return observed / 3.0
+
+    def _prior_action_coverage(self, point: PriorPoint) -> float:
+        return sum((point.grind_observed, point.dose_observed, point.target_yield_observed)) / 3.0
 
     def _repeats_ignored_recommendation(self, candidate, context: OptimizationContext) -> bool:
         last = context.last_recommendation

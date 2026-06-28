@@ -338,6 +338,81 @@ class GaggimateAdapterTests(unittest.TestCase):
 
         self.assertIsNone(event.beverage_out_g)
 
+    def test_shot_profile_marks_adapter_fallback_recipe_fields_unobserved(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(
+                mqtt_host="localhost",
+                data_dir=Path("/tmp"),
+                initial_relative_grind_steps_from_reference=42,
+                initial_dose_g=18.0,
+                initial_target_yield_g=36.0,
+            ),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_shot_payload(
+            {
+                "shot_id": "shot_partial",
+                "time_ms": [0, 250],
+                "pressure": [0.0, 2.0],
+                "target_pressure": [0.0, 2.0],
+                "pump_flow": [0.0, 1.0],
+                "target_flow": [0.0, 1.0],
+                "flow": [0.0, 0.5],
+                "weight": [0.0, 1.0],
+                "dose_target_g": 18.5,
+                "relative_grind_steps_from_reference": 42,
+                "grind_observed": False,
+                "dose_observed": False,
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.relative_grind_steps_from_reference, 42)
+        self.assertEqual(event.dose_in_g, 18.5)
+        self.assertEqual(event.target_yield_g, 36.0)
+        self.assertFalse(event.grind_observed)
+        self.assertFalse(event.dose_observed)
+        self.assertFalse(event.target_yield_observed)
+
+    def test_shot_profile_uses_measured_grind_by_weight_dose_even_when_target_differs(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_shot_payload(
+            {
+                "shot_id": "shot_measured_dose",
+                "time_ms": [0, 250],
+                "pressure": [0.0, 2.0],
+                "target_pressure": [0.0, 2.0],
+                "pump_flow": [0.0, 1.0],
+                "target_flow": [0.0, 1.0],
+                "flow": [0.0, 0.5],
+                "weight": [0.0, 1.0],
+                "dose_in_g": 18.3,
+                "dose_target_g": 19.0,
+                "dose_observed": True,
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.dose_in_g, 18.3)
+        self.assertTrue(event.dose_observed)
+
     def test_shot_profile_payload_rejects_malformed_execution_metadata(self) -> None:
         client = GaggimateMQTTClient(
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),

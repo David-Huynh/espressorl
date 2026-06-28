@@ -53,8 +53,10 @@ _ACTION_FIELDS = frozenset(
         "dose_g",
         "target_yield_g",
         "target_ratio",
+        "observed",
     }
 )
+_ACTION_OBSERVED_FIELDS = frozenset({"grind", "dose", "target_yield"})
 _RECOMMENDATION_FIELDS = frozenset(
     {
         "recommendation_id",
@@ -160,6 +162,14 @@ def validate_training_transition(row: dict[str, Any]) -> list[str]:
         _require_number_range(action.get("dose_g"), "action.dose_g", 5.0, 30.0, errors)
         _require_number_range(action.get("target_yield_g"), "action.target_yield_g", 5.0, 100.0, errors)
         _require_number_range(action.get("target_ratio"), "action.target_ratio", 1.2, 3.5, errors)
+        observed = action.get("observed")
+        if observed is not None:
+            if not isinstance(observed, dict):
+                errors.append("action.observed must be an object")
+            else:
+                _reject_unknown_fields(observed, _ACTION_OBSERVED_FIELDS, errors, path="action.observed")
+                for field_name in _ACTION_OBSERVED_FIELDS:
+                    _require_bool(observed.get(field_name), f"action.observed.{field_name}", errors)
 
     recommendation = row.get("recommendation")
     if recommendation is not None:
@@ -353,6 +363,11 @@ def _optional_enum(value: object, label: str, allowed: set[str], errors: list[st
 def _optional_bool(value: object, label: str, errors: list[str]) -> None:
     if value is None:
         return
+    if not isinstance(value, bool):
+        errors.append(f"{label} must be boolean")
+
+
+def _require_bool(value: object, label: str, errors: list[str]) -> None:
     if not isinstance(value, bool):
         errors.append(f"{label} must be boolean")
 

@@ -104,6 +104,24 @@ class CommunityValidationTests(unittest.TestCase):
         self.assertEqual(warehouse.training_rows, [])
         self.assertIn("unknown fields", " ".join(warehouse.rejections[upload.upload_id]))
 
+    def test_malformed_action_observation_mask_is_rejected(self) -> None:
+        payload = shot_payload()
+        payload["action_observed"] = {
+            "grind": "yes",
+            "dose": True,
+            "target_yield": True,
+            "unexpected": False,
+        }
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.rejected, 1)
+        self.assertEqual(warehouse.validated_shots, [])
+        rejection = " ".join(warehouse.rejections[upload.upload_id])
+        self.assertIn("action_observed", rejection)
+
     def test_xss_like_metadata_string_is_rejected_before_trusted_storage(self) -> None:
         payload = shot_payload()
         payload["profile_label"] = "<img src=x onerror=alert(1)>"
@@ -249,11 +267,12 @@ class CommunityValidationTests(unittest.TestCase):
             0.0,
         )
 
-    def test_not_followed_payload_gets_low_training_weight(self) -> None:
+    def test_not_followed_payload_keeps_actual_shot_training_weight(self) -> None:
         payload = shot_payload()
+        followed_weight = payload_trust_weight(payload, install_trust=0.35)
         payload["recommendation_followed"] = "not_followed"
         weight = payload_trust_weight(payload, install_trust=0.35)
-        self.assertLess(weight, 0.08)
+        self.assertEqual(weight, followed_weight)
 
 
 def raw_upload(

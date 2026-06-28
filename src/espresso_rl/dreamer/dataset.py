@@ -57,6 +57,9 @@ DREAMER_STATIC_CONTEXT_FEATURES = (
     "dose_g",
     "initial_target_yield_g",
     "target_ratio",
+    "grind_observed",
+    "dose_observed",
+    "initial_target_yield_observed",
     "microns_per_step",
     "step_direction_sign",
     "profile_phase_count",
@@ -371,6 +374,15 @@ def _encode_static_context(static_context: dict[str, Any]) -> np.ndarray:
         static_context.get("initial_target_yield_g")
     )
     encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "target_ratio")] = _finite_or_zero(static_context.get("target_ratio"))
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "grind_observed")] = (
+        1.0 if static_context.get("grind_observed") is True else 0.0
+    )
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "dose_observed")] = (
+        1.0 if static_context.get("dose_observed") is True else 0.0
+    )
+    encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "initial_target_yield_observed")] = (
+        1.0 if static_context.get("initial_target_yield_observed") is True else 0.0
+    )
     encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "microns_per_step")] = _finite_or_zero(static_context.get("microns_per_step"))
     encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "step_direction_sign")] = (
         1.0 if static_context.get("step_direction") == "higher_is_finer" else -1.0
@@ -518,6 +530,9 @@ def _static_context(
     context: dict[str, Any],
     observation: dict[str, Any],
 ) -> dict[str, Any]:
+    observed = action.get("observed")
+    if not isinstance(observed, dict):
+        observed = {"grind": True, "dose": True, "target_yield": True}
     return _drop_none_values(
         {
             "relative_grind_steps_from_reference": action["relative_grind_steps_from_reference"],
@@ -525,6 +540,9 @@ def _static_context(
             "dose_g": action["dose_g"],
             "initial_target_yield_g": action["target_yield_g"],
             "target_ratio": action["target_ratio"],
+            "grind_observed": observed.get("grind") is True,
+            "dose_observed": observed.get("dose") is True,
+            "initial_target_yield_observed": observed.get("target_yield") is True,
             "microns_per_step": context["microns_per_step"],
             "step_direction": context["step_direction"],
             "profile_id": observation.get("profile_id"),

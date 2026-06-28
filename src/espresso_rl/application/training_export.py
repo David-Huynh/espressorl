@@ -86,6 +86,9 @@ CSV_COLUMNS = [
     "target_ratio",
     "relative_grind_steps_from_reference",
     "relative_grind_um_from_reference",
+    "grind_observed",
+    "dose_observed",
+    "target_yield_observed",
     "microns_per_step",
     "step_direction",
     "beverage_out_g",
@@ -247,9 +250,11 @@ def _training_transition_from_payload(
     if step_direction not in {"higher_is_finer", "higher_is_coarser"}:
         return None
 
+    action_observed = _action_observed(payload)
     relative_steps = _relative_grind_steps_from_reference(payload)
     if relative_steps is None:
-        return None
+        action_observed["grind"] = False
+        relative_steps = 0.0
     relative_um = _number(payload.get("relative_grind_um_from_reference"))
     if relative_um is None:
         relative_um = relative_steps * microns_per_step * _direction_sign(step_direction)
@@ -291,6 +296,7 @@ def _training_transition_from_payload(
             "dose_g": round(dose_g, 4),
             "target_yield_g": round(target_yield_g, 4),
             "target_ratio": round(target_ratio, 6),
+            "observed": action_observed,
         },
         "recommendation": recommendation,
         "observation": {
@@ -397,6 +403,21 @@ def _relative_grind_steps_from_reference(payload: dict[str, Any]) -> float | Non
     return current_absolute_step - absolute_reference_step
 
 
+def _action_observed(payload: dict[str, Any]) -> dict[str, bool]:
+    declared = payload.get("action_observed")
+    if isinstance(declared, dict):
+        return {
+            "grind": declared.get("grind") is True,
+            "dose": declared.get("dose") is True,
+            "target_yield": declared.get("target_yield") is True,
+        }
+    return {
+        "grind": _relative_grind_steps_from_reference(payload) is not None,
+        "dose": _number(payload.get("dose_in_g")) is not None,
+        "target_yield": _number(payload.get("target_yield_g")) is not None,
+    }
+
+
 def _recommendation_attribution_weight(payload: dict[str, Any]) -> float:
     decision = payload.get("recommendation_decision", "unknown")
     follow_through = payload.get("recommendation_followed", "unknown")
@@ -449,6 +470,9 @@ def _csv_row(row: dict[str, Any]) -> dict[str, Any]:
         "target_ratio": action.get("target_ratio"),
         "relative_grind_steps_from_reference": action.get("relative_grind_steps_from_reference"),
         "relative_grind_um_from_reference": action.get("relative_grind_um_from_reference"),
+        "grind_observed": (action.get("observed") or {}).get("grind", True),
+        "dose_observed": (action.get("observed") or {}).get("dose", True),
+        "target_yield_observed": (action.get("observed") or {}).get("target_yield", True),
         "microns_per_step": context.get("microns_per_step"),
         "step_direction": context.get("step_direction"),
         "beverage_out_g": observation.get("beverage_out_g"),
