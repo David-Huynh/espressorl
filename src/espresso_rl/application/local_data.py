@@ -158,7 +158,7 @@ class LocalDataService:
             dry_run=dry_run,
             counts=counts,
             warnings=[
-                "deletes all local shots, recommendations, queued uploads, and shadow evaluations for this machine"
+                "deletes all local shots, recommendations, queued uploads, shadow evaluations, and quality reports for this machine"
             ],
         )
 

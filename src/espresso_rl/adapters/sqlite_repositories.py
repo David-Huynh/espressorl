@@ -24,6 +24,7 @@ from espresso_rl.domain.models import (
     UploadQueueStatus,
 )
 from espresso_rl.domain.shadow_evaluation import DreamerShadowEvaluation, ShadowEvaluationStatus
+from espresso_rl.domain.shadow_quality import DreamerShadowQualityReport
 
 
 class SQLiteStore:
@@ -218,6 +219,32 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context
             ON dreamer_shadow_evaluations (
                 install_id, machine_id, bean_context_id, grinder_context_id, source_timestamp DESC
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dreamer_shadow_quality_reports (
+                report_id TEXT PRIMARY KEY,
+                install_id TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                bean_context_id TEXT NOT NULL,
+                grinder_context_id TEXT NOT NULL,
+                checkpoint_artifact_sha256 TEXT NOT NULL,
+                checkpoint_inference_probe_sha256 TEXT NOT NULL,
+                overall_status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                generated_at INTEGER NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context
+            ON dreamer_shadow_quality_reports (
+                install_id, machine_id, bean_context_id, grinder_context_id,
+                checkpoint_artifact_sha256, checkpoint_inference_probe_sha256,
+                generated_at DESC
             )
             """
         )
@@ -701,12 +728,22 @@ class SQLiteLocalDataRepository:
                 (install_id, machine_id),
             ).fetchone()["count"]
         )
+        shadow_report_count = int(
+            self._store.conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM dreamer_shadow_quality_reports
+                WHERE install_id=? AND machine_id=?
+                """,
+                (install_id, machine_id),
+            ).fetchone()["count"]
+        )
         if dry_run:
             return {
                 "shots": len(shot_ids),
                 "recommendations": len(recommendation_ids),
                 "upload_queue": upload_count,
                 "dreamer_shadow_evaluations": shadow_count,
+                "dreamer_shadow_quality_reports": shadow_report_count,
             }
         for shot_id in shot_ids:
             self._store.conn.execute(
@@ -718,6 +755,10 @@ class SQLiteLocalDataRepository:
                 "DELETE FROM upload_queue WHERE local_record_type='recommendation' AND local_record_id=?",
                 (recommendation_id,),
             )
+        self._store.conn.execute(
+            "DELETE FROM dreamer_shadow_quality_reports WHERE install_id=? AND machine_id=?",
+            (install_id, machine_id),
+        )
         self._store.conn.execute(
             "DELETE FROM dreamer_shadow_evaluations WHERE install_id=? AND machine_id=?",
             (install_id, machine_id),
@@ -736,6 +777,7 @@ class SQLiteLocalDataRepository:
             "recommendations": len(recommendation_ids),
             "upload_queue": upload_count,
             "dreamer_shadow_evaluations": shadow_count,
+            "dreamer_shadow_quality_reports": shadow_report_count,
         }
 
 
@@ -949,6 +991,82 @@ class SQLiteShadowEvaluationRepository:
             (install_id, machine_id, bean_context_id, grinder_context_id, limit),
         ).fetchall()
         return [_row_to_shadow_evaluation(row) for row in rows]
+
+
+class SQLiteShadowQualityReportRepository:
+    def __init__(self, store: SQLiteStore) -> None:
+        self._store = store
+
+    def upsert(self, report: DreamerShadowQualityReport) -> None:
+        payload_json = json.dumps(
+            report.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        self._store.conn.execute(
+            """
+            INSERT INTO dreamer_shadow_quality_reports (
+                report_id, install_id, machine_id, bean_context_id,
+                grinder_context_id, checkpoint_artifact_sha256,
+                checkpoint_inference_probe_sha256, overall_status,
+                payload_json, generated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(report_id) DO UPDATE SET
+                overall_status=excluded.overall_status,
+                payload_json=excluded.payload_json,
+                generated_at=excluded.generated_at
+            """,
+            (
+                report.report_id,
+                report.install_id,
+                report.machine_id,
+                report.bean_context_id,
+                report.grinder_context_id,
+                report.checkpoint_artifact_sha256,
+                report.checkpoint_inference_probe_sha256,
+                report.overall_status.value,
+                payload_json,
+                report.generated_at,
+            ),
+        )
+        self._store.conn.commit()
+
+    def get(self, report_id: str) -> DreamerShadowQualityReport | None:
+        row = self._store.conn.execute(
+            "SELECT payload_json FROM dreamer_shadow_quality_reports WHERE report_id=?",
+            (report_id,),
+        ).fetchone()
+        return _row_to_shadow_quality_report(row) if row else None
+
+    def get_latest(
+        self,
+        *,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str,
+        grinder_context_id: str,
+        checkpoint_artifact_sha256: str,
+        checkpoint_inference_probe_sha256: str,
+    ) -> DreamerShadowQualityReport | None:
+        row = self._store.conn.execute(
+            """
+            SELECT payload_json FROM dreamer_shadow_quality_reports
+            WHERE install_id=? AND machine_id=? AND bean_context_id=? AND grinder_context_id=?
+              AND checkpoint_artifact_sha256=? AND checkpoint_inference_probe_sha256=?
+            ORDER BY generated_at DESC
+            LIMIT 1
+            """,
+            (
+                install_id,
+                machine_id,
+                bean_context_id,
+                grinder_context_id,
+                checkpoint_artifact_sha256,
+                checkpoint_inference_probe_sha256,
+            ),
+        ).fetchone()
+        return _row_to_shadow_quality_report(row) if row else None
 
 
 class SQLiteUploadQueueRepository:
@@ -1642,3 +1760,17 @@ def _row_to_shadow_evaluation(row: sqlite3.Row | dict) -> DreamerShadowEvaluatio
     else:
         raise ValueError("stored shadow evaluation payload must be an object or JSON text")
     return DreamerShadowEvaluation.from_dict(value)
+
+
+def _row_to_shadow_quality_report(row: sqlite3.Row | dict) -> DreamerShadowQualityReport:
+    payload = row["payload_json"]
+    if isinstance(payload, dict):
+        value = payload
+    elif isinstance(payload, str):
+        try:
+            value = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError("stored shadow quality report payload is invalid JSON") from exc
+    else:
+        raise ValueError("stored shadow quality report payload must be an object or JSON text")
+    return DreamerShadowQualityReport.from_dict(value)

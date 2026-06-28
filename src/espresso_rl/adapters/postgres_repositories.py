@@ -8,6 +8,7 @@ from espresso_rl.adapters.sqlite_repositories import (
     _recommendation_to_row,
     _row_to_recommendation,
     _row_to_shadow_evaluation,
+    _row_to_shadow_quality_report,
     _row_to_shot,
     _row_to_upload_item,
     _shot_to_row,
@@ -28,6 +29,7 @@ from espresso_rl.domain.community import (
 )
 from espresso_rl.domain.models import Recommendation, ShotRecord, UploadQueueItem, UploadQueueStatus
 from espresso_rl.domain.shadow_evaluation import DreamerShadowEvaluation, ShadowEvaluationStatus
+from espresso_rl.domain.shadow_quality import DreamerShadowQualityReport
 
 
 class PostgresStore:
@@ -470,11 +472,21 @@ class PostgresLocalDataRepository:
                     (install_id, machine_id),
                 ).fetchone()["count"]
             )
+            shadow_report_count = int(
+                self._store.conn.execute(
+                    """
+                    SELECT COUNT(*) AS count FROM dreamer_shadow_quality_reports
+                    WHERE install_id=%s AND machine_id=%s
+                    """,
+                    (install_id, machine_id),
+                ).fetchone()["count"]
+            )
             counts = {
                 "shots": len(shot_ids),
                 "recommendations": len(recommendation_ids),
                 "upload_queue": upload_count,
                 "dreamer_shadow_evaluations": shadow_count,
+                "dreamer_shadow_quality_reports": shadow_report_count,
             }
             if dry_run:
                 return counts
@@ -488,6 +500,10 @@ class PostgresLocalDataRepository:
                     "DELETE FROM upload_queue WHERE local_record_type='recommendation' AND local_record_id = ANY(%s)",
                     (recommendation_ids,),
                 )
+            self._store.conn.execute(
+                "DELETE FROM dreamer_shadow_quality_reports WHERE install_id=%s AND machine_id=%s",
+                (install_id, machine_id),
+            )
             self._store.conn.execute(
                 "DELETE FROM dreamer_shadow_evaluations WHERE install_id=%s AND machine_id=%s",
                 (install_id, machine_id),
@@ -687,6 +703,80 @@ class PostgresShadowEvaluationRepository:
             (install_id, machine_id, bean_context_id, grinder_context_id, limit),
         ).fetchall()
         return [_row_to_shadow_evaluation(row) for row in rows]
+
+
+class PostgresShadowQualityReportRepository:
+    def __init__(self, store: PostgresStore) -> None:
+        self._store = store
+
+    def upsert(self, report: DreamerShadowQualityReport) -> None:
+        try:
+            self._store.conn.execute(
+                """
+                INSERT INTO dreamer_shadow_quality_reports (
+                    report_id, install_id, machine_id, bean_context_id,
+                    grinder_context_id, checkpoint_artifact_sha256,
+                    checkpoint_inference_probe_sha256, overall_status,
+                    payload_json, generated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                ON CONFLICT (report_id) DO UPDATE SET
+                    overall_status=EXCLUDED.overall_status,
+                    payload_json=EXCLUDED.payload_json,
+                    generated_at=EXCLUDED.generated_at
+                """,
+                (
+                    report.report_id,
+                    report.install_id,
+                    report.machine_id,
+                    report.bean_context_id,
+                    report.grinder_context_id,
+                    report.checkpoint_artifact_sha256,
+                    report.checkpoint_inference_probe_sha256,
+                    report.overall_status.value,
+                    json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False),
+                    report.generated_at,
+                ),
+            )
+            self._store.conn.commit()
+        except Exception:
+            self._store.conn.rollback()
+            raise
+
+    def get(self, report_id: str) -> DreamerShadowQualityReport | None:
+        row = self._store.conn.execute(
+            "SELECT payload_json FROM dreamer_shadow_quality_reports WHERE report_id=%s",
+            (report_id,),
+        ).fetchone()
+        return _row_to_shadow_quality_report(row) if row else None
+
+    def get_latest(
+        self,
+        *,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str,
+        grinder_context_id: str,
+        checkpoint_artifact_sha256: str,
+        checkpoint_inference_probe_sha256: str,
+    ) -> DreamerShadowQualityReport | None:
+        row = self._store.conn.execute(
+            """
+            SELECT payload_json FROM dreamer_shadow_quality_reports
+            WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND grinder_context_id=%s
+              AND checkpoint_artifact_sha256=%s AND checkpoint_inference_probe_sha256=%s
+            ORDER BY generated_at DESC
+            LIMIT 1
+            """,
+            (
+                install_id,
+                machine_id,
+                bean_context_id,
+                grinder_context_id,
+                checkpoint_artifact_sha256,
+                checkpoint_inference_probe_sha256,
+            ),
+        ).fetchone()
+        return _row_to_shadow_quality_report(row) if row else None
 
 
 class PostgresUploadQueueRepository:

@@ -213,6 +213,26 @@ CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context
         install_id, machine_id, bean_context_id, grinder_context_id, source_timestamp DESC
     );
 
+CREATE TABLE IF NOT EXISTS dreamer_shadow_quality_reports (
+    report_id TEXT PRIMARY KEY,
+    install_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    bean_context_id TEXT NOT NULL,
+    grinder_context_id TEXT NOT NULL,
+    checkpoint_artifact_sha256 TEXT NOT NULL,
+    checkpoint_inference_probe_sha256 TEXT NOT NULL,
+    overall_status TEXT NOT NULL,
+    payload_json JSONB NOT NULL,
+    generated_at BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context
+    ON dreamer_shadow_quality_reports (
+        install_id, machine_id, bean_context_id, grinder_context_id,
+        checkpoint_artifact_sha256, checkpoint_inference_probe_sha256,
+        generated_at DESC
+    );
+
 -- Admin/training warehouse tables. These are populated by an admin collector
 -- from the community-fed Supabase raw queue. Public clients must not write here.
 CREATE TABLE IF NOT EXISTS community_raw_uploads (

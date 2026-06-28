@@ -391,6 +391,57 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertNotIn("dreamer_v3_shadow", status["optimizer_available_modes"])
             self.assertIn("not enabled", status["optimizer_checkpoint_unavailable_reason"])
 
+    def test_status_payload_exposes_only_aggregate_shadow_quality_results(self) -> None:
+        class AggregateReport:
+            def status_summary(self):
+                return {
+                    "report_id": "shadow_quality_report_1",
+                    "generated_at": 20,
+                    "overall_status": "insufficient_data",
+                    "evaluated_record_count": 3,
+                    "gates": [{"name": "minimum_evidence", "status": "insufficient_data"}],
+                    "observational_only": True,
+                    "shadow_only": True,
+                    "recommendation_enabled": False,
+                    "machine_control_enabled": False,
+                }
+
+        class AggregateQualityService:
+            def build_context_report(self, **scope):
+                self.scope = scope
+                return AggregateReport()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(mqtt_host="localhost", data_dir=Path(tmp), install_id="install_1")
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                    clock=lambda: 10,
+                )
+                quality = AggregateQualityService()
+
+                status = build_status_payload(
+                    config=config,
+                    service=service,
+                    shot_repo=None,
+                    upload_maintenance=None,
+                    upload_queue_repo=None,
+                    machine_id="machine_1",
+                    bean_context_id="bean_1",
+                    grinder_context_id="grinder_1",
+                    shadow_quality_service=quality,
+                )
+
+        summary = status["dreamer_shadow_quality_report"]
+        self.assertEqual(summary["report_id"], "shadow_quality_report_1")
+        self.assertEqual(summary["overall_status"], "insufficient_data")
+        self.assertFalse(summary["recommendation_enabled"])
+        self.assertFalse(summary["machine_control_enabled"])
+        self.assertNotIn("dreamer_proposal", summary)
+        self.assertEqual(quality.scope["bean_context_id"], "bean_1")
+
     def test_status_payload_derives_grinder_catalog_search_url_from_supabase_function_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(
@@ -798,6 +849,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             "recommendations",
             "upload_queue",
             "dreamer_shadow_evaluations",
+            "dreamer_shadow_quality_reports",
             "community_raw_uploads",
             "community_validated_shots",
             "community_recommendations",

@@ -12,6 +12,7 @@ from espresso_rl.adapters.postgres_repositories import (
     PostgresLocalDataRepository,
     PostgresRecommendationRepository,
     PostgresShadowEvaluationRepository,
+    PostgresShadowQualityReportRepository,
     PostgresShotRepository,
     PostgresStore,
     PostgresUploadQueueRepository,
@@ -20,6 +21,7 @@ from espresso_rl.adapters.sqlite_repositories import (
     SQLiteLocalDataRepository,
     SQLiteRecommendationRepository,
     SQLiteShadowEvaluationRepository,
+    SQLiteShadowQualityReportRepository,
     SQLiteShotRepository,
     SQLiteStore,
     SQLiteUploadQueueRepository,
@@ -49,6 +51,10 @@ from espresso_rl.application.dreamer_shadow_inference import (
 from espresso_rl.application.dreamer_shadow_evaluation import (
     DreamerShadowEvaluationError,
     DreamerShadowEvaluationService,
+)
+from espresso_rl.application.dreamer_shadow_quality import (
+    DreamerShadowQualityError,
+    DreamerShadowQualityReportService,
 )
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
@@ -84,6 +90,7 @@ from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifa
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import LocalDataRepository, RecommendationRepository, ShotRepository, UploadQueueRepository
 from espresso_rl.ports.shadow_evaluations import ShadowEvaluationRepository
+from espresso_rl.ports.shadow_quality_reports import ShadowQualityReportRepository
 
 logging.basicConfig(
     level=logging.INFO,
@@ -110,7 +117,14 @@ def main() -> None:
             "DreamerV3 training is not wired into the active path yet; BO remains the safe recommendation path."
         )
 
-    shot_repo, recommendation_repo, upload_queue_repo, local_data_repo, shadow_evaluation_repo = open_repositories(config)
+    (
+        shot_repo,
+        recommendation_repo,
+        upload_queue_repo,
+        local_data_repo,
+        shadow_evaluation_repo,
+        shadow_quality_report_repo,
+    ) = open_repositories(config)
     verified_checkpoint, checkpoint_unavailable_reason = load_configured_dreamer_checkpoint(config)
     checkpoint_inference_parity_verified = False
     checkpoint_inference_parity_reason = None
@@ -138,6 +152,17 @@ def main() -> None:
             session=dreamer_shadow_session,
             repository=shadow_evaluation_repo,
             safety_bounds=SafetyBounds(),
+            clock=config.now,
+        )
+        if dreamer_shadow_session is not None
+        else None
+    )
+    shadow_quality_service = (
+        DreamerShadowQualityReportService(
+            evaluations=shadow_evaluation_repo,
+            reports=shadow_quality_report_repo,
+            checkpoint_artifact_sha256=dreamer_shadow_session.status.checkpoint_artifact_sha256,
+            checkpoint_inference_probe_sha256=dreamer_shadow_session.status.inference_probe_sha256,
             clock=config.now,
         )
         if dreamer_shadow_session is not None
@@ -184,11 +209,13 @@ def main() -> None:
     mqtt_client: GaggimateMQTTClient
 
     def record_shadow_evaluation(shot, recommendation) -> None:
-        try_record_shadow_evaluation(
+        result = try_record_shadow_evaluation(
             shadow_evaluation_service,
             shot=shot,
             recommendation=recommendation,
         )
+        if result is not None:
+            try_build_shadow_quality_report(shadow_quality_service, result.evaluation)
 
     def publish_status(
         machine_id: str,
@@ -217,6 +244,7 @@ def main() -> None:
             mode=mode,
             optimizer_status=runtime_optimizer.status().to_dict(),
             shadow_evaluation_service=shadow_evaluation_service,
+            shadow_quality_service=shadow_quality_service,
         )
         mqtt_client.publish_status(machine_id, status)
 
@@ -472,6 +500,8 @@ def main() -> None:
         shot_repo=shot_repo,
         upload_queue_repo=upload_queue_repo,
         optimizer_status=runtime_optimizer.status().to_dict(),
+        shadow_evaluation_service=shadow_evaluation_service,
+        shadow_quality_service=shadow_quality_service,
     )
     logger.info("Listening for canonical events via Gaggimate MQTT adapter")
     signal.pause()
@@ -517,6 +547,8 @@ def maybe_publish_startup_recommendation(
     shot_repo: ShotRepository | None = None,
     upload_queue_repo: UploadQueueRepository | None = None,
     optimizer_status: dict[str, object] | None = None,
+    shadow_evaluation_service: DreamerShadowEvaluationService | None = None,
+    shadow_quality_service: DreamerShadowQualityReportService | None = None,
 ) -> None:
     if config.machine_id == "gaggimate:local":
         return
@@ -534,6 +566,8 @@ def maybe_publish_startup_recommendation(
                 bean_context_id=None,
                 grinder_context_id=config.grinder_context_id,
                 optimizer_status=optimizer_status,
+                shadow_evaluation_service=shadow_evaluation_service,
+                shadow_quality_service=shadow_quality_service,
             ),
         )
         return
@@ -560,6 +594,8 @@ def maybe_publish_startup_recommendation(
                 last_recommendation_at=current.updated_at,
                 mode=current.mode.value,
                 optimizer_status=optimizer_status,
+                shadow_evaluation_service=shadow_evaluation_service,
+                shadow_quality_service=shadow_quality_service,
             ),
         )
         return
@@ -576,6 +612,8 @@ def maybe_publish_startup_recommendation(
             bean_context_id=config.bean_context_id,
             grinder_context_id=config.grinder_context_id,
             optimizer_status=optimizer_status,
+            shadow_evaluation_service=shadow_evaluation_service,
+            shadow_quality_service=shadow_quality_service,
         ),
     )
 
@@ -597,6 +635,7 @@ def build_status_payload(
     mode: str | None = None,
     optimizer_status: dict[str, object] | None = None,
     shadow_evaluation_service: DreamerShadowEvaluationService | None = None,
+    shadow_quality_service: DreamerShadowQualityReportService | None = None,
 ) -> dict:
     now = config.now()
     recent = (
@@ -749,6 +788,35 @@ def build_status_payload(
             )
         except Exception as exc:
             logger.warning("DreamerV3 shadow evaluation status unavailable: %s", exc)
+    shadow_quality_summary = {
+        "report_id": None,
+        "generated_at": None,
+        "checkpoint_artifact_sha256": None,
+        "checkpoint_inference_probe_sha256": None,
+        "overall_status": "insufficient_data",
+        "evaluated_record_count": 0,
+        "stale_checkpoint_record_count": 0,
+        "observed_count": 0,
+        "safety_rate": None,
+        "outcome_coverage": None,
+        "dreamer_reward_delta_advantage": None,
+        "gates": [],
+        "observational_only": True,
+        "shadow_only": True,
+        "recommendation_enabled": False,
+        "machine_control_enabled": False,
+    }
+    if shadow_quality_service is not None and bean_context_id and grinder_context_id:
+        try:
+            quality_report = shadow_quality_service.build_context_report(
+                install_id=config.install_id,
+                machine_id=machine_id,
+                bean_context_id=bean_context_id,
+                grinder_context_id=grinder_context_id,
+            )
+            shadow_quality_summary = quality_report.status_summary()
+        except Exception as exc:
+            logger.warning("DreamerV3 shadow quality status unavailable: %s", exc)
 
     return {
         "addon_online": True,
@@ -811,6 +879,7 @@ def build_status_payload(
         "optimizer_unavailable_modes": optimizer_status.get("unavailable_modes") or {},
         "optimizer_fallback_reason": optimizer_status.get("fallback_reason"),
         "dreamer_shadow_evaluation": shadow_summary,
+        "dreamer_shadow_quality_report": shadow_quality_summary,
         "local_shot_count": len(optimizer_shots),
         "rated_shot_count": len(rated_shots),
         "best_known_recipe": best_known_recipe_payload(optimizer_shots),
@@ -1087,6 +1156,33 @@ def try_record_shadow_evaluation(
     return result
 
 
+def try_build_shadow_quality_report(
+    quality_service: DreamerShadowQualityReportService | None,
+    evaluation,
+):
+    if quality_service is None:
+        return None
+    try:
+        report = quality_service.build_context_report(
+            install_id=evaluation.install_id,
+            machine_id=evaluation.machine_id,
+            bean_context_id=evaluation.bean_context_id,
+            grinder_context_id=evaluation.grinder_context_id,
+        )
+    except DreamerShadowQualityError as exc:
+        logger.warning("DreamerV3 shadow quality report skipped: %s", exc)
+        return None
+    except Exception:
+        logger.exception("DreamerV3 shadow quality report failed; BO remains active")
+        return None
+    logger.info(
+        "DreamerV3 shadow quality report stored report=%s status=%s shadow_only=true",
+        report.report_id,
+        report.overall_status.value,
+    )
+    return report
+
+
 def maybe_start_admin_collector_worker(
     config: Config,
     stop_event: threading.Event,
@@ -1309,6 +1405,7 @@ def open_repositories(
     UploadQueueRepository,
     LocalDataRepository,
     ShadowEvaluationRepository,
+    ShadowQualityReportRepository,
 ]:
     if config.storage_backend == "postgres":
         logger.info("Using Postgres storage backend")
@@ -1319,6 +1416,7 @@ def open_repositories(
             PostgresUploadQueueRepository(store),
             PostgresLocalDataRepository(store),
             PostgresShadowEvaluationRepository(store),
+            PostgresShadowQualityReportRepository(store),
         )
 
     logger.warning("Using SQLite storage backend; Postgres is the intended container/admin runtime backend.")
@@ -1329,6 +1427,7 @@ def open_repositories(
         SQLiteUploadQueueRepository(store),
         SQLiteLocalDataRepository(store),
         SQLiteShadowEvaluationRepository(store),
+        SQLiteShadowQualityReportRepository(store),
     )
 
 

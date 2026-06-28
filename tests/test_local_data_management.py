@@ -118,6 +118,27 @@ class LocalDataManagementTests(unittest.TestCase):
                         10,
                     ),
                 )
+                store.conn.execute(
+                    """
+                    INSERT INTO dreamer_shadow_quality_reports (
+                        report_id, install_id, machine_id, bean_context_id, grinder_context_id,
+                        checkpoint_artifact_sha256, checkpoint_inference_probe_sha256,
+                        overall_status, payload_json, generated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "report_1",
+                        "install_1",
+                        "machine_1",
+                        "bean_1",
+                        "",
+                        "a" * 64,
+                        "b" * 64,
+                        "insufficient_data",
+                        "{}",
+                        10,
+                    ),
+                )
                 store.conn.commit()
                 service = LocalDataService(local, install_id="install_1", machine_id="machine_1", clock=lambda: 20)
 
@@ -128,12 +149,17 @@ class LocalDataManagementTests(unittest.TestCase):
                 self.assertEqual(dry_run["counts"]["recommendations"], 1)
                 self.assertEqual(dry_run["counts"]["upload_queue"], 2)
                 self.assertEqual(dry_run["counts"]["dreamer_shadow_evaluations"], 1)
+                self.assertEqual(dry_run["counts"]["dreamer_shadow_quality_reports"], 1)
                 self.assertEqual(result["counts"], dry_run["counts"])
                 self.assertIsNone(shots.get("espresso_1"))
                 self.assertIsNone(recommendations.get("rec_1"))
                 self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM upload_queue").fetchone()["count"], 0)
                 self.assertEqual(
                     store.conn.execute("SELECT COUNT(*) AS count FROM dreamer_shadow_evaluations").fetchone()["count"],
+                    0,
+                )
+                self.assertEqual(
+                    store.conn.execute("SELECT COUNT(*) AS count FROM dreamer_shadow_quality_reports").fetchone()["count"],
                     0,
                 )
 
