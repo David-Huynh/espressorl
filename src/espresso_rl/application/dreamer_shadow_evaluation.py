@@ -236,6 +236,10 @@ class DreamerShadowEvaluationService:
             batch["observations"].shape[-1] != expected.observation_dim
             or batch["static_context"].shape[-1] != expected.static_dim
             or batch["dynamic_actions"].shape[-1] != expected.dynamic_action_dim
+            or batch["context_static"].shape[-1] != expected.context_encoder.static_dim
+            or batch["context_terminal"].shape[-1] != expected.context_encoder.terminal_dim
+            or batch["context_time"].shape[-1] != expected.context_encoder.time_dim
+            or batch["context_trajectory_embedding"].shape[-1] != expected.context_encoder.trajectory_dim
         ):
             raise DreamerShadowEvaluationError("shadow episode feature layout is incompatible with checkpoint")
         source_ids = [int(item) for item in batch["source_training_row_ids"].tolist()]
@@ -253,7 +257,8 @@ class DreamerShadowEvaluationService:
         current_recipe: Recipe,
     ) -> ShadowRecipeProposal:
         models = self._session.models
-        observed = models.world_model.observe(batch, sample=False)
+        context_state = models.context_encoder(batch)
+        observed = models.world_model.observe(batch, context_state=context_state, sample=False)
         valid_index = int(batch["step_mask"][current_episode_index].sum().item()) - 1
         if valid_index < 0:
             raise DreamerShadowEvaluationError("shadow episode contains no valid observation steps")

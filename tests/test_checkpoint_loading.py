@@ -42,7 +42,7 @@ class CheckpointLoadingTests(unittest.TestCase):
         checkpoint = load_bundle(bundle)
 
         self.assertFalse(checkpoint.inference_ready)
-        self.assertEqual(checkpoint.component_names, ("actor", "critic", "world_model"))
+        self.assertEqual(checkpoint.component_names, ("actor", "context_encoder", "critic", "world_model"))
         self.assertEqual(checkpoint.tensor("actor.weight").shape, (1,))
         self.assertEqual(bytes(checkpoint.tensor_bytes("actor.weight")), struct.pack("<f", 1.0))
         self.assertEqual(checkpoint.artifact_sha256, bundle["artifact_sha256"])
@@ -207,6 +207,7 @@ def load_bundle(
 def checkpoint_bundle() -> dict:
     tensor_payloads = {
         "actor.weight": struct.pack("<f", 1.0),
+        "context_encoder.weight": struct.pack("<f", 4.0),
         "critic.bias": struct.pack("<f", 2.0),
         "world_model.scale": struct.pack("<f", 3.0),
     }
@@ -236,9 +237,9 @@ def checkpoint_bundle() -> dict:
     tensor_manifest = {
         "format": "espresso_rl_checkpoint_tensor_manifest_v1",
         "schema_version": 1,
-        "tensor_count": 3,
-        "component_count": 3,
-        "component_names": ["actor", "critic", "world_model"],
+        "tensor_count": 4,
+        "component_count": 4,
+        "component_names": ["actor", "context_encoder", "critic", "world_model"],
         "components": components,
         "tensors": tensor_entries,
     }
@@ -296,6 +297,14 @@ def checkpoint_bundle() -> dict:
             "reward_loss_scale": 1.0,
             "continuation_loss_scale": 1.0,
         },
+        "context_encoder": {
+            "static_dim": 18,
+            "terminal_dim": 18,
+            "time_dim": 1,
+            "trajectory_dim": 77,
+            "hidden_dim": 32,
+            "context_dim": 32,
+        },
         "imagination": {
             "horizon": 3,
             "actor_hidden_dim": 32,
@@ -346,9 +355,9 @@ def checkpoint_bundle() -> dict:
             "heldout_inference_sha256": "a" * 64,
             "evaluation_report_sha256": "7" * 64,
             "tensor_manifest": tensor_manifest,
-            "tensor_count": 3,
-            "component_count": 3,
-            "component_names": ["actor", "critic", "world_model"],
+            "tensor_count": 4,
+            "component_count": 4,
+            "component_names": ["actor", "context_encoder", "critic", "world_model"],
             "dreamer_tensor_contract_sha256": "4" * 64,
             "feature_layout_sha256": "5" * 64,
             "control_spec_sha256": control_spec_sha256,

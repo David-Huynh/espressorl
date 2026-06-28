@@ -244,6 +244,7 @@ class DreamerV3VectorWorldModel(nn.Module):
         self,
         batch: dict[str, torch.Tensor],
         *,
+        context_state: torch.Tensor | None = None,
         is_first: torch.Tensor | None = None,
         sample: bool = True,
     ) -> dict[str, torch.Tensor]:
@@ -253,6 +254,12 @@ class DreamerV3VectorWorldModel(nn.Module):
         step_mask = batch["step_mask"]
         batch_size, step_count, _ = observations.shape
         deter, stoch = self.initial_state(batch_size, observations.device)
+        if context_state is None:
+            context_state = torch.zeros_like(deter)
+        else:
+            context_state = context_state.to(device=observations.device, dtype=observations.dtype)
+            if context_state.shape != deter.shape:
+                raise ValueError("world model context_state shape is incompatible with deterministic state")
         if is_first is None:
             is_first = torch.zeros_like(step_mask, dtype=torch.bool)
             is_first[:, 0] = True
@@ -265,9 +272,10 @@ class DreamerV3VectorWorldModel(nn.Module):
         posterior_logits: list[torch.Tensor] = []
 
         for step_index in range(step_count):
-            reset_mask = (~is_first[:, step_index]).to(dtype=observations.dtype).unsqueeze(-1)
+            reset = is_first[:, step_index].to(dtype=observations.dtype).unsqueeze(-1)
+            reset_mask = 1.0 - reset
             valid_mask = step_mask[:, step_index].to(dtype=observations.dtype).unsqueeze(-1)
-            deter = deter * reset_mask
+            deter = deter * reset_mask + context_state * reset
             stoch = stoch * reset_mask.unsqueeze(-1)
             action = _squash_action(behavior[:, step_index])
             action = action * valid_mask
@@ -332,8 +340,14 @@ class DreamerV3VectorWorldModel(nn.Module):
     def continuation_probability(self, features: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(self.continuation_decoder(features).squeeze(-1))
 
-    def losses(self, batch: dict[str, torch.Tensor], *, sample: bool = True) -> dict[str, torch.Tensor]:
-        observed = self.observe(batch, sample=sample)
+    def losses(
+        self,
+        batch: dict[str, torch.Tensor],
+        *,
+        context_state: torch.Tensor | None = None,
+        sample: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        observed = self.observe(batch, context_state=context_state, sample=sample)
         features = observed["features"]
         step_mask = batch["step_mask"]
         valid_count = step_mask.sum().clamp_min(1.0)

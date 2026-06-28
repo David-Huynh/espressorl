@@ -10,6 +10,7 @@ import torch
 
 from espresso_rl.domain.model_checkpoint import (
     DREAMER_INFERENCE_PROBE_FORMAT,
+    DreamerContextEncoderArchitecture,
     DreamerCheckpointArchitecture,
     DreamerImaginationArchitecture,
     DreamerWorldModelArchitecture,
@@ -22,6 +23,7 @@ from espresso_rl.dreamer.imagination import (
     DreamerV3ImaginationConfig,
     DreamerV3ImaginationCritic,
 )
+from espresso_rl.dreamer.context_encoder import DreamerContextEncoder, DreamerContextEncoderConfig
 from espresso_rl.dreamer.reference_world_model import (
     DreamerV3VectorWorldModel,
     DreamerV3WorldModelConfig,
@@ -29,8 +31,6 @@ from espresso_rl.dreamer.reference_world_model import (
 )
 from espresso_rl.dreamer.dataset import (
     DREAMER_CONTEXT_WINDOW_SIZE,
-    DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
-    DREAMER_TERMINAL_FEATURES,
 )
 
 _COMPONENT_BUFFER_NAMES = {
@@ -47,6 +47,7 @@ class DreamerCheckpointMaterializationError(ValueError):
 @dataclass(frozen=True)
 class DreamerShadowModels:
     world_model: DreamerV3VectorWorldModel
+    context_encoder: DreamerContextEncoder
     actor: DreamerV3ImaginationActor
     critic: DreamerV3ImaginationCritic
     imagination_config: DreamerV3ImaginationConfig
@@ -56,6 +57,7 @@ class DreamerShadowModels:
 def checkpoint_architecture_from_models(
     *,
     world_model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder,
     actor: DreamerV3ImaginationActor,
     critic: DreamerV3ImaginationCritic,
     observation_dim: int,
@@ -90,6 +92,14 @@ def checkpoint_architecture_from_models(
             reward_loss_scale=model.reward_loss_scale,
             continuation_loss_scale=model.continuation_loss_scale,
         ),
+        context_encoder=DreamerContextEncoderArchitecture(
+            static_dim=context_encoder.static_dim,
+            terminal_dim=context_encoder.terminal_dim,
+            time_dim=context_encoder.time_dim,
+            trajectory_dim=context_encoder.trajectory_dim,
+            hidden_dim=context_encoder.config.hidden_dim,
+            context_dim=context_encoder.config.context_dim,
+        ),
         imagination=DreamerImaginationArchitecture(
             horizon=imagination.horizon,
             actor_hidden_dim=imagination.actor_hidden_dim,
@@ -114,12 +124,20 @@ def materialize_verified_dreamer_checkpoint(
     if architecture is None or checkpoint.inference_probe_sha256 is None:
         raise DreamerCheckpointMaterializationError("checkpoint runtime architecture or inference probe is missing")
     world_config = _world_model_config(architecture.world_model)
+    context_config = _context_encoder_config(architecture.context_encoder)
     imagination_config = _imagination_config(architecture.imagination)
     world_model = DreamerV3VectorWorldModel(
         observation_dim=architecture.observation_dim,
         behavior_dim=architecture.behavior_dim,
         static_dim=architecture.static_dim,
         config=world_config,
+    )
+    context_encoder = DreamerContextEncoder(
+        static_dim=architecture.context_encoder.static_dim,
+        terminal_dim=architecture.context_encoder.terminal_dim,
+        time_dim=architecture.context_encoder.time_dim,
+        trajectory_dim=architecture.context_encoder.trajectory_dim,
+        config=context_config,
     )
     actor = DreamerV3ImaginationActor(
         feature_dim=world_model.feature_dim,
@@ -133,13 +151,15 @@ def materialize_verified_dreamer_checkpoint(
 
     modules = {
         "world_model": world_model,
+        "context_encoder": context_encoder,
         "actor": actor,
         "critic": critic,
     }
     expected_names: set[str] = set()
     for component_name, module in modules.items():
         expected_names.update(f"{component_name}.{name}" for name in module.state_dict())
-        expected_names.add(f"{component_name}.{_COMPONENT_BUFFER_NAMES[component_name]}")
+        if component_name in _COMPONENT_BUFFER_NAMES:
+            expected_names.add(f"{component_name}.{_COMPONENT_BUFFER_NAMES[component_name]}")
     actual_names = {tensor.name for tensor in checkpoint.tensors}
     missing = sorted(expected_names - actual_names)
     extra = sorted(actual_names - expected_names)
@@ -169,6 +189,10 @@ def materialize_verified_dreamer_checkpoint(
             raise DreamerCheckpointMaterializationError(
                 f"checkpoint {component_name} state dictionary is incompatible"
             ) from exc
+        if component_name not in _COMPONENT_BUFFER_NAMES:
+            module.requires_grad_(False)
+            module.eval()
+            continue
         expected_buffer = getattr(module, _COMPONENT_BUFFER_NAMES[component_name])
         stored_buffer = _decode_tensor(
             checkpoint,
@@ -183,6 +207,7 @@ def materialize_verified_dreamer_checkpoint(
 
     actual_probe_sha256 = dreamer_inference_probe_sha256(
         world_model=world_model,
+        context_encoder=context_encoder,
         actor=actor,
         critic=critic,
         architecture=architecture,
@@ -191,6 +216,7 @@ def materialize_verified_dreamer_checkpoint(
         raise DreamerCheckpointMaterializationError("checkpoint deterministic inference probe does not match")
     return DreamerShadowModels(
         world_model=world_model,
+        context_encoder=context_encoder,
         actor=actor,
         critic=critic,
         imagination_config=imagination_config,
@@ -202,16 +228,19 @@ def materialize_verified_dreamer_checkpoint(
 def dreamer_inference_probe_sha256(
     *,
     world_model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder,
     actor: DreamerV3ImaginationActor,
     critic: DreamerV3ImaginationCritic,
     architecture: DreamerCheckpointArchitecture,
 ) -> str:
     with _deterministic_cpu_execution():
         world_model.eval()
+        context_encoder.eval()
         actor.eval()
         critic.eval()
         batch = _probe_batch(architecture)
-        observed = world_model.observe(batch, sample=False)
+        context_state = context_encoder(batch)
+        observed = world_model.observe(batch, context_state=context_state, sample=False)
         features = observed["features"][:, -1]
         control_mask = batch["control_action_mask"][:, -1]
         actor_output = actor(features, control_mask)
@@ -240,6 +269,7 @@ def dreamer_inference_probe_sha256(
             "context.terminal": batch["context_terminal"],
             "context.time": batch["context_time"],
             "context.trajectory_embedding": batch["context_trajectory_embedding"],
+            "context.encoded_state": context_state,
             "critic.logits": critic(features),
             "critic.value": critic.value(features),
             "probe.imagine_features": imagined["features"],
@@ -257,15 +287,18 @@ def dreamer_inference_probe_sha256(
 def dreamer_batch_inference_sha256(
     *,
     world_model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder,
     actor: DreamerV3ImaginationActor,
     critic: DreamerV3ImaginationCritic,
     batch: dict[str, torch.Tensor],
 ) -> str:
     with _deterministic_cpu_execution():
         world_model.eval()
+        context_encoder.eval()
         actor.eval()
         critic.eval()
-        observed = world_model.observe(batch, sample=False)
+        context_state = context_encoder(batch)
+        observed = world_model.observe(batch, context_state=context_state, sample=False)
         features = observed["features"]
         actor_output = actor(features, batch["control_action_mask"])
         outputs = {
@@ -274,6 +307,7 @@ def dreamer_batch_inference_sha256(
             "actor.static_logits": actor_output["static_logits"],
             "critic.logits": critic(features),
             "critic.value": critic.value(features),
+            "context.encoded_state": context_state,
             "world.continuation": world_model.continuation_probability(features),
             "world.features": features,
             "world.observation": world_model.observation_decoder(features),
@@ -363,14 +397,19 @@ def _probe_batch(architecture: DreamerCheckpointArchitecture) -> dict[str, torch
         "context_terminal": _sequence_tensor(
             batch_size,
             DREAMER_CONTEXT_WINDOW_SIZE,
-            len(DREAMER_TERMINAL_FEATURES),
+            architecture.context_encoder.terminal_dim,
             scale=0.0009765625,
         ),
-        "context_time": _sequence_tensor(batch_size, DREAMER_CONTEXT_WINDOW_SIZE, 1, scale=0.25),
+        "context_time": _sequence_tensor(
+            batch_size,
+            DREAMER_CONTEXT_WINDOW_SIZE,
+            architecture.context_encoder.time_dim,
+            scale=0.25,
+        ),
         "context_trajectory_embedding": _sequence_tensor(
             batch_size,
             DREAMER_CONTEXT_WINDOW_SIZE,
-            len(DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES),
+            architecture.context_encoder.trajectory_dim,
             scale=0.00048828125,
         ),
         "context_mask": _probe_context_mask(batch_size),
@@ -426,6 +465,13 @@ def _world_model_config(value: DreamerWorldModelArchitecture) -> DreamerV3WorldM
         observation_loss_scale=value.observation_loss_scale,
         reward_loss_scale=value.reward_loss_scale,
         continuation_loss_scale=value.continuation_loss_scale,
+    )
+
+
+def _context_encoder_config(value: DreamerContextEncoderArchitecture) -> DreamerContextEncoderConfig:
+    return DreamerContextEncoderConfig(
+        hidden_dim=value.hidden_dim,
+        context_dim=value.context_dim,
     )
 
 

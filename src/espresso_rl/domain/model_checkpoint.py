@@ -118,6 +118,30 @@ class DreamerImaginationArchitecture:
 
 
 @dataclass(frozen=True)
+class DreamerContextEncoderArchitecture:
+    static_dim: int
+    terminal_dim: int
+    time_dim: int
+    trajectory_dim: int
+    hidden_dim: int
+    context_dim: int
+
+    def __post_init__(self) -> None:
+        _bounded_int(self.static_dim, 1, 256, "context_encoder.static_dim")
+        _bounded_int(self.terminal_dim, 1, 256, "context_encoder.terminal_dim")
+        _bounded_int(self.time_dim, 1, 16, "context_encoder.time_dim")
+        _bounded_int(self.trajectory_dim, 1, 1024, "context_encoder.trajectory_dim")
+        _bounded_int(self.hidden_dim, 8, 2048, "context_encoder.hidden_dim")
+        _bounded_int(self.context_dim, 8, 2048, "context_encoder.context_dim")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            field_name: getattr(self, field_name)
+            for field_name in self.__dataclass_fields__
+        }
+
+
+@dataclass(frozen=True)
 class DreamerCheckpointArchitecture:
     observation_dim: int
     behavior_dim: int
@@ -125,6 +149,7 @@ class DreamerCheckpointArchitecture:
     dynamic_action_dim: int
     control_spec: DreamerControlSpec
     world_model: DreamerWorldModelArchitecture
+    context_encoder: DreamerContextEncoderArchitecture
     imagination: DreamerImaginationArchitecture
     format: str = DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT
     schema_version: int = DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION
@@ -140,12 +165,18 @@ class DreamerCheckpointArchitecture:
         _bounded_int(self.dynamic_action_dim, 1, 64, "dynamic_action_dim")
         if not isinstance(self.world_model, DreamerWorldModelArchitecture):
             raise ValueError("checkpoint world-model architecture is invalid")
+        if not isinstance(self.context_encoder, DreamerContextEncoderArchitecture):
+            raise ValueError("checkpoint context-encoder architecture is invalid")
         if not isinstance(self.imagination, DreamerImaginationArchitecture):
             raise ValueError("checkpoint imagination architecture is invalid")
         if not isinstance(self.control_spec, DreamerControlSpec):
             raise ValueError("checkpoint control spec is invalid")
         if self.world_model.reward_bins != self.imagination.value_bins:
             raise ValueError("checkpoint reward and value bin counts must match")
+        if self.context_encoder.static_dim != self.static_dim:
+            raise ValueError("checkpoint context encoder static_dim must match static_dim")
+        if self.context_encoder.context_dim != self.world_model.deter_dim:
+            raise ValueError("checkpoint context encoder context_dim must match world-model deter_dim")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -157,6 +188,7 @@ class DreamerCheckpointArchitecture:
             "dynamic_action_dim": self.dynamic_action_dim,
             "control_spec": self.control_spec.to_dict(),
             "world_model": self.world_model.to_dict(),
+            "context_encoder": self.context_encoder.to_dict(),
             "imagination": self.imagination.to_dict(),
         }
 

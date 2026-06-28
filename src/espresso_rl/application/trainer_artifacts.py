@@ -900,6 +900,7 @@ def _validate_serialized_checkpoint_parity(
         models = materialize_verified_dreamer_checkpoint(checkpoint)
         actual_heldout_sha256 = dreamer_batch_inference_sha256(
             world_model=models.world_model,
+            context_encoder=models.context_encoder,
             actor=models.actor,
             critic=models.critic,
             batch=parity_batch,

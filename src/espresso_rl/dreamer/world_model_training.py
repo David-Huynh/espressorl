@@ -16,6 +16,7 @@ from espresso_rl.dreamer.checkpoint_inference import (
     dreamer_inference_probe_sha256,
     dreamer_batch_inference_sha256,
 )
+from espresso_rl.dreamer.context_encoder import DreamerContextEncoder, DreamerContextEncoderConfig
 from espresso_rl.dreamer.imagination import (
     DreamerV3ImaginationActor,
     DreamerV3ImaginationConfig,
@@ -188,10 +189,10 @@ def run_fixed_cadence_world_model_smoke_train(
             config=model_config,
         )
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        initial = _evaluate(model, tensors)
+        initial = _evaluate(model, None, tensors)
         for _ in range(train_steps):
-            _train_epoch(model, optimizer, tensors, batch_size=tensors["observations"].shape[0])
-        final = _evaluate(model, tensors)
+            _train_epoch(model, None, optimizer, tensors, batch_size=tensors["observations"].shape[0])
+        final = _evaluate(model, None, tensors)
     finally:
         torch.use_deterministic_algorithms(old_deterministic)
         torch.set_num_threads(old_threads)
@@ -222,7 +223,11 @@ def run_fixed_cadence_world_model_train_preview(
             static_dim=train_tensors["static_context"].shape[-1],
             config=config.model,
         )
-        optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+        context_encoder = _context_encoder_for_batch(train_tensors, config.model)
+        optimizer = torch.optim.Adam(
+            [*model.parameters(), *context_encoder.parameters()],
+            lr=config.learning_rate,
+        )
         train_curve: list[dict[str, float]] = []
         validation_curve: list[dict[str, float]] = []
         best_epoch = 0
@@ -232,11 +237,11 @@ def run_fixed_cadence_world_model_train_preview(
 
         for epoch_index in range(1, config.epochs + 1):
             repeated_losses = [
-                _train_epoch(model, optimizer, train_tensors, batch_size=config.batch_size)
+                _train_epoch(model, context_encoder, optimizer, train_tensors, batch_size=config.batch_size)
                 for _ in range(config.gradient_steps_per_epoch)
             ]
             epoch_losses = _mean_loss_dicts(repeated_losses)
-            validation_losses = _evaluate(model, validation_tensors)
+            validation_losses = _evaluate(model, context_encoder, validation_tensors)
             train_curve.append({"epoch": epoch_index, **epoch_losses})
             validation_curve.append({"epoch": epoch_index, **validation_losses})
 
@@ -268,6 +273,7 @@ def run_fixed_cadence_world_model_train_preview(
         critic = DreamerV3ImaginationCritic(feature_dim=model.feature_dim, config=imagination_config)
         actor_critic_curve = _train_actor_critic(
             world_model=model,
+            context_encoder=context_encoder,
             actor=actor,
             critic=critic,
             batch=train_tensors,
@@ -276,6 +282,7 @@ def run_fixed_cadence_world_model_train_preview(
         )
         imagination_preview = run_dreamer_v3_imagination_preview(
             world_model=model,
+            context_encoder=context_encoder,
             batch=validation_tensors,
             config=imagination_config,
             actor=actor,
@@ -283,15 +290,18 @@ def run_fixed_cadence_world_model_train_preview(
         )
         evaluation_report = _offline_evaluation_report(
             world_model=model,
+            context_encoder=context_encoder,
             actor=actor,
             critic=critic,
             batch=validation_tensors,
             config=config,
             imagination_config=imagination_config,
         )
-        checkpoint_tensors = _checkpoint_tensors(model, actor, critic)
+        checkpoint_tensors = _checkpoint_tensors(model, context_encoder, actor, critic)
+        _freeze_runtime_modules(model, context_encoder, actor, critic)
         checkpoint_architecture = checkpoint_architecture_from_models(
             world_model=model,
+            context_encoder=context_encoder,
             actor=actor,
             critic=critic,
             observation_dim=int(train_tensors["observations"].shape[-1]),
@@ -302,12 +312,14 @@ def run_fixed_cadence_world_model_train_preview(
         )
         inference_probe_sha256 = dreamer_inference_probe_sha256(
             world_model=model,
+            context_encoder=context_encoder,
             actor=actor,
             critic=critic,
             architecture=checkpoint_architecture,
         )
         heldout_inference_sha256 = dreamer_batch_inference_sha256(
             world_model=model,
+            context_encoder=context_encoder,
             actor=actor,
             critic=critic,
             batch=validation_tensors,
@@ -401,6 +413,31 @@ def _validate_batch_shapes(batch: dict[str, torch.Tensor]) -> None:
         raise FixedCadenceWorldModelTrainingError("world model training batch must contain at least two valid steps")
 
 
+def _context_encoder_for_batch(
+    batch: dict[str, torch.Tensor],
+    model_config: DreamerV3WorldModelConfig,
+) -> DreamerContextEncoder:
+    for key in (
+        "context_static",
+        "context_terminal",
+        "context_time",
+        "context_trajectory_embedding",
+        "context_mask",
+    ):
+        if key not in batch:
+            raise FixedCadenceWorldModelTrainingError(f"world model preview batch is missing tensor {key}")
+    return DreamerContextEncoder(
+        static_dim=int(batch["context_static"].shape[-1]),
+        terminal_dim=int(batch["context_terminal"].shape[-1]),
+        time_dim=int(batch["context_time"].shape[-1]),
+        trajectory_dim=int(batch["context_trajectory_embedding"].shape[-1]),
+        config=DreamerContextEncoderConfig(
+            hidden_dim=model_config.hidden_dim,
+            context_dim=model_config.deter_dim,
+        ),
+    )
+
+
 def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
     if isinstance(config.seed, bool) or not isinstance(config.seed, int) or not 0 <= config.seed <= 2**32 - 1:
         raise FixedCadenceWorldModelTrainingError("world model preview seed must be a uint32 integer")
@@ -459,12 +496,15 @@ def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
 
 def _train_epoch(
     model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder | None,
     optimizer: torch.optim.Optimizer,
     batch: dict[str, torch.Tensor],
     *,
     batch_size: int,
 ) -> dict[str, float]:
     model.train()
+    if context_encoder is not None:
+        context_encoder.train()
     batch_count = batch["observations"].shape[0]
     accumulated: dict[str, float] = {}
     minibatches = 0
@@ -472,9 +512,15 @@ def _train_epoch(
         end = min(start + batch_size, batch_count)
         minibatch = _slice_batch(batch, start, end)
         optimizer.zero_grad()
-        losses = model.losses(minibatch)
+        losses = model.losses(
+            minibatch,
+            context_state=_context_state(context_encoder, minibatch),
+        )
         losses["loss_total"].backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+        parameters = [*model.parameters()]
+        if context_encoder is not None:
+            parameters.extend(context_encoder.parameters())
+        nn.utils.clip_grad_norm_(parameters, 10.0)
         optimizer.step()
         for key in losses:
             accumulated.setdefault(key, 0.0)
@@ -488,10 +534,22 @@ def _slice_batch(batch: dict[str, torch.Tensor], start: int, end: int) -> dict[s
 
 
 @torch.no_grad()
-def _evaluate(model: DreamerV3VectorWorldModel, batch: dict[str, torch.Tensor]) -> dict[str, float]:
+def _evaluate(
+    model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder | None,
+    batch: dict[str, torch.Tensor],
+) -> dict[str, float]:
     model.eval()
-    losses = model.losses(batch, sample=False)
+    if context_encoder is not None:
+        context_encoder.eval()
+    losses = model.losses(
+        batch,
+        context_state=_context_state(context_encoder, batch),
+        sample=False,
+    )
     model.train()
+    if context_encoder is not None:
+        context_encoder.train()
     return {key: round(float(value.item()), 8) for key, value in losses.items()}
 
 
@@ -503,6 +561,7 @@ def _mean_loss_dicts(losses: list[dict[str, float]]) -> dict[str, float]:
 def _train_actor_critic(
     *,
     world_model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder,
     actor: DreamerV3ImaginationActor,
     critic: DreamerV3ImaginationCritic,
     batch: dict[str, torch.Tensor],
@@ -510,11 +569,15 @@ def _train_actor_critic(
     imagination_config: DreamerV3ImaginationConfig,
 ) -> list[dict[str, float]]:
     world_model.eval()
+    context_encoder.eval()
     actor.train()
     critic.train()
     world_model_requires_grad = [parameter.requires_grad for parameter in world_model.parameters()]
+    context_encoder_requires_grad = [parameter.requires_grad for parameter in context_encoder.parameters()]
     try:
         for parameter in world_model.parameters():
+            parameter.requires_grad_(False)
+        for parameter in context_encoder.parameters():
             parameter.requires_grad_(False)
         actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_learning_rate)
         critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config.critic_learning_rate)
@@ -527,6 +590,7 @@ def _train_actor_critic(
             )
             critic_metrics = _train_critic_step(
                 world_model=world_model,
+                context_encoder=context_encoder,
                 actor=actor,
                 critic=critic,
                 optimizer=critic_optimizer,
@@ -536,6 +600,7 @@ def _train_actor_critic(
             )
             actor_metrics = _train_actor_step(
                 world_model=world_model,
+                context_encoder=context_encoder,
                 actor=actor,
                 critic=critic,
                 optimizer=actor_optimizer,
@@ -553,6 +618,8 @@ def _train_actor_critic(
     finally:
         for parameter, requires_grad in zip(world_model.parameters(), world_model_requires_grad, strict=True):
             parameter.requires_grad_(requires_grad)
+        for parameter, requires_grad in zip(context_encoder.parameters(), context_encoder_requires_grad, strict=True):
+            parameter.requires_grad_(requires_grad)
     return curve
 
 
@@ -560,6 +627,7 @@ def _train_actor_critic(
 def _offline_evaluation_report(
     *,
     world_model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder,
     actor: DreamerV3ImaginationActor,
     critic: DreamerV3ImaginationCritic,
     batch: dict[str, torch.Tensor],
@@ -567,10 +635,12 @@ def _offline_evaluation_report(
     imagination_config: DreamerV3ImaginationConfig,
 ) -> dict[str, Any]:
     world_model.eval()
+    context_encoder.eval()
     actor.eval()
     critic.eval()
-    validation_losses = _evaluate(world_model, batch)
-    observed = world_model.observe(batch, sample=False)
+    validation_losses = _evaluate(world_model, context_encoder, batch)
+    context_state = _context_state(context_encoder, batch)
+    observed = world_model.observe(batch, context_state=context_state, sample=False)
     step_mask = batch["step_mask"]
     valid_count = step_mask.sum().clamp_min(1.0)
     features = observed["features"]
@@ -585,6 +655,7 @@ def _offline_evaluation_report(
 
     rollout = dreamer_v3_imagination_rollout(
         world_model=world_model,
+        context_encoder=context_encoder,
         batch=batch,
         config=imagination_config,
         actor=actor,
@@ -658,6 +729,7 @@ def _offline_evaluation_report(
 def _train_critic_step(
     *,
     world_model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder,
     actor: DreamerV3ImaginationActor,
     critic: DreamerV3ImaginationCritic,
     optimizer: torch.optim.Optimizer,
@@ -670,6 +742,7 @@ def _train_critic_step(
     with torch.no_grad():
         rollout = dreamer_v3_imagination_rollout(
             world_model=world_model,
+            context_encoder=context_encoder,
             batch=batch,
             config=imagination_config,
             actor=actor,
@@ -694,6 +767,7 @@ def _train_critic_step(
 def _train_actor_step(
     *,
     world_model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder,
     actor: DreamerV3ImaginationActor,
     critic: DreamerV3ImaginationCritic,
     optimizer: torch.optim.Optimizer,
@@ -710,6 +784,7 @@ def _train_actor_step(
         optimizer.zero_grad()
         rollout = dreamer_v3_imagination_rollout(
             world_model=world_model,
+            context_encoder=context_encoder,
             batch=batch,
             config=imagination_config,
             actor=actor,
@@ -759,12 +834,14 @@ def _finite_bounded(value: float | torch.Tensor, maximum: float) -> bool:
 
 def _checkpoint_tensors(
     world_model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder,
     actor: DreamerV3ImaginationActor,
     critic: DreamerV3ImaginationCritic,
 ) -> dict[str, torch.Tensor]:
     tensors: dict[str, torch.Tensor] = {}
     for component_name, module in (
         ("world_model", world_model),
+        ("context_encoder", context_encoder),
         ("actor", actor),
         ("critic", critic),
     ):
@@ -774,6 +851,21 @@ def _checkpoint_tensors(
     tensors["actor.static_action_bins"] = actor.static_action_bins.detach().cpu().contiguous().to(dtype=torch.float32)
     tensors["critic.value_bins"] = critic.value_bins.detach().cpu().contiguous().to(dtype=torch.float32)
     return tensors
+
+
+def _freeze_runtime_modules(*modules: nn.Module) -> None:
+    for module in modules:
+        module.requires_grad_(False)
+        module.eval()
+
+
+def _context_state(
+    context_encoder: DreamerContextEncoder | None,
+    batch: dict[str, torch.Tensor],
+) -> torch.Tensor | None:
+    if context_encoder is None:
+        return None
+    return context_encoder(batch)
 
 
 def _validate_reference_model_config(config: DreamerV3WorldModelConfig) -> None:

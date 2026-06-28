@@ -178,6 +178,11 @@ def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
         "continuations": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
         "step_mask": torch.ones((1, 4), dtype=torch.float32),
         "static_context": torch.zeros((1, 18), dtype=torch.float32),
+        "context_static": torch.zeros((1, 16, 18), dtype=torch.float32),
+        "context_terminal": torch.zeros((1, 16, 18), dtype=torch.float32),
+        "context_time": torch.zeros((1, 16, 1), dtype=torch.float32),
+        "context_trajectory_embedding": torch.zeros((1, 16, 77), dtype=torch.float32),
+        "context_mask": torch.tensor([[1.0] + [0.0] * 15], dtype=torch.float32),
     }
     if batch_size == 1:
         return batch

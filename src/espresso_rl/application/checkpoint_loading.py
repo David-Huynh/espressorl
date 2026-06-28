@@ -12,6 +12,7 @@ from espresso_rl.domain.model_checkpoint import (
     DreamerCheckpointArchitecture,
     DreamerCheckpointCompatibility,
     DreamerCheckpointTensor,
+    DreamerContextEncoderArchitecture,
     DreamerImaginationArchitecture,
     DreamerWorldModelArchitecture,
     VerifiedDreamerCheckpoint,
@@ -42,7 +43,7 @@ _CHECKPOINT_STAGES = frozenset(
         TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
     }
 )
-_PREVIEW_COMPONENTS = ("actor", "critic", "world_model")
+_PREVIEW_COMPONENTS = ("actor", "context_encoder", "critic", "world_model")
 _SAFE_TENSOR_NAME = re.compile(r"^[A-Za-z0-9_.]{1,200}$")
 _HEX_CHARS = frozenset("0123456789abcdef")
 _MANIFEST_FIELDS = frozenset(
@@ -495,6 +496,7 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
                 "dynamic_action_dim",
                 "control_spec",
                 "world_model",
+                "context_encoder",
                 "imagination",
             }
         ),
@@ -543,6 +545,21 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
         ),
         "checkpoint imagination architecture",
     )
+    context_encoder = _require_object(value.get("context_encoder"), "checkpoint context-encoder architecture")
+    _require_exact_fields(
+        context_encoder,
+        frozenset(
+            {
+                "static_dim",
+                "terminal_dim",
+                "time_dim",
+                "trajectory_dim",
+                "hidden_dim",
+                "context_dim",
+            }
+        ),
+        "checkpoint context-encoder architecture",
+    )
     try:
         return DreamerCheckpointArchitecture(
             format=value["format"],
@@ -553,6 +570,7 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
             dynamic_action_dim=value["dynamic_action_dim"],
             control_spec=DreamerControlSpec.from_dict(value.get("control_spec")),
             world_model=DreamerWorldModelArchitecture(**world_model),
+            context_encoder=DreamerContextEncoderArchitecture(**context_encoder),
             imagination=DreamerImaginationArchitecture(**imagination),
         )
     except (TypeError, ValueError) as exc:

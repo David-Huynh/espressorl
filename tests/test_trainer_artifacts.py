@@ -296,12 +296,20 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(len(model_metadata["world_model_train_preview_sha256"]), 64)
         self.assertEqual(model_metadata["format"], CHECKPOINT_ARTIFACT_FORMAT)
         self.assertGreater(manifest["model_artifact"]["tensor_count"], 0)
-        self.assertEqual(manifest["model_artifact"]["component_names"], ["actor", "critic", "world_model"])
+        self.assertEqual(
+            manifest["model_artifact"]["component_names"],
+            ["actor", "context_encoder", "critic", "world_model"],
+        )
         self.assertEqual(
             manifest["model_artifact"]["architecture"]["control_spec"],
             config["dreamer_control_spec"],
         )
+        self.assertEqual(
+            manifest["model_artifact"]["architecture"]["context_encoder"]["context_dim"],
+            16,
+        )
         self.assertIn("world_model.reward_bins", model_header)
+        self.assertIn("context_encoder.recurrent.weight_ih_l0", model_header)
         self.assertIn("actor.static_action_bins", model_header)
         self.assertIn("critic.value_bins", model_header)
         self.assertEqual(
@@ -374,7 +382,7 @@ class TrainerArtifactTests(unittest.TestCase):
             manifest_reference=MODEL_MANIFEST_FILENAME,
             expected_artifact_sha256=first_files[MODEL_FILENAME].sha256,
         )
-        self.assertEqual(loaded.component_names, ("actor", "critic", "world_model"))
+        self.assertEqual(loaded.component_names, ("actor", "context_encoder", "critic", "world_model"))
         self.assertGreater(len(loaded.tensors), 0)
         shadow_session = build_dreamer_shadow_inference_session(loaded)
         self.assertTrue(shadow_session.status.parity_verified)
@@ -391,6 +399,9 @@ class TrainerArtifactTests(unittest.TestCase):
         )
         self.assertTrue(
             all(not parameter.requires_grad for parameter in shadow_session.models.world_model.parameters())
+        )
+        self.assertTrue(
+            all(not parameter.requires_grad for parameter in shadow_session.models.context_encoder.parameters())
         )
 
     def test_checkpoint_safetensors_validation_rejects_manifest_tampering(self) -> None:

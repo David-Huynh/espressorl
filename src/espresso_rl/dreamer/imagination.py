@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from espresso_rl.dreamer.dataset import DREAMER_DYNAMIC_ACTION_FEATURES
+from espresso_rl.dreamer.context_encoder import DreamerContextEncoder
 from espresso_rl.dreamer.reference_world_model import (
     DreamerV3VectorWorldModel,
     behavior_tensor_from_parts,
@@ -147,6 +148,7 @@ def run_dreamer_v3_imagination_preview(
     world_model: DreamerV3VectorWorldModel,
     batch: dict[str, torch.Tensor],
     config: DreamerV3ImaginationConfig,
+    context_encoder: DreamerContextEncoder | None = None,
     actor: DreamerV3ImaginationActor | None = None,
     critic: DreamerV3ImaginationCritic | None = None,
 ) -> dict[str, Any]:
@@ -162,6 +164,7 @@ def run_dreamer_v3_imagination_preview(
         critic = DreamerV3ImaginationCritic(feature_dim=world_model.feature_dim, config=config)
     rollout = dreamer_v3_imagination_rollout(
         world_model=world_model,
+        context_encoder=context_encoder,
         batch=batch,
         config=config,
         actor=actor,
@@ -201,6 +204,7 @@ def run_dreamer_v3_imagination_preview(
 def dreamer_v3_imagination_rollout(
     *,
     world_model: DreamerV3VectorWorldModel,
+    context_encoder: DreamerContextEncoder | None = None,
     batch: dict[str, torch.Tensor],
     config: DreamerV3ImaginationConfig,
     actor: DreamerV3ImaginationActor,
@@ -209,7 +213,11 @@ def dreamer_v3_imagination_rollout(
     validate_imagination_config(config)
     world_model.eval()
     with torch.no_grad():
-        observed = world_model.observe(batch, sample=False)
+        observed = world_model.observe(
+            batch,
+            context_state=_context_state(context_encoder, batch),
+            sample=False,
+        )
     start_indexes = _last_decision_indexes(batch)
     batch_indexes = torch.arange(batch["observations"].shape[0], device=batch["observations"].device)
     deter = observed["deter"][batch_indexes, start_indexes].detach()
@@ -324,6 +332,15 @@ def _last_decision_indexes(batch: dict[str, torch.Tensor]) -> torch.Tensor:
 def _decision_control_mask(batch: dict[str, torch.Tensor]) -> torch.Tensor:
     decision_valid = (batch["decision_step_mask"] * batch["step_mask"]).unsqueeze(-1)
     return (batch["control_action_mask"] * decision_valid).amax(dim=1)
+
+
+def _context_state(
+    context_encoder: DreamerContextEncoder | None,
+    batch: dict[str, torch.Tensor],
+) -> torch.Tensor | None:
+    if context_encoder is None:
+        return None
+    return context_encoder(batch)
 
 
 def _static_action_bin_tensor() -> torch.Tensor:
