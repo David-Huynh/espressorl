@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
+from espresso_rl.domain.shadow_contract import SHADOW_INFERENCE_CONTRACT_LEARNED_CONTEXT_ENCODER_V1
 from espresso_rl.dreamer.checkpoint_inference import (
     DreamerCheckpointMaterializationError,
     DreamerShadowModels,
@@ -16,6 +17,7 @@ class DreamerShadowInferenceStatus:
     checkpoint_manifest_sha256: str
     inference_probe_sha256: str
     heldout_inference_sha256: str
+    inference_contract_id: str
     tensor_count: int
     component_names: tuple[str, ...]
     parity_verified: bool = True
@@ -51,6 +53,7 @@ def build_dreamer_shadow_inference_session(
             checkpoint_manifest_sha256=checkpoint.manifest_sha256,
             inference_probe_sha256=models.inference_probe_sha256,
             heldout_inference_sha256=checkpoint.heldout_inference_sha256 or "",
+            inference_contract_id=SHADOW_INFERENCE_CONTRACT_LEARNED_CONTEXT_ENCODER_V1,
             tensor_count=len(checkpoint.tensors),
             component_names=checkpoint.component_names,
         ),

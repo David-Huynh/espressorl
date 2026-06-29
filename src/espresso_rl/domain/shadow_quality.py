@@ -5,8 +5,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from espresso_rl.domain.shadow_contract import (
+    SHADOW_INFERENCE_CONTRACT_LEGACY_V1,
+    validate_shadow_inference_contract_id,
+)
+
 SHADOW_QUALITY_REPORT_FORMAT = "espresso_rl_dreamer_shadow_quality_report_v1"
-SHADOW_QUALITY_REPORT_SCHEMA_VERSION = 1
+SHADOW_QUALITY_REPORT_SCHEMA_VERSION = 2
 SHADOW_QUALITY_POLICY_VERSION = "shadow_quality_v1"
 
 
@@ -152,6 +157,7 @@ class DreamerShadowQualityReport:
     generated_at: int
     checkpoint_artifact_sha256: str
     checkpoint_inference_probe_sha256: str
+    inference_contract_id: str
     install_id: str
     machine_id: str
     bean_context_id: str
@@ -202,6 +208,11 @@ class DreamerShadowQualityReport:
         _positive_int(self.generated_at, "shadow quality report generated_at")
         _sha256(self.checkpoint_artifact_sha256, "checkpoint_artifact_sha256")
         _sha256(self.checkpoint_inference_probe_sha256, "checkpoint_inference_probe_sha256")
+        object.__setattr__(
+            self,
+            "inference_contract_id",
+            validate_shadow_inference_contract_id(self.inference_contract_id),
+        )
         _sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
         count_fields = (
             "source_record_count",
@@ -290,6 +301,7 @@ class DreamerShadowQualityReport:
             "generated_at": self.generated_at,
             "checkpoint_artifact_sha256": self.checkpoint_artifact_sha256,
             "checkpoint_inference_probe_sha256": self.checkpoint_inference_probe_sha256,
+            "inference_contract_id": self.inference_contract_id,
             "install_id": self.install_id,
             "machine_id": self.machine_id,
             "bean_context_id": self.bean_context_id,
@@ -329,6 +341,12 @@ class DreamerShadowQualityReport:
     def from_dict(cls, value: object) -> "DreamerShadowQualityReport":
         if not isinstance(value, dict):
             raise ValueError("shadow quality report must be an object")
+        if "inference_contract_id" not in value and value.get("schema_version") == 1:
+            value = {
+                **value,
+                "schema_version": SHADOW_QUALITY_REPORT_SCHEMA_VERSION,
+                "inference_contract_id": SHADOW_INFERENCE_CONTRACT_LEGACY_V1,
+            }
         expected = {
             "format",
             "schema_version",
@@ -336,6 +354,7 @@ class DreamerShadowQualityReport:
             "generated_at",
             "checkpoint_artifact_sha256",
             "checkpoint_inference_probe_sha256",
+            "inference_contract_id",
             "install_id",
             "machine_id",
             "bean_context_id",
@@ -390,6 +409,7 @@ class DreamerShadowQualityReport:
             "generated_at": self.generated_at,
             "checkpoint_artifact_sha256": self.checkpoint_artifact_sha256,
             "checkpoint_inference_probe_sha256": self.checkpoint_inference_probe_sha256,
+            "inference_contract_id": self.inference_contract_id,
             "overall_status": self.overall_status.value,
             "evaluated_record_count": self.evaluated_record_count,
             "stale_checkpoint_record_count": self.stale_checkpoint_record_count,

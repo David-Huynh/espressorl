@@ -147,6 +147,42 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.profile_id, "lever")
         self.assertEqual(event.current_recipe().relative_grind_steps_from_reference, 42)
 
+    def test_machine_state_payload_does_not_invent_current_recipe_from_defaults(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(
+                mqtt_host="localhost",
+                data_dir=Path("/tmp"),
+                initial_relative_grind_steps_from_reference=42,
+                initial_dose_g=18.0,
+                initial_target_yield_g=38.0,
+            ),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_machine_state_payload(
+            {
+                "event_type": "machine_state",
+                "schema_version": 1,
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 100,
+                "state": "idle",
+                "bean_context_id": "bean_1",
+            },
+            mac="AA_BB",
+        )
+
+        self.assertIsNone(event.relative_grind_steps_from_reference)
+        self.assertIsNone(event.microns_per_step)
+        self.assertIsNone(event.dose_in_g)
+        self.assertIsNone(event.target_yield_g)
+        self.assertIsNone(event.current_recipe())
+
     def test_shot_profile_payload_accepts_gaggimate_recipe_metadata(self) -> None:
         client = GaggimateMQTTClient(
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
@@ -520,7 +556,13 @@ class GaggimateAdapterTests(unittest.TestCase):
 
         client.clear_recommendation("gaggimate:AA_BB")
 
-        self.assertEqual(fake.published, [("gaggimate/AA_BB/rl/recommendation", "", 1, True)])
+        self.assertEqual(
+            fake.published,
+            [
+                ("gaggimate/AA_BB/rl/recommendation", "", 1, True),
+                ("gaggimate/aa_bb/rl/recommendation", "", 1, True),
+            ],
+        )
 
     def test_startup_without_current_recommendation_clears_retained_recommendation_without_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

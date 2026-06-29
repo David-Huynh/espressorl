@@ -5,8 +5,13 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
+from espresso_rl.domain.shadow_contract import (
+    SHADOW_INFERENCE_CONTRACT_LEGACY_V1,
+    validate_shadow_inference_contract_id,
+)
+
 SHADOW_EVALUATION_FORMAT = "espresso_rl_dreamer_shadow_evaluation_v1"
-SHADOW_EVALUATION_SCHEMA_VERSION = 1
+SHADOW_EVALUATION_SCHEMA_VERSION = 2
 
 
 class ShadowEvaluationStatus(str, Enum):
@@ -123,6 +128,7 @@ class DreamerShadowEvaluation:
     updated_at: int
     checkpoint_artifact_sha256: str
     checkpoint_inference_probe_sha256: str
+    inference_contract_id: str
     install_id: str
     machine_id: str
     bean_context_id: str
@@ -166,6 +172,11 @@ class DreamerShadowEvaluation:
             _safe_text(getattr(self, field_name), f"shadow evaluation {field_name}", maximum=180)
         _sha256(self.checkpoint_artifact_sha256, "checkpoint_artifact_sha256")
         _sha256(self.checkpoint_inference_probe_sha256, "checkpoint_inference_probe_sha256")
+        object.__setattr__(
+            self,
+            "inference_contract_id",
+            validate_shadow_inference_contract_id(self.inference_contract_id),
+        )
         for field_name in ("created_at", "updated_at", "source_training_row_id", "source_timestamp"):
             _positive_int(getattr(self, field_name), f"shadow evaluation {field_name}")
         if self.updated_at < self.created_at:
@@ -240,6 +251,7 @@ class DreamerShadowEvaluation:
             "updated_at": self.updated_at,
             "checkpoint_artifact_sha256": self.checkpoint_artifact_sha256,
             "checkpoint_inference_probe_sha256": self.checkpoint_inference_probe_sha256,
+            "inference_contract_id": self.inference_contract_id,
             "install_id": self.install_id,
             "machine_id": self.machine_id,
             "bean_context_id": self.bean_context_id,
@@ -272,6 +284,12 @@ class DreamerShadowEvaluation:
     def from_dict(cls, value: object) -> "DreamerShadowEvaluation":
         if not isinstance(value, dict):
             raise ValueError("shadow evaluation must be an object")
+        if "inference_contract_id" not in value and value.get("schema_version") == 1:
+            value = {
+                **value,
+                "schema_version": SHADOW_EVALUATION_SCHEMA_VERSION,
+                "inference_contract_id": SHADOW_INFERENCE_CONTRACT_LEGACY_V1,
+            }
         expected = {
             "format",
             "schema_version",
@@ -280,6 +298,7 @@ class DreamerShadowEvaluation:
             "updated_at",
             "checkpoint_artifact_sha256",
             "checkpoint_inference_probe_sha256",
+            "inference_contract_id",
             "install_id",
             "machine_id",
             "bean_context_id",

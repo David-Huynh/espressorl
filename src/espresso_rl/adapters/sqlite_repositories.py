@@ -24,6 +24,7 @@ from espresso_rl.domain.models import (
     UploadQueueStatus,
 )
 from espresso_rl.domain.shadow_evaluation import DreamerShadowEvaluation, ShadowEvaluationStatus
+from espresso_rl.domain.shadow_contract import SHADOW_INFERENCE_CONTRACT_LEGACY_V1
 from espresso_rl.domain.shadow_quality import DreamerShadowQualityReport
 
 
@@ -206,6 +207,7 @@ class SQLiteStore:
                 machine_id TEXT NOT NULL,
                 bean_context_id TEXT NOT NULL,
                 grinder_context_id TEXT NOT NULL,
+                inference_contract_id TEXT NOT NULL DEFAULT 'dreamer_v3_legacy_shadow_v1',
                 source_timestamp INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
@@ -216,9 +218,10 @@ class SQLiteStore:
         )
         self.conn.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context
+            CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context_contract
             ON dreamer_shadow_evaluations (
-                install_id, machine_id, bean_context_id, grinder_context_id, source_timestamp DESC
+                install_id, machine_id, bean_context_id, grinder_context_id,
+                inference_contract_id, source_timestamp DESC
             )
             """
         )
@@ -232,6 +235,7 @@ class SQLiteStore:
                 grinder_context_id TEXT NOT NULL,
                 checkpoint_artifact_sha256 TEXT NOT NULL,
                 checkpoint_inference_probe_sha256 TEXT NOT NULL,
+                inference_contract_id TEXT NOT NULL DEFAULT 'dreamer_v3_legacy_shadow_v1',
                 overall_status TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 generated_at INTEGER NOT NULL
@@ -240,13 +244,24 @@ class SQLiteStore:
         )
         self.conn.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context
+            CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context_contract
             ON dreamer_shadow_quality_reports (
                 install_id, machine_id, bean_context_id, grinder_context_id,
-                checkpoint_artifact_sha256, checkpoint_inference_probe_sha256,
+                inference_contract_id, checkpoint_artifact_sha256,
+                checkpoint_inference_probe_sha256,
                 generated_at DESC
             )
             """
+        )
+        self._ensure_column(
+            "dreamer_shadow_evaluations",
+            "inference_contract_id",
+            f"TEXT NOT NULL DEFAULT '{SHADOW_INFERENCE_CONTRACT_LEGACY_V1}'",
+        )
+        self._ensure_column(
+            "dreamer_shadow_quality_reports",
+            "inference_contract_id",
+            f"TEXT NOT NULL DEFAULT '{SHADOW_INFERENCE_CONTRACT_LEGACY_V1}'",
         )
         self._ensure_column("upload_queue", "payload_json", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column("recommendations", "apply_status", "TEXT NOT NULL DEFAULT 'unknown'")
@@ -915,9 +930,9 @@ class SQLiteShadowEvaluationRepository:
             """
             INSERT INTO dreamer_shadow_evaluations (
                 evaluation_id, install_id, machine_id, bean_context_id,
-                grinder_context_id, source_timestamp, status, payload_json,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                grinder_context_id, inference_contract_id, source_timestamp,
+                status, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(evaluation_id) DO UPDATE SET
                 status=excluded.status,
                 payload_json=excluded.payload_json,
@@ -929,6 +944,7 @@ class SQLiteShadowEvaluationRepository:
                 evaluation.machine_id,
                 evaluation.bean_context_id,
                 evaluation.grinder_context_id,
+                evaluation.inference_contract_id,
                 evaluation.source_timestamp,
                 evaluation.status.value,
                 payload_json,
@@ -952,21 +968,28 @@ class SQLiteShadowEvaluationRepository:
         machine_id: str,
         bean_context_id: str,
         grinder_context_id: str,
+        inference_contract_id: str | None = None,
     ) -> DreamerShadowEvaluation | None:
+        contract_clause = ""
+        params: list[object] = [
+            install_id,
+            machine_id,
+            bean_context_id,
+            grinder_context_id,
+            ShadowEvaluationStatus.PENDING_OUTCOME.value,
+        ]
+        if inference_contract_id is not None:
+            contract_clause = " AND inference_contract_id=?"
+            params.append(inference_contract_id)
         row = self._store.conn.execute(
-            """
+            f"""
             SELECT payload_json FROM dreamer_shadow_evaluations
             WHERE install_id=? AND machine_id=? AND bean_context_id=? AND grinder_context_id=? AND status=?
+              {contract_clause}
             ORDER BY source_timestamp DESC
             LIMIT 1
             """,
-            (
-                install_id,
-                machine_id,
-                bean_context_id,
-                grinder_context_id,
-                ShadowEvaluationStatus.PENDING_OUTCOME.value,
-            ),
+            tuple(params),
         ).fetchone()
         return _row_to_shadow_evaluation(row) if row else None
 
@@ -977,18 +1000,26 @@ class SQLiteShadowEvaluationRepository:
         machine_id: str,
         bean_context_id: str,
         grinder_context_id: str,
+        inference_contract_id: str | None = None,
         limit: int = 100,
     ) -> list[DreamerShadowEvaluation]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
             raise ValueError("shadow evaluation limit must be 1..10000")
+        contract_clause = ""
+        params: list[object] = [install_id, machine_id, bean_context_id, grinder_context_id]
+        if inference_contract_id is not None:
+            contract_clause = " AND inference_contract_id=?"
+            params.append(inference_contract_id)
+        params.append(limit)
         rows = self._store.conn.execute(
-            """
+            f"""
             SELECT payload_json FROM dreamer_shadow_evaluations
             WHERE install_id=? AND machine_id=? AND bean_context_id=? AND grinder_context_id=?
+              {contract_clause}
             ORDER BY source_timestamp DESC
             LIMIT ?
             """,
-            (install_id, machine_id, bean_context_id, grinder_context_id, limit),
+            tuple(params),
         ).fetchall()
         return [_row_to_shadow_evaluation(row) for row in rows]
 
@@ -1009,9 +1040,9 @@ class SQLiteShadowQualityReportRepository:
             INSERT INTO dreamer_shadow_quality_reports (
                 report_id, install_id, machine_id, bean_context_id,
                 grinder_context_id, checkpoint_artifact_sha256,
-                checkpoint_inference_probe_sha256, overall_status,
-                payload_json, generated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                checkpoint_inference_probe_sha256, inference_contract_id,
+                overall_status, payload_json, generated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(report_id) DO UPDATE SET
                 overall_status=excluded.overall_status,
                 payload_json=excluded.payload_json,
@@ -1025,6 +1056,7 @@ class SQLiteShadowQualityReportRepository:
                 report.grinder_context_id,
                 report.checkpoint_artifact_sha256,
                 report.checkpoint_inference_probe_sha256,
+                report.inference_contract_id,
                 report.overall_status.value,
                 payload_json,
                 report.generated_at,
@@ -1048,12 +1080,14 @@ class SQLiteShadowQualityReportRepository:
         grinder_context_id: str,
         checkpoint_artifact_sha256: str,
         checkpoint_inference_probe_sha256: str,
+        inference_contract_id: str,
     ) -> DreamerShadowQualityReport | None:
         row = self._store.conn.execute(
             """
             SELECT payload_json FROM dreamer_shadow_quality_reports
             WHERE install_id=? AND machine_id=? AND bean_context_id=? AND grinder_context_id=?
               AND checkpoint_artifact_sha256=? AND checkpoint_inference_probe_sha256=?
+              AND inference_contract_id=?
             ORDER BY generated_at DESC
             LIMIT 1
             """,
@@ -1064,6 +1098,7 @@ class SQLiteShadowQualityReportRepository:
                 grinder_context_id,
                 checkpoint_artifact_sha256,
                 checkpoint_inference_probe_sha256,
+                inference_contract_id,
             ),
         ).fetchone()
         return _row_to_shadow_quality_report(row) if row else None

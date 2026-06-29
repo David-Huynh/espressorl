@@ -201,6 +201,7 @@ CREATE TABLE IF NOT EXISTS dreamer_shadow_evaluations (
     machine_id TEXT NOT NULL,
     bean_context_id TEXT NOT NULL,
     grinder_context_id TEXT NOT NULL,
+    inference_contract_id TEXT NOT NULL DEFAULT 'dreamer_v3_legacy_shadow_v1',
     source_timestamp BIGINT NOT NULL,
     status TEXT NOT NULL,
     payload_json JSONB NOT NULL,
@@ -208,9 +209,10 @@ CREATE TABLE IF NOT EXISTS dreamer_shadow_evaluations (
     updated_at BIGINT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context
+CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context_contract
     ON dreamer_shadow_evaluations (
-        install_id, machine_id, bean_context_id, grinder_context_id, source_timestamp DESC
+        install_id, machine_id, bean_context_id, grinder_context_id,
+        inference_contract_id, source_timestamp DESC
     );
 
 CREATE TABLE IF NOT EXISTS dreamer_shadow_quality_reports (
@@ -221,15 +223,17 @@ CREATE TABLE IF NOT EXISTS dreamer_shadow_quality_reports (
     grinder_context_id TEXT NOT NULL,
     checkpoint_artifact_sha256 TEXT NOT NULL,
     checkpoint_inference_probe_sha256 TEXT NOT NULL,
+    inference_contract_id TEXT NOT NULL DEFAULT 'dreamer_v3_legacy_shadow_v1',
     overall_status TEXT NOT NULL,
     payload_json JSONB NOT NULL,
     generated_at BIGINT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context
+CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context_contract
     ON dreamer_shadow_quality_reports (
         install_id, machine_id, bean_context_id, grinder_context_id,
-        checkpoint_artifact_sha256, checkpoint_inference_probe_sha256,
+        inference_contract_id, checkpoint_artifact_sha256,
+        checkpoint_inference_probe_sha256,
         generated_at DESC
     );
 

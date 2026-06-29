@@ -29,6 +29,7 @@ from espresso_rl.domain.community import (
 )
 from espresso_rl.domain.models import Recommendation, ShotRecord, UploadQueueItem, UploadQueueStatus
 from espresso_rl.domain.shadow_evaluation import DreamerShadowEvaluation, ShadowEvaluationStatus
+from espresso_rl.domain.shadow_contract import SHADOW_INFERENCE_CONTRACT_LEGACY_V1
 from espresso_rl.domain.shadow_quality import DreamerShadowQualityReport
 
 
@@ -114,6 +115,14 @@ class PostgresStore:
             "projected_absolute_step": "DOUBLE PRECISION",
         }.items():
             self.conn.execute(f"ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS {column} {definition}")
+        self.conn.execute(
+            "ALTER TABLE dreamer_shadow_evaluations "
+            f"ADD COLUMN IF NOT EXISTS inference_contract_id TEXT NOT NULL DEFAULT '{SHADOW_INFERENCE_CONTRACT_LEGACY_V1}'"
+        )
+        self.conn.execute(
+            "ALTER TABLE dreamer_shadow_quality_reports "
+            f"ADD COLUMN IF NOT EXISTS inference_contract_id TEXT NOT NULL DEFAULT '{SHADOW_INFERENCE_CONTRACT_LEGACY_V1}'"
+        )
         for column, definition in {
             "validated_at": "TIMESTAMPTZ",
             "rejected_at": "TIMESTAMPTZ",
@@ -623,9 +632,9 @@ class PostgresShadowEvaluationRepository:
                 """
                 INSERT INTO dreamer_shadow_evaluations (
                     evaluation_id, install_id, machine_id, bean_context_id,
-                    grinder_context_id, source_timestamp, status, payload_json,
-                    created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                    grinder_context_id, inference_contract_id, source_timestamp,
+                    status, payload_json, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                 ON CONFLICT (evaluation_id) DO UPDATE SET
                     status=EXCLUDED.status,
                     payload_json=EXCLUDED.payload_json,
@@ -637,6 +646,7 @@ class PostgresShadowEvaluationRepository:
                     evaluation.machine_id,
                     evaluation.bean_context_id,
                     evaluation.grinder_context_id,
+                    evaluation.inference_contract_id,
                     evaluation.source_timestamp,
                     evaluation.status.value,
                     json.dumps(evaluation.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False),
@@ -663,22 +673,29 @@ class PostgresShadowEvaluationRepository:
         machine_id: str,
         bean_context_id: str,
         grinder_context_id: str,
+        inference_contract_id: str | None = None,
     ) -> DreamerShadowEvaluation | None:
+        contract_clause = ""
+        params: list[object] = [
+            install_id,
+            machine_id,
+            bean_context_id,
+            grinder_context_id,
+            ShadowEvaluationStatus.PENDING_OUTCOME.value,
+        ]
+        if inference_contract_id is not None:
+            contract_clause = " AND inference_contract_id=%s"
+            params.append(inference_contract_id)
         row = self._store.conn.execute(
-            """
+            f"""
             SELECT payload_json FROM dreamer_shadow_evaluations
             WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
               AND grinder_context_id=%s AND status=%s
+              {contract_clause}
             ORDER BY source_timestamp DESC
             LIMIT 1
             """,
-            (
-                install_id,
-                machine_id,
-                bean_context_id,
-                grinder_context_id,
-                ShadowEvaluationStatus.PENDING_OUTCOME.value,
-            ),
+            tuple(params),
         ).fetchone()
         return _row_to_shadow_evaluation(row) if row else None
 
@@ -689,18 +706,26 @@ class PostgresShadowEvaluationRepository:
         machine_id: str,
         bean_context_id: str,
         grinder_context_id: str,
+        inference_contract_id: str | None = None,
         limit: int = 100,
     ) -> list[DreamerShadowEvaluation]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
             raise ValueError("shadow evaluation limit must be 1..10000")
+        contract_clause = ""
+        params: list[object] = [install_id, machine_id, bean_context_id, grinder_context_id]
+        if inference_contract_id is not None:
+            contract_clause = " AND inference_contract_id=%s"
+            params.append(inference_contract_id)
+        params.append(limit)
         rows = self._store.conn.execute(
-            """
+            f"""
             SELECT payload_json FROM dreamer_shadow_evaluations
             WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND grinder_context_id=%s
+              {contract_clause}
             ORDER BY source_timestamp DESC
             LIMIT %s
             """,
-            (install_id, machine_id, bean_context_id, grinder_context_id, limit),
+            tuple(params),
         ).fetchall()
         return [_row_to_shadow_evaluation(row) for row in rows]
 
@@ -716,9 +741,9 @@ class PostgresShadowQualityReportRepository:
                 INSERT INTO dreamer_shadow_quality_reports (
                     report_id, install_id, machine_id, bean_context_id,
                     grinder_context_id, checkpoint_artifact_sha256,
-                    checkpoint_inference_probe_sha256, overall_status,
-                    payload_json, generated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                    checkpoint_inference_probe_sha256, inference_contract_id,
+                    overall_status, payload_json, generated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
                 ON CONFLICT (report_id) DO UPDATE SET
                     overall_status=EXCLUDED.overall_status,
                     payload_json=EXCLUDED.payload_json,
@@ -732,6 +757,7 @@ class PostgresShadowQualityReportRepository:
                     report.grinder_context_id,
                     report.checkpoint_artifact_sha256,
                     report.checkpoint_inference_probe_sha256,
+                    report.inference_contract_id,
                     report.overall_status.value,
                     json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False),
                     report.generated_at,
@@ -758,12 +784,14 @@ class PostgresShadowQualityReportRepository:
         grinder_context_id: str,
         checkpoint_artifact_sha256: str,
         checkpoint_inference_probe_sha256: str,
+        inference_contract_id: str,
     ) -> DreamerShadowQualityReport | None:
         row = self._store.conn.execute(
             """
             SELECT payload_json FROM dreamer_shadow_quality_reports
             WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND grinder_context_id=%s
               AND checkpoint_artifact_sha256=%s AND checkpoint_inference_probe_sha256=%s
+              AND inference_contract_id=%s
             ORDER BY generated_at DESC
             LIMIT 1
             """,
@@ -774,6 +802,7 @@ class PostgresShadowQualityReportRepository:
                 grinder_context_id,
                 checkpoint_artifact_sha256,
                 checkpoint_inference_probe_sha256,
+                inference_contract_id,
             ),
         ).fetchone()
         return _row_to_shadow_quality_report(row) if row else None

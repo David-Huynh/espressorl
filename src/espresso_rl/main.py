@@ -164,6 +164,7 @@ def main() -> None:
             reports=shadow_quality_report_repo,
             checkpoint_artifact_sha256=dreamer_shadow_session.status.checkpoint_artifact_sha256,
             checkpoint_inference_probe_sha256=dreamer_shadow_session.status.inference_probe_sha256,
+            inference_contract_id=dreamer_shadow_session.status.inference_contract_id,
             clock=config.now,
         )
         if dreamer_shadow_session is not None
@@ -445,7 +446,7 @@ def main() -> None:
         publish_status(event.machine_id, event.bean_context_id, event.grinder_context_id)
 
     def on_local_reset(event: LocalResetEvent) -> None:
-        if event.install_id != config.install_id or event.machine_id != config.machine_id:
+        if event.install_id != config.install_id or not _same_machine_id(event.machine_id, config.machine_id):
             logger.warning(
                 "Ignoring local reset for unexpected owner install=%s machine=%s",
                 event.install_id,
@@ -620,6 +621,14 @@ def maybe_publish_startup_recommendation(
     )
 
 
+def _same_machine_id(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if left.startswith("gaggimate:") and right.startswith("gaggimate:"):
+        return left.removeprefix("gaggimate:").lower() == right.removeprefix("gaggimate:").lower()
+    return False
+
+
 def build_status_payload(
     config: Config,
     service: EspressoRLService,
@@ -769,6 +778,7 @@ def build_status_payload(
         else "Bayesian Optimization is serving recommendations.",
     }
     shadow_summary = {
+        "inference_contract_id": None,
         "record_count": 0,
         "pending_count": 0,
         "observed_count": 0,
@@ -795,6 +805,7 @@ def build_status_payload(
         "generated_at": None,
         "checkpoint_artifact_sha256": None,
         "checkpoint_inference_probe_sha256": None,
+        "inference_contract_id": None,
         "overall_status": "insufficient_data",
         "evaluated_record_count": 0,
         "stale_checkpoint_record_count": 0,

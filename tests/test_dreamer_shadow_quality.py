@@ -21,6 +21,10 @@ from espresso_rl.domain.shadow_evaluation import (
     ShadowProposalMatch,
     ShadowRecipeProposal,
 )
+from espresso_rl.domain.shadow_contract import (
+    SHADOW_INFERENCE_CONTRACT_LEARNED_CONTEXT_ENCODER_V1,
+    SHADOW_INFERENCE_CONTRACT_LEGACY_V1,
+)
 from espresso_rl.domain.shadow_quality import (
     DreamerShadowQualityReport,
     ShadowQualityGateName,
@@ -30,6 +34,7 @@ from espresso_rl.domain.shadow_quality import (
 CHECKPOINT_SHA = "a" * 64
 PROBE_SHA = "b" * 64
 STALE_CHECKPOINT_SHA = "c" * 64
+CONTRACT_ID = SHADOW_INFERENCE_CONTRACT_LEARNED_CONTEXT_ENCODER_V1
 CONTEXT = ("install_1", "machine_1", "bean_1", "grinder_1")
 
 
@@ -37,8 +42,21 @@ class MemoryEvaluationRepository:
     def __init__(self, records: list[DreamerShadowEvaluation]) -> None:
         self.records = records
 
-    def list_context(self, *, install_id, machine_id, bean_context_id, grinder_context_id, limit=100):
-        return self.records[:limit]
+    def list_context(
+        self,
+        *,
+        install_id,
+        machine_id,
+        bean_context_id,
+        grinder_context_id,
+        inference_contract_id=None,
+        limit=100,
+    ):
+        return [
+            record
+            for record in self.records
+            if inference_contract_id is None or record.inference_contract_id == inference_contract_id
+        ][:limit]
 
 
 class MemoryReportRepository:
@@ -64,6 +82,7 @@ class MemoryReportRepository:
             )
             and report.checkpoint_artifact_sha256 == scope["checkpoint_artifact_sha256"]
             and report.checkpoint_inference_probe_sha256 == scope["checkpoint_inference_probe_sha256"]
+            and report.inference_contract_id == scope["inference_contract_id"]
         ]
         return max(matches, key=lambda report: report.generated_at, default=None)
 
@@ -76,6 +95,7 @@ class DreamerShadowQualityTests(unittest.TestCase):
 
         self.assertEqual(report.overall_status, ShadowQualityStatus.PASS)
         self.assertEqual(report.dreamer_only_matched_count, 10)
+        self.assertEqual(report.inference_contract_id, CONTRACT_ID)
         self.assertEqual(report.bo_only_matched_count, 10)
         self.assertEqual(report.both_matched_count, 0)
         self.assertAlmostEqual(report.confidence_brier_score, 0.04)
@@ -157,6 +177,19 @@ class DreamerShadowQualityTests(unittest.TestCase):
         self.assertEqual(report.dreamer_only_matched_count, 1)
         self.assertEqual(report.bo_only_matched_count, 0)
 
+    def test_mixed_inference_contract_records_are_rejected(self) -> None:
+        current = _evaluation(1, cohort="dreamer", source_reward=0.5, reward_delta=0.1)
+        legacy = _evaluation(
+            2,
+            cohort="bo",
+            source_reward=0.5,
+            reward_delta=0.05,
+            inference_contract_id=SHADOW_INFERENCE_CONTRACT_LEGACY_V1,
+        )
+
+        with self.assertRaisesRegex(DreamerShadowQualityError, "mixes inference contracts"):
+            _build([current, legacy])
+
     def test_cross_context_records_and_duplicate_outcomes_are_rejected(self) -> None:
         mixed = _evaluation(2, cohort="dreamer", source_reward=0.5, reward_delta=0.1, bean_context_id="bean_2")
         with self.assertRaisesRegex(DreamerShadowQualityError, "mixes evaluation contexts"):
@@ -170,6 +203,12 @@ class DreamerShadowQualityTests(unittest.TestCase):
     def test_strict_report_parser_rejects_unknown_fields_and_activation_flags(self) -> None:
         payload = _build(_passing_records()).to_dict()
         self.assertEqual(DreamerShadowQualityReport.from_dict(payload).to_dict(), payload)
+
+        legacy = copy.deepcopy(payload)
+        legacy.pop("inference_contract_id")
+        legacy["schema_version"] = 1
+        parsed_legacy = DreamerShadowQualityReport.from_dict(legacy)
+        self.assertEqual(parsed_legacy.inference_contract_id, SHADOW_INFERENCE_CONTRACT_LEGACY_V1)
 
         unknown = copy.deepcopy(payload)
         unknown["unexpected"] = True
@@ -194,6 +233,7 @@ class DreamerShadowQualityTests(unittest.TestCase):
             reports=report_repository,
             checkpoint_artifact_sha256=CHECKPOINT_SHA,
             checkpoint_inference_probe_sha256=PROBE_SHA,
+            inference_contract_id=CONTRACT_ID,
             clock=lambda: 2_000_000_000,
         )
 
@@ -220,6 +260,7 @@ class DreamerShadowQualityTests(unittest.TestCase):
                     reports=reports,
                     checkpoint_artifact_sha256=CHECKPOINT_SHA,
                     checkpoint_inference_probe_sha256=PROBE_SHA,
+                    inference_contract_id=CONTRACT_ID,
                     clock=lambda: 2_000_000_001,
                 )
 
@@ -236,6 +277,7 @@ class DreamerShadowQualityTests(unittest.TestCase):
                         grinder_context_id=CONTEXT[3],
                         checkpoint_artifact_sha256=CHECKPOINT_SHA,
                         checkpoint_inference_probe_sha256=PROBE_SHA,
+                        inference_contract_id=CONTRACT_ID,
                     ),
                     built,
                 )
@@ -247,6 +289,18 @@ class DreamerShadowQualityTests(unittest.TestCase):
                         grinder_context_id=CONTEXT[3],
                         checkpoint_artifact_sha256=STALE_CHECKPOINT_SHA,
                         checkpoint_inference_probe_sha256=PROBE_SHA,
+                        inference_contract_id=CONTRACT_ID,
+                    )
+                )
+                self.assertIsNone(
+                    reports.get_latest(
+                        install_id=CONTEXT[0],
+                        machine_id=CONTEXT[1],
+                        bean_context_id=CONTEXT[2],
+                        grinder_context_id=CONTEXT[3],
+                        checkpoint_artifact_sha256=CHECKPOINT_SHA,
+                        checkpoint_inference_probe_sha256=PROBE_SHA,
+                        inference_contract_id=SHADOW_INFERENCE_CONTRACT_LEGACY_V1,
                     )
                 )
 
@@ -272,6 +326,7 @@ def _build(records: list[DreamerShadowEvaluation]) -> DreamerShadowQualityReport
         grinder_context_id=CONTEXT[3],
         checkpoint_artifact_sha256=CHECKPOINT_SHA,
         checkpoint_inference_probe_sha256=PROBE_SHA,
+        inference_contract_id=CONTRACT_ID,
         generated_at=2_000_000_000,
     )
 
@@ -289,6 +344,7 @@ def _evaluation(
     reward_delta: float | None = None,
     safety_valid: bool = True,
     checkpoint_sha: str = CHECKPOINT_SHA,
+    inference_contract_id: str = CONTRACT_ID,
     bean_context_id: str = CONTEXT[2],
     outcome_shot_id: str | None = None,
 ) -> DreamerShadowEvaluation:
@@ -317,6 +373,7 @@ def _evaluation(
         updated_at=source_timestamp + (1 if not pending else 0),
         checkpoint_artifact_sha256=checkpoint_sha,
         checkpoint_inference_probe_sha256=PROBE_SHA,
+        inference_contract_id=inference_contract_id,
         install_id=CONTEXT[0],
         machine_id=CONTEXT[1],
         bean_context_id=bean_context_id,

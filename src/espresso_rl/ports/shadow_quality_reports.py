@@ -21,5 +21,6 @@ class ShadowQualityReportRepository(Protocol):
         grinder_context_id: str,
         checkpoint_artifact_sha256: str,
         checkpoint_inference_probe_sha256: str,
+        inference_contract_id: str,
     ) -> DreamerShadowQualityReport | None:
         ...

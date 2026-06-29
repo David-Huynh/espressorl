@@ -76,7 +76,7 @@ class GaggimateMQTTClient:
         self._client.disconnect()
 
     def publish_recommendation(self, recommendation: Recommendation) -> None:
-        machine_topic_id = recommendation.machine_id.removeprefix("gaggimate:")
+        machine_topic_id = _machine_topic_id(recommendation.machine_id)
         topic = f"gaggimate/{machine_topic_id}/rl/recommendation"
         payload = {
             "event_type": "recommendation",
@@ -112,13 +112,13 @@ class GaggimateMQTTClient:
         logger.info("Published recommendation %s to %s", recommendation.recommendation_id, topic)
 
     def clear_recommendation(self, machine_id: str) -> None:
-        machine_topic_id = machine_id.removeprefix("gaggimate:")
-        topic = f"gaggimate/{machine_topic_id}/rl/recommendation"
-        self._client.publish(topic, "", qos=1, retain=True)
-        logger.info("Cleared retained recommendation on %s", topic)
+        for machine_topic_id in _machine_topic_id_variants(machine_id):
+            topic = f"gaggimate/{machine_topic_id}/rl/recommendation"
+            self._client.publish(topic, "", qos=1, retain=True)
+            logger.info("Cleared retained recommendation on %s", topic)
 
     def publish_status(self, machine_id: str, status: dict[str, Any]) -> None:
-        machine_topic_id = machine_id.removeprefix("gaggimate:")
+        machine_topic_id = _machine_topic_id(machine_id)
         topic = f"gaggimate/{machine_topic_id}/rl/status"
         payload = {
             "event_type": "espresso_rl_status",
@@ -390,17 +390,13 @@ class GaggimateMQTTClient:
             grinder_reference_label=payload.get("reference_label", "reference"),
             relative_grind_steps_from_reference=_relative_grind_steps_from_payload(
                 payload,
-                self._config.initial_relative_grind_steps_from_reference,
+                None,
             ),
-            microns_per_step=_optional_float(
-                payload.get("microns_per_step", self._config.microns_per_step)
-            ),
+            microns_per_step=_optional_float(payload.get("microns_per_step")),
             current_absolute_step=_optional_float(payload.get("current_absolute_step")),
             absolute_reference_step=_optional_float(payload.get("absolute_reference_step")),
-            dose_in_g=_optional_float(payload.get("dose_in_g", self._config.initial_dose_g)),
-            target_yield_g=_optional_float(
-                payload.get("target_yield_g", self._config.initial_target_yield_g)
-            ),
+            dose_in_g=_optional_float(payload.get("dose_in_g")),
+            target_yield_g=_optional_float(payload.get("target_yield_g")),
             profile_id=_optional_string(payload.get("profile_id")),
             raw_profile_hash=_optional_string(payload.get("raw_profile_hash")),
             community_upload_enabled=_optional_bool(payload.get("community_upload_enabled")),
@@ -475,6 +471,19 @@ def _optional_string(value: Any) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _machine_topic_id(machine_id: str) -> str:
+    return machine_id.removeprefix("gaggimate:")
+
+
+def _machine_topic_id_variants(machine_id: str) -> tuple[str, ...]:
+    topic_id = _machine_topic_id(machine_id)
+    variants: list[str] = []
+    for candidate in (topic_id, topic_id.upper(), topic_id.lower()):
+        if candidate and candidate not in variants:
+            variants.append(candidate)
+    return tuple(variants)
 
 
 def _positive_optional_float(value: Any) -> float | None:

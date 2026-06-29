@@ -28,6 +28,7 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     ShotRecord,
 )
+from espresso_rl.domain.shadow_contract import SHADOW_INFERENCE_CONTRACT_LEARNED_CONTEXT_ENCODER_V1
 from espresso_rl.domain.shadow_evaluation import ShadowEvaluationStatus, ShadowProposalMatch
 from espresso_rl.domain.trainer_artifacts import (
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
@@ -65,20 +66,39 @@ class MemoryShadowRepository:
     def get(self, evaluation_id: str):
         return self.records.get(evaluation_id)
 
-    def get_pending(self, *, install_id, machine_id, bean_context_id, grinder_context_id):
+    def get_pending(
+        self,
+        *,
+        install_id,
+        machine_id,
+        bean_context_id,
+        grinder_context_id,
+        inference_contract_id=None,
+    ):
         matches = [
             record
             for record in self.records.values()
             if record.context_key == (install_id, machine_id, bean_context_id, grinder_context_id)
+            and (inference_contract_id is None or record.inference_contract_id == inference_contract_id)
             and record.status == ShadowEvaluationStatus.PENDING_OUTCOME
         ]
         return max(matches, key=lambda record: record.source_timestamp, default=None)
 
-    def list_context(self, *, install_id, machine_id, bean_context_id, grinder_context_id, limit=100):
+    def list_context(
+        self,
+        *,
+        install_id,
+        machine_id,
+        bean_context_id,
+        grinder_context_id,
+        inference_contract_id=None,
+        limit=100,
+    ):
         matches = [
             record
             for record in self.records.values()
             if record.context_key == (install_id, machine_id, bean_context_id, grinder_context_id)
+            and (inference_contract_id is None or record.inference_contract_id == inference_contract_id)
         ]
         return sorted(matches, key=lambda record: record.source_timestamp, reverse=True)[:limit]
 
@@ -175,6 +195,10 @@ class DreamerShadowEvaluationTests(unittest.TestCase):
         evaluation = result.evaluation
         self.assertTrue(result.created)
         self.assertEqual(evaluation.context_key, ("install_1", "machine_1", "bean_1", "grinder_1"))
+        self.assertEqual(
+            evaluation.inference_contract_id,
+            SHADOW_INFERENCE_CONTRACT_LEARNED_CONTEXT_ENCODER_V1,
+        )
         self.assertEqual(evaluation.status, ShadowEvaluationStatus.PENDING_OUTCOME)
         self.assertEqual(evaluation.dreamer_proposal.source, "dreamer_v3")
         self.assertEqual(evaluation.bo_proposal.source, "bayesian_optimization")

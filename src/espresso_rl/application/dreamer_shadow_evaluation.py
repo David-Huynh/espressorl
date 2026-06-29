@@ -74,6 +74,7 @@ class DreamerShadowEvaluationService:
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             grinder_context_id=grinder_context_id,
+            inference_contract_id=self._session.status.inference_contract_id,
             limit=limit,
         )
         observed = [record for record in records if record.status == ShadowEvaluationStatus.OUTCOME_OBSERVED]
@@ -88,6 +89,7 @@ class DreamerShadowEvaluationService:
             if record.bo_match == ShadowProposalMatch.MATCHED and record.reward_delta is not None
         ]
         return {
+            "inference_contract_id": self._session.status.inference_contract_id,
             "record_count": len(records),
             "pending_count": len(records) - len(observed),
             "observed_count": len(observed),
@@ -151,6 +153,7 @@ class DreamerShadowEvaluationService:
         )
         evaluation_id = _evaluation_id(
             checkpoint_sha256=self._session.status.checkpoint_artifact_sha256,
+            inference_contract_id=self._session.status.inference_contract_id,
             install_id=install_id,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
@@ -189,6 +192,7 @@ class DreamerShadowEvaluationService:
             updated_at=now,
             checkpoint_artifact_sha256=self._session.status.checkpoint_artifact_sha256,
             checkpoint_inference_probe_sha256=self._session.status.inference_probe_sha256,
+            inference_contract_id=self._session.status.inference_contract_id,
             install_id=install_id,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
@@ -357,6 +361,7 @@ class DreamerShadowEvaluationService:
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             grinder_context_id=grinder_context_id,
+            inference_contract_id=self._session.status.inference_contract_id,
         )
         observation = transition["observation"]
         if (
@@ -458,6 +463,7 @@ def _transition_context_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
 def _evaluation_id(
     *,
     checkpoint_sha256: str,
+    inference_contract_id: str,
     install_id: str,
     machine_id: str,
     bean_context_id: str,
@@ -465,7 +471,15 @@ def _evaluation_id(
     shot_id: str,
 ) -> str:
     canonical = "\n".join(
-        (checkpoint_sha256, install_id, machine_id, bean_context_id, grinder_context_id, shot_id)
+        (
+            inference_contract_id,
+            checkpoint_sha256,
+            install_id,
+            machine_id,
+            bean_context_id,
+            grinder_context_id,
+            shot_id,
+        )
     )
     return f"shadow_{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:32]}"
 

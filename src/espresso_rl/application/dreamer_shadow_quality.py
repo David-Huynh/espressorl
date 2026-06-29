@@ -10,6 +10,7 @@ from espresso_rl.domain.shadow_evaluation import (
     ShadowEvaluationStatus,
     ShadowProposalMatch,
 )
+from espresso_rl.domain.shadow_contract import validate_shadow_inference_contract_id
 from espresso_rl.domain.shadow_quality import (
     DreamerShadowQualityReport,
     ShadowQualityGate,
@@ -43,6 +44,7 @@ class DreamerShadowQualityReportService:
         reports: ShadowQualityReportRepository,
         checkpoint_artifact_sha256: str,
         checkpoint_inference_probe_sha256: str,
+        inference_contract_id: str,
         clock: Callable[[], int],
         policy: ShadowQualityPolicy | None = None,
     ) -> None:
@@ -52,6 +54,7 @@ class DreamerShadowQualityReportService:
         self._reports = reports
         self._checkpoint_artifact_sha256 = checkpoint_artifact_sha256
         self._checkpoint_inference_probe_sha256 = checkpoint_inference_probe_sha256
+        self._inference_contract_id = validate_shadow_inference_contract_id(inference_contract_id)
         self._clock = clock
         self._policy = policy or ShadowQualityPolicy()
 
@@ -71,6 +74,7 @@ class DreamerShadowQualityReportService:
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             grinder_context_id=grinder_context_id,
+            inference_contract_id=self._inference_contract_id,
             limit=limit,
         )
         generated_at = self._clock()
@@ -84,6 +88,7 @@ class DreamerShadowQualityReportService:
             grinder_context_id=grinder_context_id,
             checkpoint_artifact_sha256=self._checkpoint_artifact_sha256,
             checkpoint_inference_probe_sha256=self._checkpoint_inference_probe_sha256,
+            inference_contract_id=self._inference_contract_id,
             generated_at=generated_at,
             policy=self._policy,
         )
@@ -108,6 +113,7 @@ class DreamerShadowQualityReportService:
             grinder_context_id=grinder_context_id,
             checkpoint_artifact_sha256=self._checkpoint_artifact_sha256,
             checkpoint_inference_probe_sha256=self._checkpoint_inference_probe_sha256,
+            inference_contract_id=self._inference_contract_id,
         )
 
 
@@ -120,10 +126,12 @@ def build_shadow_quality_report(
     grinder_context_id: str,
     checkpoint_artifact_sha256: str,
     checkpoint_inference_probe_sha256: str,
+    inference_contract_id: str,
     generated_at: int,
     policy: ShadowQualityPolicy | None = None,
 ) -> DreamerShadowQualityReport:
     policy = policy or ShadowQualityPolicy()
+    inference_contract_id = validate_shadow_inference_contract_id(inference_contract_id)
     expected_context = (install_id, machine_id, bean_context_id, grinder_context_id)
     source_records = tuple(records)
     for record in source_records:
@@ -131,6 +139,8 @@ def build_shadow_quality_report(
             raise DreamerShadowQualityError("shadow quality input contains an invalid record")
         if record.context_key != expected_context:
             raise DreamerShadowQualityError("shadow quality input mixes evaluation contexts")
+        if record.inference_contract_id != inference_contract_id:
+            raise DreamerShadowQualityError("shadow quality input mixes inference contracts")
         _validate_record_consistency(record)
 
     current_records = tuple(
@@ -194,6 +204,7 @@ def build_shadow_quality_report(
         expected_context=expected_context,
         checkpoint_artifact_sha256=checkpoint_artifact_sha256,
         checkpoint_inference_probe_sha256=checkpoint_inference_probe_sha256,
+        inference_contract_id=inference_contract_id,
         evaluation_set_sha256=evaluation_set_sha256,
         policy_version=policy.version,
     )
@@ -202,6 +213,7 @@ def build_shadow_quality_report(
         generated_at=generated_at,
         checkpoint_artifact_sha256=checkpoint_artifact_sha256,
         checkpoint_inference_probe_sha256=checkpoint_inference_probe_sha256,
+        inference_contract_id=inference_contract_id,
         install_id=install_id,
         machine_id=machine_id,
         bean_context_id=bean_context_id,
@@ -479,11 +491,19 @@ def _report_id(
     expected_context: tuple[str, str, str, str],
     checkpoint_artifact_sha256: str,
     checkpoint_inference_probe_sha256: str,
+    inference_contract_id: str,
     evaluation_set_sha256: str,
     policy_version: str,
 ) -> str:
     canonical = "\n".join(
-        (*expected_context, checkpoint_artifact_sha256, checkpoint_inference_probe_sha256, evaluation_set_sha256, policy_version)
+        (
+            *expected_context,
+            inference_contract_id,
+            checkpoint_artifact_sha256,
+            checkpoint_inference_probe_sha256,
+            evaluation_set_sha256,
+            policy_version,
+        )
     )
     return f"shadow_quality_{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:32]}"
 

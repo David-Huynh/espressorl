@@ -19,6 +19,7 @@ class ShadowEvaluationRepository(Protocol):
         machine_id: str,
         bean_context_id: str,
         grinder_context_id: str,
+        inference_contract_id: str | None = None,
     ) -> DreamerShadowEvaluation | None:
         ...
 
@@ -29,6 +30,7 @@ class ShadowEvaluationRepository(Protocol):
         machine_id: str,
         bean_context_id: str,
         grinder_context_id: str,
+        inference_contract_id: str | None = None,
         limit: int = 100,
     ) -> list[DreamerShadowEvaluation]:
         ...
