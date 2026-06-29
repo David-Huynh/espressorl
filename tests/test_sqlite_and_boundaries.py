@@ -310,6 +310,48 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertEqual(recent[0]["shot_end_state"], "manual_or_interrupted")
                 self.assertNotIn("profile_resampled", recent[0])
 
+    def test_status_payload_includes_redacted_runtime_health(self) -> None:
+        secret = "s" * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(
+                mqtt_host="localhost",
+                data_dir=Path(tmp),
+                install_id="install_1",
+                community_upload_enabled=True,
+                supabase_ingest_url="https://project.supabase.co/functions/v1/espresso-rl-ingest",
+                upload_secret=secret,
+            )
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                    clock=lambda: 10,
+                )
+                status = build_status_payload(
+                    config=config,
+                    service=service,
+                    shot_repo=None,
+                    upload_maintenance=None,
+                    upload_queue_repo=SQLiteUploadQueueRepository(store),
+                    machine_id="machine_1",
+                    bean_context_id="bean_1",
+                    grinder_context_id="grinder_1",
+                )
+
+        runtime_health = {
+            key: value for key, value in status.items() if key.startswith("runtime_health")
+        }
+        encoded = json.dumps(runtime_health)
+        self.assertEqual(status["runtime_health_status"], "waiting")
+        self.assertEqual(status["runtime_health_summary"], "Ready - waiting for the first shot")
+        self.assertTrue(status["runtime_health_upload_configured"])
+        self.assertEqual(status["runtime_health_storage_backend"], "sqlite")
+        self.assertEqual(status["runtime_health_warnings"], [])
+        self.assertNotIn(secret, encoded)
+        self.assertNotIn("supabase.co", encoded)
+        self.assertNotIn("espresso-rl-ingest", encoded)
+
     def test_status_payload_reports_optimizer_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(

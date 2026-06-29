@@ -831,11 +831,28 @@ def build_status_payload(
         except Exception as exc:
             logger.warning("DreamerV3 shadow quality status unavailable: %s", exc)
 
+    community_upload_enabled = config.should_enqueue_community_uploads() and service.community_upload_enabled_for(
+        config.install_id,
+        machine_id,
+    )
+    runtime_health = _runtime_health_payload(
+        config=config,
+        bean_context_id=bean_context_id,
+        grinder_context_id=grinder_context_id,
+        optimizer_shot_count=len(optimizer_shots),
+        rated_shot_count=len(rated_shots),
+        last_recommendation_id=last_recommendation_id,
+        upload_queue_status_counts=upload_queue_status_counts,
+        upload_queue_available=upload_queue_repo is not None,
+        community_upload_requested=community_upload_enabled,
+    )
+
     return {
         "addon_online": True,
         "install_id": config.install_id,
         "bean_context_id": bean_context_id,
         "grinder_context_id": grinder_context_id,
+        **runtime_health,
         "timestamp": now,
         "last_shot_id": last_shot_id,
         "last_shot_at": last_shot_at,
@@ -906,9 +923,74 @@ def build_status_payload(
         "upload_queue_last_rejected_record_id": latest_rejected.local_record_id if latest_rejected else None,
         "upload_queue_last_rejected_error": latest_rejected.error_message if latest_rejected else None,
         "upload_queue_last_rejected_at": latest_rejected.updated_at if latest_rejected else None,
-        "community_upload_enabled": config.should_enqueue_community_uploads()
-        and service.community_upload_enabled_for(config.install_id, machine_id),
+        "community_upload_enabled": community_upload_enabled,
         "grinder_catalog_search_url": grinder_catalog_search_url(config),
+    }
+
+
+def _runtime_health_payload(
+    *,
+    config: Config,
+    bean_context_id: str | None,
+    grinder_context_id: str | None,
+    optimizer_shot_count: int,
+    rated_shot_count: int,
+    last_recommendation_id: str | None,
+    upload_queue_status_counts: dict[str, int],
+    upload_queue_available: bool,
+    community_upload_requested: bool,
+) -> dict[str, object]:
+    upload_configured = bool(config.supabase_ingest_url and config.upload_secret)
+    pending_uploads = upload_queue_status_counts.get(UploadQueueStatus.PENDING.value, 0)
+    failed_uploads = upload_queue_status_counts.get(UploadQueueStatus.FAILED.value, 0)
+    rejected_uploads = upload_queue_status_counts.get(UploadQueueStatus.REJECTED.value, 0)
+
+    waiting_reasons: list[str] = []
+    warnings: list[str] = []
+    if not bean_context_id:
+        waiting_reasons.append("Select a bean context.")
+    if not grinder_context_id:
+        waiting_reasons.append("Select a grinder context.")
+    if community_upload_requested and not upload_queue_available:
+        warnings.append("Community upload is enabled but the local upload queue is unavailable.")
+    if community_upload_requested and not upload_configured:
+        warnings.append("Community upload is enabled but upload credentials are incomplete.")
+    if rejected_uploads:
+        warnings.append(f"{rejected_uploads} community upload record(s) were rejected by the backend.")
+    if failed_uploads:
+        warnings.append(f"{failed_uploads} community upload record(s) are waiting to retry.")
+
+    if warnings:
+        status = "attention"
+        summary = warnings[0]
+    elif waiting_reasons:
+        status = "waiting"
+        summary = "Setup incomplete"
+    elif optimizer_shot_count <= 0:
+        status = "waiting"
+        summary = "Ready - waiting for the first shot"
+    elif rated_shot_count <= 0:
+        status = "waiting"
+        summary = "Ready - waiting for the first rating"
+    elif not last_recommendation_id:
+        status = "waiting"
+        summary = "Ready - building the next recommendation"
+    else:
+        status = "ok"
+        summary = "Connected"
+
+    return {
+        "runtime_health_status": status,
+        "runtime_health_summary": summary,
+        "runtime_health_warnings": warnings,
+        "runtime_health_waiting_reasons": waiting_reasons,
+        "runtime_health_storage_backend": config.storage_backend,
+        "runtime_health_storage_available": True,
+        "runtime_health_upload_configured": upload_configured,
+        "runtime_health_community_upload_requested": community_upload_requested,
+        "runtime_health_pending_upload_count": pending_uploads,
+        "runtime_health_failed_upload_count": failed_uploads,
+        "runtime_health_rejected_upload_count": rejected_uploads,
     }
 
 
