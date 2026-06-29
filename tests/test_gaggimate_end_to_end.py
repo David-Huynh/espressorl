@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
+from espresso_rl.adapters.supabase_upload import UploadQueueWorker
 from espresso_rl.adapters.sqlite_repositories import (
     SQLiteRecommendationRepository,
     SQLiteShotRepository,
@@ -16,6 +17,7 @@ from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
 from espresso_rl.domain.models import UploadQueueStatus
+from espresso_rl.domain.optimization import OptimizationContext
 from espresso_rl.main import build_status_payload, upload_queue_for_service
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 
@@ -34,6 +36,25 @@ class FakeMQTTMessage:
     def __init__(self, topic: str, payload: dict) -> None:
         self.topic = topic
         self.payload = json.dumps(payload).encode("utf-8")
+
+
+class RecordingBOOptimizer(ConservativeBOOptimizer):
+    def __init__(self) -> None:
+        self.contexts: list[OptimizationContext] = []
+
+    def recommend(self, context: OptimizationContext):
+        self.contexts.append(context)
+        return super().recommend(context)
+
+
+class FailOnceUploadClient:
+    def __init__(self) -> None:
+        self.attempted_upload_ids: list[str] = []
+
+    def upload(self, item) -> None:
+        self.attempted_upload_ids.append(item.upload_id)
+        if len(self.attempted_upload_ids) == 1:
+            raise RuntimeError("temporary ingest outage")
 
 
 class GaggimateEndToEndHarness:
@@ -55,10 +76,11 @@ class GaggimateEndToEndHarness:
         self.recommendations = SQLiteRecommendationRepository(store)
         self.uploads = SQLiteUploadQueueRepository(store)
         self.upload_maintenance = UploadQueueMaintenanceService(self.uploads, clock=self.config.now)
+        self.optimizer = RecordingBOOptimizer()
         self.service = EspressoRLService(
             shots=self.shots,
             recommendations=self.recommendations,
-            optimizer=ConservativeBOOptimizer(),
+            optimizer=self.optimizer,
             upload_queue=upload_queue_for_service(self.config, self.uploads),
             clock=self.config.now,
             community_upload_enabled_default=False,
@@ -165,9 +187,19 @@ class GaggimateEndToEndHarness:
 
 
 class GaggimateEndToEndTests(unittest.TestCase):
+    def shot_payload(self, **overrides) -> dict:
+        payload = json.loads((FIXTURE_DIR / "gaggimate_shot_profile.json").read_text())
+        payload.update(overrides)
+        return payload
+
+    def rating_payload(self, shot_id: str, **overrides) -> dict:
+        payload = json.loads((FIXTURE_DIR / "gaggimate_shot_rating.json").read_text())
+        payload.update({"shot_id": shot_id, **overrides})
+        return payload
+
     def test_shot_rating_recommendation_upload_and_status_chain(self) -> None:
-        shot_payload = json.loads((FIXTURE_DIR / "gaggimate_shot_profile.json").read_text())
-        rating_payload = json.loads((FIXTURE_DIR / "gaggimate_shot_rating.json").read_text())
+        shot_payload = self.shot_payload()
+        rating_payload = self.rating_payload("shot_integration_1")
 
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
@@ -260,6 +292,213 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 self.assertEqual(final_steps["recommendation"]["state"], "ok")
                 self.assertEqual(final_steps["community_upload"]["state"], "waiting")
                 self.assertEqual(final_steps["status_published"]["state"], "ok")
+
+    def test_partial_action_and_actual_yield_remain_optimizable_and_uploadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                harness = GaggimateEndToEndHarness(store, Path(tmp))
+                harness.send("gaggimate/AA_BB/shot/profile", self.shot_payload())
+                harness.send(
+                    "gaggimate/AA_BB/rl/rating",
+                    self.rating_payload("shot_integration_1"),
+                )
+                prior_recommendation = harness.last_feedback_result.recommendation
+                self.assertIsNotNone(prior_recommendation)
+
+                partial = self.shot_payload(
+                    shot_id="shot_partial_action",
+                    timestamp=1_700_000_200,
+                    beverage_out_g=31.5,
+                    weight=[0.0, 0.0, 1.2, 5.5, 12.5, 20.5, 27.0, 31.5],
+                    grind_observed=False,
+                    dose_observed=False,
+                )
+                for field_name in (
+                    "relative_grind_steps_from_reference",
+                    "current_absolute_step",
+                    "absolute_reference_step",
+                    "dose_in_g",
+                ):
+                    partial.pop(field_name, None)
+
+                harness.send("gaggimate/AA_BB/shot/profile", partial)
+                harness.send(
+                    "gaggimate/AA_BB/rl/rating",
+                    self.rating_payload(
+                        "shot_partial_action",
+                        timestamp=1_700_000_210,
+                        rating=3,
+                        taste_tags=["thin"],
+                    ),
+                )
+
+                stored = harness.shots.get("shot_partial_action")
+                self.assertIsNotNone(stored)
+                self.assertFalse(stored.grind_observed)
+                self.assertFalse(stored.dose_observed)
+                self.assertTrue(stored.target_yield_observed)
+                self.assertEqual(stored.action_observed, {
+                    "grind": False,
+                    "dose": False,
+                    "target_yield": True,
+                })
+                self.assertEqual(stored.beverage_out_g, 31.5)
+                self.assertEqual(stored.realized_yield_g, 31.5)
+                self.assertNotEqual(stored.beverage_out_g, stored.recommended_target_yield_g)
+                self.assertFalse(stored.exclude_from_local_optimization)
+                self.assertGreater(stored.optimization_weight, 0.0)
+
+                recommendation = harness.last_feedback_result.recommendation
+                self.assertIsNotNone(recommendation)
+                self.assertEqual(recommendation.source_shot_id, "shot_partial_action")
+                optimizer_context = harness.optimizer.contexts[-1]
+                self.assertEqual(optimizer_context.current_recipe.relative_grind_steps_from_reference, 2.0)
+                self.assertEqual(optimizer_context.current_recipe.dose_g, 18.0)
+                self.assertEqual(optimizer_context.current_recipe.target_yield_g, 31.5)
+                partial_observation = optimizer_context.shots[-1]
+                self.assertEqual(partial_observation.shot_id, "shot_partial_action")
+                self.assertEqual(partial_observation.action_observed, stored.action_observed)
+
+                pending = harness.uploads.list_by_status(UploadQueueStatus.PENDING)
+                shot_upload = next(
+                    item
+                    for item in pending
+                    if item.local_record_type == "shot"
+                    and item.local_record_id == "shot_partial_action"
+                )
+                queued_shot = json.loads(shot_upload.payload_json)
+                self.assertEqual(queued_shot["action_observed"], stored.action_observed)
+                self.assertIsNone(queued_shot["relative_grind_steps_from_reference"])
+                self.assertEqual(queued_shot["dose_in_g"], 18.0)
+                self.assertEqual(queued_shot["beverage_out_g"], 31.5)
+                self.assertEqual(queued_shot["human_rating"], 3)
+
+    def test_optimizer_context_isolated_by_profile_bean_and_grinder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                harness = GaggimateEndToEndHarness(store, Path(tmp))
+
+                harness.send("gaggimate/AA_BB/shot/profile", self.shot_payload())
+                harness.send(
+                    "gaggimate/AA_BB/rl/rating",
+                    self.rating_payload("shot_integration_1"),
+                )
+                lever_recommendation = harness.last_feedback_result.recommendation
+                self.assertEqual(lever_recommendation.profile_id, "integration_lever")
+
+                turbo = self.shot_payload(
+                    shot_id="shot_turbo",
+                    timestamp=1_700_000_200,
+                    profile_id="integration_turbo",
+                    profile_label="Integration Turbo Profile",
+                )
+                harness.send("gaggimate/AA_BB/shot/profile", turbo)
+                harness.send(
+                    "gaggimate/AA_BB/rl/rating",
+                    self.rating_payload("shot_turbo", timestamp=1_700_000_210),
+                )
+                turbo_recommendation = harness.last_feedback_result.recommendation
+                self.assertEqual(turbo_recommendation.profile_id, "integration_turbo")
+                self.assertEqual(
+                    [shot.shot_id for shot in harness.optimizer.contexts[-1].shots],
+                    ["shot_turbo"],
+                )
+
+                other_context = self.shot_payload(
+                    shot_id="shot_other_context",
+                    timestamp=1_700_000_300,
+                    bean_context_id="bean_integration_2",
+                    bean_context_name="Different Coffee",
+                    grinder_context_id="grinder_integration_2",
+                    profile_id="integration_turbo",
+                    profile_label="Integration Turbo Profile",
+                )
+                harness.send("gaggimate/AA_BB/shot/profile", other_context)
+                harness.send(
+                    "gaggimate/AA_BB/rl/rating",
+                    self.rating_payload("shot_other_context", timestamp=1_700_000_310),
+                )
+                isolated_recommendation = harness.last_feedback_result.recommendation
+                self.assertEqual(isolated_recommendation.bean_context_id, "bean_integration_2")
+                self.assertEqual(isolated_recommendation.grinder_context_id, "grinder_integration_2")
+                self.assertEqual(isolated_recommendation.profile_id, "integration_turbo")
+                self.assertEqual(
+                    [shot.shot_id for shot in harness.optimizer.contexts[-1].shots],
+                    ["shot_other_context"],
+                )
+                self.assertNotEqual(
+                    isolated_recommendation.recommendation_id,
+                    turbo_recommendation.recommendation_id,
+                )
+
+    def test_community_upload_opt_out_keeps_local_optimization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                harness = GaggimateEndToEndHarness(store, Path(tmp))
+                harness.send(
+                    "gaggimate/AA_BB/shot/profile",
+                    self.shot_payload(community_upload_enabled=False),
+                )
+                harness.send(
+                    "gaggimate/AA_BB/rl/rating",
+                    self.rating_payload("shot_integration_1"),
+                )
+
+                self.assertIsNotNone(harness.shots.get("shot_integration_1"))
+                self.assertIsNotNone(harness.last_feedback_result.recommendation)
+                self.assertEqual(harness.uploads.count_by_status(), {})
+                self.assertFalse(
+                    harness.service.community_upload_enabled_for(
+                        "install_integration_1",
+                        "gaggimate:AA_BB",
+                    )
+                )
+                final_status = harness.publications("gaggimate/AA_BB/rl/status")[-1][0]
+                self.assertFalse(final_status["community_upload_enabled"])
+                final_steps = {
+                    step["key"]: step for step in final_status["auto_tuning_diagnostic_steps"]
+                }
+                self.assertEqual(final_steps["community_upload"]["state"], "off")
+
+    def test_transient_upload_failure_retries_without_losing_local_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                harness = GaggimateEndToEndHarness(store, Path(tmp))
+                harness.send("gaggimate/AA_BB/shot/profile", self.shot_payload())
+                harness.send(
+                    "gaggimate/AA_BB/rl/rating",
+                    self.rating_payload("shot_integration_1"),
+                )
+                client = FailOnceUploadClient()
+                worker = UploadQueueWorker(harness.uploads, client, clock=harness.config.now)
+
+                self.assertEqual(worker.run_once(limit=1), 0)
+                failed = harness.uploads.list_by_status(UploadQueueStatus.FAILED)
+                self.assertEqual(len(failed), 1)
+                self.assertEqual(failed[0].attempt_count, 1)
+                self.assertGreater(failed[0].next_retry_at, harness.now)
+                self.assertIsNotNone(harness.shots.get("shot_integration_1"))
+
+                harness._publish_status(
+                    "gaggimate:AA_BB",
+                    "bean_integration_1",
+                    "grinder_integration_1",
+                    last_shot_id="shot_integration_1",
+                )
+                retry_status = harness.publications("gaggimate/AA_BB/rl/status")[-1][0]
+                retry_steps = {
+                    step["key"]: step for step in retry_status["auto_tuning_diagnostic_steps"]
+                }
+                self.assertEqual(retry_steps["community_upload"]["state"], "attention")
+
+                failed_upload_id = failed[0].upload_id
+                harness.now = failed[0].next_retry_at
+                self.assertEqual(worker.run_once(limit=1), 1)
+                self.assertEqual(harness.uploads.list_by_status(UploadQueueStatus.FAILED), [])
+                uploaded = harness.uploads.list_by_status(UploadQueueStatus.UPLOADED)
+                self.assertIn(failed_upload_id, [item.upload_id for item in uploaded])
+                self.assertEqual(client.attempted_upload_ids, [failed_upload_id, failed_upload_id])
+                self.assertIsNotNone(harness.shots.get("shot_integration_1"))
 
 
 if __name__ == "__main__":
