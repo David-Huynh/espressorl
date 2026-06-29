@@ -1,0 +1,11 @@
+{
+  "event_type": "shot_rating",
+  "schema_version": 1,
+  "shot_id": "shot_integration_1",
+  "machine_id": "gaggimate:AA_BB",
+  "timestamp": 1700000010,
+  "rating": 4,
+  "taste_tags": ["sweet", "balanced"],
+  "skipped": false,
+  "source": "gaggimate_webui"
+}
