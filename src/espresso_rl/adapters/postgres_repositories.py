@@ -49,9 +49,32 @@ class PostgresStore:
 
     def _create_tables(self) -> None:
         schema_path = Path(__file__).with_name("postgres_schema.sql")
+        index_statements: list[str] = []
         for statement in schema_path.read_text().split(";"):
-            if statement.strip():
-                self.conn.execute(statement)
+            if not statement.strip():
+                continue
+            if _is_postgres_index_statement(statement):
+                index_statements.append(statement)
+                continue
+            self.conn.execute(statement)
+        self._migrate_existing_tables()
+        for statement in index_statements:
+            self.conn.execute(statement)
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_training_dataset_source_validation_id
+                ON training_dataset (source_validation_id)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_community_priors_context_key
+                ON community_priors (context_key)
+            """
+        )
+        self.conn.commit()
+
+    def _migrate_existing_tables(self) -> None:
         for column, definition in {
             "bean_context_name": "TEXT",
             "grinder_context_id": "TEXT",
@@ -132,19 +155,11 @@ class PostgresStore:
             self.conn.execute(
                 f"ALTER TABLE community_raw_uploads ADD COLUMN IF NOT EXISTS {column} {definition}"
             )
-        self.conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_training_dataset_source_validation_id
-                ON training_dataset (source_validation_id)
-            """
-        )
-        self.conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_community_priors_context_key
-                ON community_priors (context_key)
-            """
-        )
-        self.conn.commit()
+
+
+def _is_postgres_index_statement(statement: str) -> bool:
+    normalized = statement.strip().upper()
+    return normalized.startswith("CREATE INDEX") or normalized.startswith("CREATE UNIQUE INDEX")
 
 
 def _nullable_clause(

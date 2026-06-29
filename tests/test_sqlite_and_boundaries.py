@@ -15,7 +15,7 @@ from espresso_rl.adapters.sqlite_repositories import (
     SQLiteUploadQueueRepository,
     _shot_to_row,
 )
-from espresso_rl.adapters.postgres_repositories import _upsert
+from espresso_rl.adapters.postgres_repositories import PostgresStore, _upsert
 from espresso_rl.application.upload_payloads import payload_hash as hash_payload_json
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.domain.events import RecommendationApplyEvent, ShotFeedbackEvent, ShotProfileEvent
@@ -1033,6 +1033,49 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("normalized_alias TEXT NOT NULL", schema)
         self.assertIn("feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE", schema)
         self.assertIn("ADD COLUMN IF NOT EXISTS feedback_recorded", schema)
+
+    def test_postgres_store_runs_legacy_migrations_before_indexes(self) -> None:
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+                self.committed = False
+
+            def execute(self, statement: str) -> RecordingConnection:
+                self.statements.append(statement)
+                return self
+
+            def commit(self) -> None:
+                self.committed = True
+
+        store = object.__new__(PostgresStore)
+        store.conn = RecordingConnection()
+
+        PostgresStore._create_tables(store)
+
+        statements = [" ".join(statement.split()) for statement in store.conn.statements]
+
+        def statement_index(*fragments: str) -> int:
+            for index, statement in enumerate(statements):
+                if all(fragment in statement for fragment in fragments):
+                    return index
+            self.fail(f"statement not found: {fragments}")
+
+        shadow_eval_migration = statement_index(
+            "ALTER TABLE dreamer_shadow_evaluations",
+            "ADD COLUMN IF NOT EXISTS inference_contract_id",
+        )
+        shadow_eval_index = statement_index("CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context_contract")
+        shadow_quality_migration = statement_index(
+            "ALTER TABLE dreamer_shadow_quality_reports",
+            "ADD COLUMN IF NOT EXISTS inference_contract_id",
+        )
+        shadow_quality_index = statement_index(
+            "CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context_contract"
+        )
+
+        self.assertLess(shadow_eval_migration, shadow_eval_index)
+        self.assertLess(shadow_quality_migration, shadow_quality_index)
+        self.assertTrue(store.conn.committed)
 
     def test_core_layers_do_not_import_adapters_or_infrastructure(self) -> None:
         root = Path(__file__).resolve().parents[1] / "src" / "espresso_rl"
