@@ -348,9 +348,54 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertTrue(status["runtime_health_upload_configured"])
         self.assertEqual(status["runtime_health_storage_backend"], "sqlite")
         self.assertEqual(status["runtime_health_warnings"], [])
+        self.assertEqual(
+            [step["key"] for step in status["auto_tuning_diagnostic_steps"]],
+            [
+                "context",
+                "shot_observed",
+                "shot_stored",
+                "shot_usable",
+                "rating",
+                "recommendation",
+                "community_upload",
+                "status_published",
+            ],
+        )
         self.assertNotIn(secret, encoded)
         self.assertNotIn("supabase.co", encoded)
         self.assertNotIn("espresso-rl-ingest", encoded)
+
+    def test_status_payload_diagnostic_flags_observed_shot_missing_from_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(mqtt_host="localhost", data_dir=Path(tmp), install_id="install_1")
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                service = EspressoRLService(
+                    shots,
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                    clock=lambda: 10,
+                )
+
+                status = build_status_payload(
+                    config=config,
+                    service=service,
+                    shot_repo=shots,
+                    upload_maintenance=None,
+                    upload_queue_repo=None,
+                    machine_id="machine_1",
+                    bean_context_id="bean_1",
+                    grinder_context_id="grinder_1",
+                    last_shot_id="shot_observed_but_missing",
+                    last_shot_at=9,
+                )
+
+        steps = {step["key"]: step for step in status["auto_tuning_diagnostic_steps"]}
+        self.assertEqual(steps["shot_observed"]["state"], "ok")
+        self.assertEqual(steps["shot_stored"]["state"], "attention")
+        self.assertIn("not found", steps["shot_stored"]["detail"])
+        self.assertEqual(steps["shot_usable"]["state"], "waiting")
+        self.assertEqual(steps["status_published"]["state"], "ok")
 
     def test_status_payload_reports_optimizer_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

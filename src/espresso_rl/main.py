@@ -846,6 +846,17 @@ def build_status_payload(
         upload_queue_available=upload_queue_repo is not None,
         community_upload_requested=community_upload_enabled,
     )
+    diagnostic_steps = _auto_tuning_diagnostic_steps(
+        bean_context_id=bean_context_id,
+        grinder_context_id=grinder_context_id,
+        last_shot_id=last_shot_id,
+        last_shot_record=last_shot_record,
+        rated_shot_count=len(rated_shots),
+        last_recommendation_id=last_recommendation_id,
+        mode=mode,
+        community_upload_enabled=community_upload_enabled,
+        upload_queue_status_counts=upload_queue_status_counts,
+    )
 
     return {
         "addon_online": True,
@@ -853,6 +864,7 @@ def build_status_payload(
         "bean_context_id": bean_context_id,
         "grinder_context_id": grinder_context_id,
         **runtime_health,
+        "auto_tuning_diagnostic_steps": diagnostic_steps,
         "timestamp": now,
         "last_shot_id": last_shot_id,
         "last_shot_at": last_shot_at,
@@ -926,6 +938,109 @@ def build_status_payload(
         "community_upload_enabled": community_upload_enabled,
         "grinder_catalog_search_url": grinder_catalog_search_url(config),
     }
+
+
+def _auto_tuning_diagnostic_steps(
+    *,
+    bean_context_id: str | None,
+    grinder_context_id: str | None,
+    last_shot_id: str | None,
+    last_shot_record,
+    rated_shot_count: int,
+    last_recommendation_id: str | None,
+    mode: str | None,
+    community_upload_enabled: bool,
+    upload_queue_status_counts: dict[str, int],
+) -> list[dict[str, str]]:
+    def step(key: str, label: str, state: str, detail: str) -> dict[str, str]:
+        return {"key": key, "label": label, "state": state, "detail": detail}
+
+    steps = [
+        step(
+            "context",
+            "Context",
+            "ok" if bean_context_id and grinder_context_id else "waiting",
+            "Bean and grinder selected." if bean_context_id and grinder_context_id else "Select a bean and grinder.",
+        ),
+        step(
+            "shot_observed",
+            "Shot observed",
+            "ok" if last_shot_id else "waiting",
+            "A shot has been seen for this context." if last_shot_id else "Waiting for a shot.",
+        ),
+    ]
+
+    if last_shot_record is not None:
+        shot_usable = (
+            last_shot_record.shot_type.value == "espresso"
+            and not last_shot_record.exclude_from_local_optimization
+            and last_shot_record.optimization_weight > 0.0
+        )
+        steps.append(step("shot_stored", "Local storage", "ok", "Last shot is in local history."))
+        steps.append(
+            step(
+                "shot_usable",
+                "Optimizer input",
+                "ok" if shot_usable else "attention",
+                "Last shot is usable for optimization."
+                if shot_usable
+                else "Last shot was excluded or has zero optimization weight.",
+            )
+        )
+        steps.append(
+            step(
+                "rating",
+                "Rating",
+                "ok" if last_shot_record.human_rating is not None else "waiting",
+                "Rating is recorded." if last_shot_record.human_rating is not None else "Waiting for shot rating.",
+            )
+        )
+    else:
+        steps.append(
+            step(
+                "shot_stored",
+                "Local storage",
+                "attention" if last_shot_id else "waiting",
+                "Observed shot was not found in local history."
+                if last_shot_id
+                else "No shot is available to store yet.",
+            )
+        )
+        steps.append(step("shot_usable", "Optimizer input", "waiting", "Waiting for a stored shot."))
+        steps.append(step("rating", "Rating", "waiting", "Waiting for a stored shot."))
+
+    if last_recommendation_id:
+        detail = "Recommendation is available."
+        if mode == "zero_observe":
+            detail = "Baseline observation is active."
+        steps.append(step("recommendation", "Recommendation", "ok", detail))
+    else:
+        detail = "Waiting for enough rated data."
+        if rated_shot_count > 0:
+            detail = "Waiting for the next recommendation cycle."
+        steps.append(step("recommendation", "Recommendation", "waiting", detail))
+
+    pending_uploads = upload_queue_status_counts.get(UploadQueueStatus.PENDING.value, 0)
+    failed_uploads = upload_queue_status_counts.get(UploadQueueStatus.FAILED.value, 0)
+    rejected_uploads = upload_queue_status_counts.get(UploadQueueStatus.REJECTED.value, 0)
+    if not community_upload_enabled:
+        upload_state = "off"
+        upload_detail = "Community upload is disabled."
+    elif rejected_uploads:
+        upload_state = "attention"
+        upload_detail = f"{rejected_uploads} upload record(s) rejected."
+    elif failed_uploads:
+        upload_state = "attention"
+        upload_detail = f"{failed_uploads} upload record(s) waiting to retry."
+    elif pending_uploads:
+        upload_state = "waiting"
+        upload_detail = f"{pending_uploads} upload record(s) queued."
+    else:
+        upload_state = "ok"
+        upload_detail = "Upload queue is clear."
+    steps.append(step("community_upload", "Community upload", upload_state, upload_detail))
+    steps.append(step("status_published", "Status published", "ok", "This diagnostic status was published."))
+    return steps
 
 
 def _runtime_health_payload(
