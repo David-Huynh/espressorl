@@ -394,6 +394,9 @@ verify_jwt = false
 [functions.espresso-rl-grinder-search]
 verify_jwt = false
 
+[functions.espresso-rl-prior-rule-search]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

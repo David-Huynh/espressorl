@@ -15,6 +15,7 @@ from .models import (
     VALID_TASTE_TAGS,
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
+from .prior_rules import PriorRule, PriorSelectionMode, parse_prior_rules
 
 VALID_CORRECTION_TAGS = {
     "changed_manually",
@@ -610,6 +611,8 @@ class OptimizerSettingsEvent:
     schema_version: int = 1
     bean_context_id: str | None = None
     grinder_context_id: str | None = None
+    prior_mode: PriorSelectionMode = PriorSelectionMode.COMMUNITY_ONLY
+    prior_rules: tuple[PriorRule, ...] = ()
     model_artifact_path: str | None = None
     model_artifact_sha256: str | None = None
     source: str = "unknown"
@@ -622,6 +625,8 @@ class OptimizerSettingsEvent:
         object.__setattr__(self, "optimizer_mode", normalize_optimizer_mode(self.optimizer_mode))
         object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
+        object.__setattr__(self, "prior_mode", PriorSelectionMode(self.prior_mode))
+        object.__setattr__(self, "prior_rules", parse_prior_rules(self.prior_rules))
         object.__setattr__(
             self,
             "model_artifact_path",

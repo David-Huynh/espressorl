@@ -85,6 +85,30 @@ class PriorPoint:
 
 
 @dataclass(frozen=True)
+class PriorSignal:
+    grind_direction: int
+    ratio_direction: int
+    dose_direction: int
+    confidence: float
+    observation_noise: float
+    source: str
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("grind_direction", "ratio_direction", "dose_direction"):
+            if getattr(self, field_name) not in {-1, 0, 1}:
+                raise ValueError(f"{field_name} must be -1, 0, or 1")
+        if not any((self.grind_direction, self.ratio_direction, self.dose_direction)):
+            raise ValueError("prior signal must define at least one direction")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("prior signal confidence must be between 0 and 1")
+        if self.observation_noise <= 0:
+            raise ValueError("prior signal observation_noise must be positive")
+        if not self.source:
+            raise ValueError("prior signal source is required")
+
+
+@dataclass(frozen=True)
 class OptimizationContext:
     install_id: str
     machine_id: str
@@ -97,3 +121,4 @@ class OptimizationContext:
     last_recommendation: Recommendation | None = None
     grinder_context_id: str | None = None
     prior_points: Sequence[PriorPoint] = ()
+    prior_signals: Sequence[PriorSignal] = ()

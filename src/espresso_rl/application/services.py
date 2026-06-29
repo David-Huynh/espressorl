@@ -29,7 +29,7 @@ from espresso_rl.domain.models import (
     ShotType,
     now_ts,
 )
-from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
+from espresso_rl.domain.optimization import OptimizationContext, PriorPoint, PriorSignal
 from espresso_rl.domain.profile import (
     build_fixed_cadence_sequence,
     profile_hash,
@@ -45,12 +45,14 @@ from espresso_rl.application.upload_payloads import (
     make_recommendation_upload_item,
     make_shot_upload_item,
 )
+from espresso_rl.application.rule_priors import rule_prior_signals
 from espresso_rl.ports.optimizers import Optimizer, PriorProvider
 from espresso_rl.ports.repositories import (
     RecommendationRepository,
     ShotRepository,
     UploadQueueRepository,
 )
+from espresso_rl.domain.prior_rules import PriorRule, PriorSelectionMode, parse_prior_rules
 
 
 LOCAL_BEAN_HISTORY_PRIOR_SOURCE = "local_bean_history"
@@ -241,7 +243,8 @@ def _same_bean_previous_bag_prior_points(
                     shot.relative_grind_steps_from_reference
                     - current_recipe.relative_grind_steps_from_reference
                 )
-                * current_recipe.microns_per_step,
+                * current_recipe.microns_per_step
+                * current_recipe.grinder_direction_sign,
                 dose_g=shot.dose_in_g,
                 target_yield_g=target_yield_g,
                 target_ratio=target_ratio,
@@ -278,6 +281,8 @@ class EspressoRLService:
         self._clock = clock
         self._community_upload_enabled_default = bool(community_upload_enabled_default)
         self._community_upload_enabled_by_machine: dict[tuple[str, str], bool] = {}
+        self._prior_mode_by_machine: dict[tuple[str, str], PriorSelectionMode] = {}
+        self._prior_rules_by_machine: dict[tuple[str, str], tuple[PriorRule, ...]] = {}
 
     def ingest_shot_profile(self, event: ShotProfileEvent) -> IngestResult:
         now = self._clock()
@@ -791,7 +796,9 @@ class EspressoRLService:
             grinder_context_id=grinder_context_id,
         )
         prior_points: list[PriorPoint] = []
-        if _has_optimizer_observation(recent):
+        prior_signals: list[PriorSignal] = []
+        prior_mode = self.prior_mode_for(install_id, machine_id)
+        if _has_optimizer_observation(recent) and prior_mode != PriorSelectionMode.NO_PRIORS:
             prior_points.extend(
                 _same_bean_previous_bag_prior_points(
                     current_recipe=current_recipe,
@@ -811,7 +818,14 @@ class EspressoRLService:
             )
             if self._prior_provider is not None:
                 prior_points.extend(self._prior_provider.get_prior_points(context))
-        if prior_points:
+            if prior_mode == PriorSelectionMode.RULES_AND_COMMUNITY:
+                prior_signals.extend(
+                    rule_prior_signals(
+                        context,
+                        self.prior_rules_for(install_id, machine_id),
+                    )
+                )
+        if prior_points or prior_signals:
             context = OptimizationContext(
                 install_id=context.install_id,
                 machine_id=context.machine_id,
@@ -824,6 +838,7 @@ class EspressoRLService:
                 last_recommendation=context.last_recommendation,
                 grinder_context_id=context.grinder_context_id,
                 prior_points=tuple(prior_points),
+                prior_signals=tuple(prior_signals),
             )
         recommendation = self._optimizer.recommend(context)
         recommendation.profile_id = profile_id
@@ -849,6 +864,26 @@ class EspressoRLService:
 
     def set_community_upload_enabled(self, install_id: str, machine_id: str, enabled: bool) -> None:
         self._community_upload_enabled_by_machine[(install_id, machine_id)] = bool(enabled)
+
+    def configure_prior_policy(
+        self,
+        install_id: str,
+        machine_id: str,
+        mode: PriorSelectionMode,
+        rules: tuple[PriorRule, ...],
+    ) -> None:
+        key = (install_id, machine_id)
+        self._prior_mode_by_machine[key] = PriorSelectionMode(mode)
+        self._prior_rules_by_machine[key] = parse_prior_rules(rules)
+
+    def prior_mode_for(self, install_id: str, machine_id: str) -> PriorSelectionMode:
+        return self._prior_mode_by_machine.get(
+            (install_id, machine_id),
+            PriorSelectionMode.COMMUNITY_ONLY,
+        )
+
+    def prior_rules_for(self, install_id: str, machine_id: str) -> tuple[PriorRule, ...]:
+        return self._prior_rules_by_machine.get((install_id, machine_id), ())
 
     def community_upload_enabled_for(self, install_id: str, machine_id: str) -> bool:
         return self._community_upload_enabled_by_machine.get(

@@ -305,6 +305,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertEqual(len(recent), 1)
                 self.assertEqual(recent[0]["shot_id"], "shot_1")
                 self.assertEqual(status["grinder_catalog_search_url"], "")
+                self.assertEqual(status["prior_rule_catalog_search_url"], "")
                 self.assertEqual(recent[0]["profile_label"], "Cremina lever machine")
                 self.assertEqual(recent[0]["final_phase_name"], "ramp")
                 self.assertEqual(recent[0]["shot_end_state"], "manual_or_interrupted")
@@ -619,6 +620,10 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 status["grinder_catalog_search_url"],
                 "https://project.supabase.co/functions/v1/espresso-rl-grinder-search",
             )
+            self.assertEqual(
+                status["prior_rule_catalog_search_url"],
+                "https://project.supabase.co/functions/v1/espresso-rl-prior-rule-search",
+            )
 
     def test_status_payload_derives_grinder_catalog_search_url_from_registration_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -649,6 +654,10 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(
                 status["grinder_catalog_search_url"],
                 "https://project.supabase.co/functions/v1/espresso-rl-grinder-search",
+            )
+            self.assertEqual(
+                status["prior_rule_catalog_search_url"],
+                "https://project.supabase.co/functions/v1/espresso-rl-prior-rule-search",
             )
 
     def test_postgres_upsert_rolls_back_failed_transaction(self) -> None:

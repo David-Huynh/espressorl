@@ -101,6 +101,17 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "optimizer_mode": "dreamer_v3_shadow",
                 "bean_context_id": "bean_1",
                 "grinder_context_id": "grinder_1",
+                "prior_mode": "rules_and_community",
+                "prior_rules": [
+                    {
+                        "rule_id": "user_bitter_ratio",
+                        "name": "Shorten bitter shots",
+                        "metric": "taste_tag",
+                        "operator": "contains",
+                        "condition_value": "bitter",
+                        "ratio_direction": "decrease",
+                    }
+                ],
                 "model_artifact_path": "models/dreamer-v3.pt",
                 "model_artifact_sha256": "a" * 64,
                 "source": "gaggimate_webui",
@@ -112,6 +123,10 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.machine_id, "gaggimate:AA_BB")
         self.assertEqual(event.bean_context_id, "bean_1")
         self.assertEqual(event.grinder_context_id, "grinder_1")
+        self.assertEqual(event.prior_mode.value, "rules_and_community")
+        self.assertEqual(len(event.prior_rules), 1)
+        self.assertEqual(event.prior_rules[0].condition_value, "bitter")
+        self.assertEqual(event.prior_rules[0].ratio_direction.value, "decrease")
         self.assertEqual(event.model_artifact_path, "models/dreamer-v3.pt")
         self.assertEqual(event.model_artifact_sha256, "a" * 64)
 

@@ -54,7 +54,8 @@ class LocalHistoryPriorProvider:
             points.append(
                 PriorPoint(
                     grind_delta_um_from_current=(shot.relative_grind_steps_from_reference - context.current_recipe.relative_grind_steps_from_reference)
-                    * context.current_recipe.microns_per_step,
+                    * context.current_recipe.microns_per_step
+                    * context.current_recipe.grinder_direction_sign,
                     dose_g=shot.dose_in_g,
                     target_yield_g=target_yield_g,
                     target_ratio=target_ratio,

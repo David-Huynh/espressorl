@@ -339,9 +339,11 @@ The Supabase scaffold lives in `supabase/`:
 - `supabase/migrations/202605290001_espresso_rl_raw_queue.sql`
 - `supabase/migrations/202606250001_espressorl_grinder_catalog.sql`
 - `supabase/migrations/202606270001_espressorl_grinder_catalog_seed.sql`
+- `supabase/migrations/202606290001_espressorl_prior_rule_catalog.sql`
 - `supabase/functions/espresso-rl-register/index.ts`
 - `supabase/functions/espresso-rl-ingest/index.ts`
 - `supabase/functions/espresso-rl-grinder-search/index.ts`
+- `supabase/functions/espresso-rl-prior-rule-search/index.ts`
 
 The grinder catalog is reviewed metadata, not client-owned runtime state. Add
 new grinders with a PR that updates the catalog seed/migrations and includes
@@ -351,6 +353,11 @@ the marker pitch is sourced or measured. One physical grinder should remain one
 catalog row: piecewise ranges and compound controls such as macro plus micro
 rings belong in `metadata_json` so bean/grinder history is not fragmented.
 
+The prior-rule catalog follows the same reviewed PR workflow. It contains only
+bounded declarative condition/direction records; it cannot contain executable
+expressions or exact recipe deltas. Gaggimate searches pack names live and
+stores only rules the user selected.
+
 Deploy it with:
 
 ```bash
@@ -358,6 +365,7 @@ supabase db push
 supabase functions deploy espresso-rl-register --no-verify-jwt
 supabase functions deploy espresso-rl-ingest --no-verify-jwt
 supabase functions deploy espresso-rl-grinder-search --no-verify-jwt
+supabase functions deploy espresso-rl-prior-rule-search --no-verify-jwt
 ```
 
 ## Local Data Dashboard
@@ -669,9 +677,19 @@ Previous bags of the same normalized bean on the same grinder are converted into
 up to 64 local `local_bean_history` prior points after the new bag has at least
 one valid local observation. These points are ranked and down-weighted by rank,
 so they can provide an initial directional shape without replacing the current
-bag's real shots. The same `OptimizationContext.prior_points` stream is the
-optimizer-agnostic contract for BO, future DreamerV3 inference, and other
-optimizers; no optimizer should receive adapter-specific prior data.
+bag's real shots. `OptimizationContext.prior_points` carries empirical history
+while `OptimizationContext.prior_signals` carries optional user/community rule
+directions. Rules state only semantic direction (`finer`, `coarser`,
+`increase`, or `decrease`); BO selects magnitude from its trust region and
+local evidence. Semantic grind direction is converted through the active
+grinder's step direction, so dial numbering is never embedded in a rule. Both
+streams are optimizer-agnostic and contain no adapter-specific data.
+
+Per-machine prior modes are `no_priors`, `community_only`, and
+`rules_and_community`. Rules are bounded to 16, strictly allowlisted at the
+firmware and backend boundaries, confidence-capped, and ignored after the
+fifth local shot. Local observations remain dominant and all recommendations
+still pass normal safety validation.
 
 Run local verification with:
 

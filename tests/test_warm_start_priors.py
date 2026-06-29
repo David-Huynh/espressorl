@@ -10,13 +10,14 @@ from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityPrior
 from espresso_rl.domain.models import (
     FollowThroughState,
+    GrinderStepDirection,
     Recipe,
     RecommendationDecision,
     RecommendationMode,
     SafetyBounds,
     ShotRecord,
 )
-from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
+from espresso_rl.domain.optimization import OptimizationContext, PriorPoint, PriorSignal
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from espresso_rl.main import open_prior_provider
 from tests.test_application_service import (
@@ -28,6 +29,48 @@ from tests.test_application_service import (
 
 
 class WarmStartPriorTests(unittest.TestCase):
+    def test_finer_rule_uses_active_grinder_step_direction(self) -> None:
+        optimizer = ConservativeBOOptimizer()
+        signal = PriorSignal(
+            grind_direction=1,
+            ratio_direction=0,
+            dose_direction=0,
+            confidence=0.65,
+            observation_noise=0.3,
+            source="user_rule",
+        )
+
+        def recommendation_for(direction: GrinderStepDirection):
+            current = Recipe(
+                42,
+                12.5,
+                18.0,
+                36.0,
+                grinder_step_direction=direction,
+            )
+            return optimizer.recommend(
+                OptimizationContext(
+                    install_id="install_1",
+                    machine_id="machine_1",
+                    bean_context_id="bean_1",
+                    machine_adapter="gaggimate",
+                    current_recipe=current,
+                    shots=[shot_record("shot_1", timestamp=1, reward=0.5, rating=3)],
+                    safety_bounds=SafetyBounds(),
+                    now=100,
+                    prior_signals=[signal],
+                )
+            )
+
+        higher_is_finer = recommendation_for(GrinderStepDirection.HIGHER_IS_FINER)
+        higher_is_coarser = recommendation_for(GrinderStepDirection.HIGHER_IS_COARSER)
+
+        self.assertGreater(higher_is_finer.grind_delta_steps_from_current, 0)
+        self.assertLess(higher_is_coarser.grind_delta_steps_from_current, 0)
+        self.assertGreater(higher_is_coarser.grind_delta_um_from_current, 0)
+        self.assertEqual(higher_is_finer.mode, RecommendationMode.WARM_STARTED_BO)
+        self.assertIn("BO selects a bounded step", higher_is_finer.reason)
+
     def test_partial_action_distance_uses_achieved_yield_and_masks_unknown_dimensions(self) -> None:
         optimizer = ConservativeBOOptimizer()
         shot = shot_record("partial", timestamp=1)
@@ -111,7 +154,7 @@ class WarmStartPriorTests(unittest.TestCase):
         self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
         self.assertLessEqual(abs(recommendation.target_yield_g - 36.0), 4.0)
 
-    def test_first_clearly_fast_sour_shot_uses_coarse_finer_probe(self) -> None:
+    def test_taste_tags_without_selected_rules_do_not_expand_first_probe(self) -> None:
         current = Recipe(42, 12.5, 18.0, 36.0)
         context = OptimizationContext(
             install_id="install_1",
@@ -136,9 +179,8 @@ class WarmStartPriorTests(unittest.TestCase):
         recommendation = ConservativeBOOptimizer().recommend(context)
 
         self.assertEqual(recommendation.mode, RecommendationMode.ZERO_IMMEDIATE_BO)
-        self.assertGreaterEqual(recommendation.grind_delta_steps_from_current, 4)
-        self.assertGreaterEqual(recommendation.target_yield_g - current.target_yield_g, 5.0)
-        self.assertLessEqual(recommendation.grind_delta_steps_from_current, 5)
+        self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
+        self.assertLessEqual(abs(recommendation.target_yield_g - current.target_yield_g), 4.0)
 
     def test_first_short_shot_without_directional_feedback_stays_small(self) -> None:
         current = Recipe(42, 12.5, 18.0, 36.0)
@@ -226,6 +268,42 @@ class WarmStartPriorTests(unittest.TestCase):
         self.assertLessEqual(recommendation.grind_delta_steps_from_current, -3)
         self.assertGreaterEqual(recommendation.grind_delta_steps_from_current, -5)
 
+    def test_empirical_prior_um_maps_through_grinder_step_direction(self) -> None:
+        current = Recipe(
+            42,
+            12.5,
+            18.0,
+            36.0,
+            grinder_step_direction=GrinderStepDirection.HIGHER_IS_COARSER,
+        )
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[shot_record("shot_1", timestamp=1, reward=0.5, rating=3)],
+            safety_bounds=SafetyBounds(),
+            now=100,
+            prior_points=[
+                PriorPoint(
+                    grind_delta_um_from_current=50.0,
+                    dose_g=18.0,
+                    target_yield_g=36.0,
+                    target_ratio=2.0,
+                    predicted_reward=1.0,
+                    confidence=0.85,
+                    observation_noise=0.25,
+                    source="local_bean_history",
+                )
+            ],
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertLess(recommendation.grind_delta_steps_from_current, 0)
+        self.assertGreater(recommendation.grind_delta_um_from_current, 0)
+
     def test_same_bean_history_prior_uses_generic_warm_started_mode(self) -> None:
         current = Recipe(
             relative_grind_steps_from_reference=42,
@@ -299,7 +377,7 @@ class WarmStartPriorTests(unittest.TestCase):
         self.assertEqual(recommendation.mode, RecommendationMode.LOCAL_BO)
         self.assertNotEqual(recommendation.target_yield_g, 44.0)
 
-    def test_taste_tags_move_multi_observation_bo_in_the_expected_direction(self) -> None:
+    def test_taste_tags_do_not_create_hidden_directional_rules(self) -> None:
         current = Recipe(42, 12.5, 18.0, 36.0)
         context = OptimizationContext(
             install_id="install_1",
@@ -315,12 +393,32 @@ class WarmStartPriorTests(unittest.TestCase):
             now=100,
         )
 
-        recommendation = ConservativeBOOptimizer().recommend(context)
+        optimizer = ConservativeBOOptimizer()
+        recommendation = optimizer.recommend(context)
+        without_tags = optimizer.recommend(
+            OptimizationContext(
+                install_id=context.install_id,
+                machine_id=context.machine_id,
+                bean_context_id=context.bean_context_id,
+                machine_adapter=context.machine_adapter,
+                current_recipe=current,
+                shots=[
+                    shot_record("shot_1", timestamp=1, reward=0.5, rating=3),
+                    shot_record("shot_2", timestamp=2, reward=0.5, rating=3),
+                ],
+                safety_bounds=context.safety_bounds,
+                now=context.now,
+            )
+        )
 
         self.assertEqual(recommendation.source_shot_id, "shot_2")
-        self.assertTrue(
-            recommendation.projected_relative_step_from_reference > current.relative_grind_steps_from_reference
-            or recommendation.target_yield_g > current.target_yield_g
+        self.assertEqual(
+            recommendation.grind_delta_steps_from_current,
+            without_tags.grind_delta_steps_from_current,
+        )
+        self.assertEqual(
+            recommendation.target_yield_g,
+            without_tags.target_yield_g,
         )
 
     def test_flat_local_evidence_still_probes_a_new_bounded_candidate(self) -> None:

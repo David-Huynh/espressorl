@@ -413,6 +413,8 @@ class GaggimateMQTTClient:
             optimizer_mode=str(payload.get("optimizer_mode") or payload.get("mode") or self._config.optimizer_mode),
             bean_context_id=_optional_string(payload.get("bean_context_id")),
             grinder_context_id=_optional_string(payload.get("grinder_context_id")),
+            prior_mode=str(payload.get("prior_mode") or "community_only"),
+            prior_rules=tuple(payload.get("prior_rules") or ()),
             model_artifact_path=_optional_string(payload.get("model_artifact_path")),
             model_artifact_sha256=_optional_string(payload.get("model_artifact_sha256")),
             source=payload.get("source", "gaggimate_mqtt"),

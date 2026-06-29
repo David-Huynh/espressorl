@@ -12,7 +12,7 @@ from espresso_rl.domain.models import (
     ShotType,
     new_id,
 )
-from espresso_rl.domain.optimization import OptimizationContext, PriorPoint
+from espresso_rl.domain.optimization import OptimizationContext, PriorPoint, PriorSignal
 from espresso_rl.domain.safety import clamp_candidate_recipe, validate_recommendation
 
 MAX_USABLE_PRIOR_POINTS = 64
@@ -31,6 +31,7 @@ class ConservativeBOOptimizer:
     def recommend(self, context: OptimizationContext) -> Recommendation:
         shots = self._optimizer_shots(list(context.shots))
         prior_points = self._usable_prior_points(context, len(shots))
+        prior_signals = self._usable_prior_signals(context, len(shots))
         current = context.current_recipe
 
         if not shots:
@@ -43,25 +44,31 @@ class ConservativeBOOptimizer:
             radius_steps, radius_yield_g, dose_radius_g, mode = self._trust_region(
                 shots,
                 prior_points,
+                prior_signals,
                 context,
             )
-            if prior_points and len(shots) <= 4:
+            if (prior_points or prior_signals) and len(shots) <= 4:
                 mode = RecommendationMode.WARM_STARTED_BO
             center = self._center_recipe(shots)
             recipe = self._choose_candidate(
                 shots=shots,
                 prior_points=prior_points,
+                prior_signals=prior_signals,
                 context=context,
                 center=center,
                 radius_steps=radius_steps,
                 radius_yield_g=radius_yield_g,
                 dose_radius_g=dose_radius_g,
             )
-            reason = self._reason(shots, recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference, recipe.target_yield_g - current.target_yield_g)
+            reason = self._reason(
+                recipe.relative_grind_steps_from_reference
+                - current.relative_grind_steps_from_reference,
+                recipe.target_yield_g - current.target_yield_g,
+            )
             if mode == RecommendationMode.WARM_STARTED_BO:
-                reason = self._warm_start_reason(prior_points)
+                reason = self._warm_start_reason(prior_points, prior_signals)
             confidence = self._confidence(shots)
-            if prior_points and mode == RecommendationMode.WARM_STARTED_BO:
+            if (prior_points or prior_signals) and mode == RecommendationMode.WARM_STARTED_BO:
                 confidence = min(0.65, confidence + 0.05)
             source_shot_id = shots[-1].shot_id
 
@@ -75,7 +82,9 @@ class ConservativeBOOptimizer:
             bean_context_id=context.bean_context_id,
             grinder_context_id=context.grinder_context_id,
             grind_delta_steps_from_current=round(recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference),
-            grind_delta_um_from_current=(recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference) * current.microns_per_step,
+            grind_delta_um_from_current=(recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference)
+            * current.microns_per_step
+            * current.grinder_direction_sign,
             projected_relative_step_from_reference=recipe.relative_grind_steps_from_reference,
             projected_relative_grind_um_from_reference=recipe.relative_grind_um_from_reference,
             next_dose_g=recipe.dose_g,
@@ -86,6 +95,7 @@ class ConservativeBOOptimizer:
             reason=reason,
             status=RecommendationStatus.PENDING,
             source_shot_id=source_shot_id,
+            grinder_step_direction=current.grinder_step_direction,
         )
         validate_recommendation(current, recommendation, context.safety_bounds)
         return recommendation
@@ -94,6 +104,7 @@ class ConservativeBOOptimizer:
         self,
         shots: list[ShotRecord],
         prior_points: list[PriorPoint],
+        prior_signals: list[PriorSignal],
         context: OptimizationContext,
     ) -> tuple[int, float, float, RecommendationMode]:
         n = len(shots)
@@ -104,10 +115,12 @@ class ConservativeBOOptimizer:
         else:
             radius_steps, radius_yield_g, dose_radius_g, mode = 5, 8.0, 1.0, RecommendationMode.LOCAL_BO
 
-        diagnostic = self._diagnostic_signal(shots[-1] if shots else None)[1]
-        prior_strength = self._prior_strength(prior_points)
+        prior_strength = max(
+            self._prior_strength(prior_points),
+            self._prior_signal_strength(prior_signals),
+        )
         near_good = self._near_good_signal(shots[-1] if shots else None)
-        evidence_strength = max(diagnostic, prior_strength)
+        evidence_strength = prior_strength
 
         if n <= 4 and evidence_strength > 0:
             radius_steps = max(radius_steps, int(round(2 + 3 * evidence_strength)))
@@ -144,6 +157,7 @@ class ConservativeBOOptimizer:
         self,
         shots: list[ShotRecord],
         prior_points: list[PriorPoint],
+        prior_signals: list[PriorSignal],
         context: OptimizationContext,
         center: ShotRecord,
         radius_steps: int,
@@ -151,12 +165,8 @@ class ConservativeBOOptimizer:
         dose_radius_g: float,
     ):
         current = context.current_recipe
-        if len(shots) == 1 and not prior_points:
-            grind_delta, yield_delta = self._single_point_probe(
-                shots[0],
-                max_grind_delta_steps=radius_steps,
-                max_yield_delta_g=radius_yield_g,
-            )
+        if len(shots) == 1 and not prior_points and not prior_signals:
+            grind_delta, yield_delta = self._single_point_probe()
             return clamp_candidate_recipe(
                 current=current,
                 candidate_relative_grind_steps_from_reference=current.relative_grind_steps_from_reference + grind_delta,
@@ -191,6 +201,7 @@ class ConservativeBOOptimizer:
                         candidate,
                         shots,
                         prior_points,
+                        prior_signals,
                         context,
                         radius_steps,
                         radius_yield_g,
@@ -214,57 +225,12 @@ class ConservativeBOOptimizer:
             and shot.reward is not None
         ]
 
-    def _single_point_probe(
-        self,
-        shot: ShotRecord,
-        *,
-        max_grind_delta_steps: int,
-        max_yield_delta_g: float,
-    ) -> tuple[int, float]:
-        direction, strength = self._diagnostic_signal(shot)
-        if direction:
-            grind_steps = max(1, min(max_grind_delta_steps, int(round(1 + 4 * strength))))
-            yield_delta = min(max_yield_delta_g, 2.0 + 4.0 * strength)
-            return direction * grind_steps, direction * yield_delta
-        tags = set(shot.taste_tags)
-        if {"sour", "weak", "thin", "too_fast"} & tags:
-            return 1, 2.0
-        if {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"} & tags:
-            return -1, -2.0
+    def _single_point_probe(self) -> tuple[int, float]:
         return 1, 0.0
-
-    def _diagnostic_signal(self, shot: ShotRecord | None) -> tuple[int, float]:
-        if shot is None:
-            return 0, 0.0
-        tags = set(shot.taste_tags)
-        finer_tags = {"sour", "weak", "thin", "too_fast"}
-        coarser_tags = {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"}
-
-        finer_strength = 0.0
-        coarser_strength = 0.0
-        if tags & finer_tags:
-            finer_strength = 0.75
-        if tags & coarser_tags:
-            coarser_strength = 0.75
-        if "too_fast" in tags:
-            finer_strength = max(finer_strength, 1.0)
-        if "too_slow" in tags:
-            coarser_strength = max(coarser_strength, 1.0)
-
-        if finer_strength > coarser_strength:
-            return 1, finer_strength
-        if coarser_strength > finer_strength:
-            return -1, coarser_strength
-        return 0, 0.0
 
     def _near_good_signal(self, shot: ShotRecord | None) -> bool:
         if shot is None:
             return False
-        if self._diagnostic_signal(shot)[1] >= 0.35:
-            return False
-        tags = set(shot.taste_tags)
-        if tags & {"balanced", "sweet", "good_body"}:
-            return True
         if shot.human_rating is not None and shot.human_rating >= 4:
             return True
         return bool(shot.reward is not None and shot.reward >= 0.72)
@@ -295,6 +261,7 @@ class ConservativeBOOptimizer:
         candidate,
         shots: list[ShotRecord],
         prior_points: list[PriorPoint],
+        prior_signals: list[PriorSignal],
         context: OptimizationContext,
         radius_steps: int,
         radius_yield_g: float,
@@ -310,13 +277,6 @@ class ConservativeBOOptimizer:
             coverage = self._action_coverage(shot)
             weight = ((shot.reward_confidence or 0.1) * shot.optimization_weight * coverage) / (0.15 + distance)
             observation_reward = shot.reward if shot.reward is not None else (shot.profile_score or 0.0)
-            observation_reward += self._taste_candidate_adjustment(
-                candidate,
-                shot,
-                radius_steps,
-                radius_yield_g,
-                dose_radius_g,
-            )
             weighted_reward += weight * observation_reward
             weight_sum += weight
         predicted_reward = weighted_reward / weight_sum if weight_sum else 0.0
@@ -331,6 +291,15 @@ class ConservativeBOOptimizer:
             radius_yield_g=radius_yield_g,
             dose_radius_g=dose_radius_g,
         )
+        predicted_reward += self._directional_prior_adjustment(
+            candidate=candidate,
+            signals=prior_signals,
+            context=context,
+            local_shot_count=len(shots),
+            radius_steps=radius_steps,
+            radius_yield_g=radius_yield_g,
+            dose_radius_g=dose_radius_g,
+        )
 
         distance_from_current = abs(candidate.relative_grind_steps_from_reference - context.current_recipe.relative_grind_steps_from_reference) / max(radius_steps, 1)
         distance_from_current += abs(candidate.target_yield_g - context.current_recipe.target_yield_g) / max(radius_yield_g, 1.0)
@@ -338,44 +307,13 @@ class ConservativeBOOptimizer:
 
         exploration_bonus = 0.05 * min(min_distance if math.isfinite(min_distance) else 0.0, 1.0)
         evidence_strength = max(
-            self._diagnostic_signal(shots[-1] if shots else None)[1],
             self._prior_strength(prior_points),
+            self._prior_signal_strength(prior_signals),
         )
         distance_penalty_rate = 0.03 - 0.015 * evidence_strength
         distance_penalty = distance_penalty_rate * distance_from_current
         oscillation_penalty = self._oscillation_penalty(candidate, context)
         return predicted_reward + exploration_bonus - distance_penalty - oscillation_penalty
-
-    def _taste_candidate_adjustment(
-        self,
-        candidate,
-        shot: ShotRecord,
-        radius_steps: int,
-        radius_yield_g: float,
-        dose_radius_g: float,
-    ) -> float:
-        tags = set(shot.taste_tags)
-        if not tags:
-            return 0.0
-
-        shot_grind = (
-            shot.relative_grind_steps_from_reference
-            if shot.grind_observed and shot.relative_grind_steps_from_reference is not None
-            else candidate.relative_grind_steps_from_reference
-        )
-        grind_delta = (candidate.relative_grind_steps_from_reference - shot_grind) / max(radius_steps, 1)
-        shot_yield = shot.realized_yield_g if shot.realized_yield_observed else candidate.target_yield_g
-        yield_delta = (candidate.target_yield_g - shot_yield) / max(radius_yield_g, 1.0)
-        extraction_direction = max(-1.0, min(1.0, 0.65 * grind_delta + 0.35 * yield_delta))
-
-        if {"sour", "weak", "thin", "too_fast"} & tags:
-            return 0.12 * extraction_direction
-        if {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"} & tags:
-            return -0.12 * extraction_direction
-        if {"balanced", "sweet", "good_body"} & tags:
-            distance = self._distance(candidate, shot, radius_steps, radius_yield_g, dose_radius_g)
-            return -0.08 * min(distance, 1.0)
-        return 0.0
 
     def _blend_prior_reward(
         self,
@@ -400,7 +338,8 @@ class ConservativeBOOptimizer:
         for point in prior_points:
             prior_relative_grind_steps_from_reference = (
                 context.current_recipe.relative_grind_steps_from_reference
-                + point.grind_delta_um_from_current / context.current_recipe.microns_per_step
+                + point.grind_delta_um_from_current
+                / (context.current_recipe.microns_per_step * context.current_recipe.grinder_direction_sign)
             )
             distances: list[float] = []
             if point.grind_observed:
@@ -457,16 +396,116 @@ class ConservativeBOOptimizer:
             points.append(point)
         return points[:MAX_USABLE_PRIOR_POINTS]
 
-    def _warm_start_reason(self, prior_points: list[PriorPoint]) -> str:
+    def _usable_prior_signals(
+        self,
+        context: OptimizationContext,
+        local_shot_count: int,
+    ) -> list[PriorSignal]:
+        if local_shot_count <= 0 or local_shot_count >= 5:
+            return []
+        return [
+            signal
+            for signal in context.prior_signals
+            if signal.confidence > 0 and signal.observation_noise > 0
+        ][:16]
+
+    def _warm_start_reason(
+        self,
+        prior_points: list[PriorPoint],
+        prior_signals: list[PriorSignal],
+    ) -> str:
         if any(point.source == "local_bean_history" for point in prior_points):
             return "Same-bean previous bag history plus local shot data; staying inside the trust region."
+        if any(signal.source == "user_rule" for signal in prior_signals):
+            return "User rules guide direction while BO selects a bounded step from local evidence."
+        if prior_signals:
+            return "Community rules guide direction while BO selects a bounded step from local evidence."
         return "Warm-start prior plus local shot data; staying inside the trust region."
+
+    def _prior_signal_strength(self, signals: list[PriorSignal]) -> float:
+        strength = 0.0
+        for signal in signals:
+            signal_strength = min(
+                1.0,
+                signal.confidence
+                * self._prior_source_scale(signal.source)
+                / signal.observation_noise,
+            )
+            strength = max(strength, signal_strength)
+        return strength
+
+    def _directional_prior_adjustment(
+        self,
+        *,
+        candidate,
+        signals: list[PriorSignal],
+        context: OptimizationContext,
+        local_shot_count: int,
+        radius_steps: int,
+        radius_yield_g: float,
+        dose_radius_g: float,
+    ) -> float:
+        if not signals:
+            return 0.0
+        prior_decay = max(0.0, (5 - local_shot_count) / 5.0)
+        if prior_decay <= 0:
+            return 0.0
+
+        current = context.current_recipe
+        numeric_grind_delta = (
+            candidate.relative_grind_steps_from_reference
+            - current.relative_grind_steps_from_reference
+        )
+        physical_grind_delta = numeric_grind_delta * current.grinder_direction_sign
+        normalized_movements = {
+            "grind": max(-1.0, min(1.0, physical_grind_delta / max(radius_steps, 1))),
+            "ratio": max(
+                -1.0,
+                min(
+                    1.0,
+                    ((candidate.target_ratio or candidate.target_yield_g / candidate.dose_g) - (current.target_ratio or current.target_yield_g / current.dose_g))
+                    / max(radius_yield_g / current.dose_g, 0.1),
+                ),
+            ),
+            "dose": max(
+                -1.0,
+                min(1.0, (candidate.dose_g - current.dose_g) / max(dose_radius_g, 0.5)),
+            ),
+        }
+
+        weighted_alignment = 0.0
+        total_weight = 0.0
+        for signal in signals:
+            alignments = []
+            if signal.grind_direction:
+                alignments.append(signal.grind_direction * normalized_movements["grind"])
+            if signal.ratio_direction:
+                alignments.append(signal.ratio_direction * normalized_movements["ratio"])
+            if signal.dose_direction:
+                alignments.append(signal.dose_direction * normalized_movements["dose"])
+            if not alignments:
+                continue
+            weight = min(
+                1.0,
+                signal.confidence
+                * self._prior_source_scale(signal.source)
+                / signal.observation_noise,
+            )
+            weighted_alignment += weight * (sum(alignments) / len(alignments))
+            total_weight += weight
+        if total_weight <= 0:
+            return 0.0
+        return 0.12 * prior_decay * weighted_alignment / total_weight
 
     def _prior_source_scale(self, source: str) -> float:
         if source == "local_bean_history":
             return 0.75
         if source == "local_history":
             return 0.6
+        if source == "user_rule":
+            return 0.65
+        if source == "community_rule":
+            return 0.35
         return 0.35
 
     def _distance(
@@ -525,13 +564,7 @@ class ConservativeBOOptimizer:
             return 0.03
         return 0.0
 
-    def _reason(self, shots: list[ShotRecord], grind_delta_steps_from_current: float, yield_delta_g: float) -> str:
-        last = shots[-1]
-        tags = set(last.taste_tags)
-        if {"sour", "weak", "thin", "too_fast"} & tags:
-            return "Last shot looked under-extracted; try a small finer/longer adjustment."
-        if {"bitter", "harsh", "astringent", "dry", "muddy", "too_slow"} & tags:
-            return "Last shot looked over-extracted or slow; try a small coarser/shorter adjustment."
+    def _reason(self, grind_delta_steps_from_current: float, yield_delta_g: float) -> str:
         if grind_delta_steps_from_current == 0 and abs(yield_delta_g) < 0.1:
             return "Hold near the best known recipe while more feedback is collected."
         return "Small trust-region BO step near the best known recipe."

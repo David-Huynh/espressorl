@@ -31,6 +31,7 @@ from espresso_rl.domain.models import (
     UploadQueueStatus,
 )
 from espresso_rl.domain.optimization import OptimizationContext
+from espresso_rl.domain.prior_rules import PriorRule, PriorSelectionMode
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 
 
@@ -365,6 +366,131 @@ def ingest_and_feedback(
 
 
 class ApplicationServiceTests(unittest.TestCase):
+    def test_matching_user_rule_becomes_bounded_optimizer_prior(self) -> None:
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(
+            MemoryShotRepository(),
+            MemoryRecommendationRepository(),
+            optimizer,
+            clock=lambda: 10,
+        )
+        rule = PriorRule.from_dict(
+            {
+                "rule_id": "user_bitter_ratio",
+                "name": "Shorten bitter shots",
+                "metric": "taste_tag",
+                "operator": "contains",
+                "condition_value": "bitter",
+                "ratio_direction": "decrease",
+                "confidence": 0.55,
+            }
+        )
+        service.configure_prior_policy(
+            "install_1",
+            "machine_1",
+            PriorSelectionMode.RULES_AND_COMMUNITY,
+            (rule,),
+        )
+
+        ingest_and_feedback(
+            service,
+            shot_event("shot_1", 1),
+            rating=2,
+            taste_tags=["bitter"],
+        )
+
+        signals = list(optimizer.contexts[-1].prior_signals)
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].source, "user_rule")
+        self.assertEqual(signals[0].ratio_direction, -1)
+        self.assertLessEqual(signals[0].confidence, 0.65)
+
+    def test_community_only_mode_ignores_custom_rules(self) -> None:
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(
+            MemoryShotRepository(),
+            MemoryRecommendationRepository(),
+            optimizer,
+            clock=lambda: 10,
+        )
+        rule = PriorRule.from_dict(
+            {
+                "rule_id": "user_sour_ratio",
+                "name": "Extend sour shots",
+                "metric": "taste_tag",
+                "operator": "contains",
+                "condition_value": "sour",
+                "ratio_direction": "increase",
+            }
+        )
+        service.configure_prior_policy(
+            "install_1",
+            "machine_1",
+            PriorSelectionMode.COMMUNITY_ONLY,
+            (rule,),
+        )
+
+        ingest_and_feedback(
+            service,
+            shot_event("shot_1", 1),
+            taste_tags=["sour"],
+        )
+
+        self.assertEqual(list(optimizer.contexts[-1].prior_points), [])
+        self.assertEqual(list(optimizer.contexts[-1].prior_signals), [])
+
+    def test_no_priors_mode_disables_previous_bag_and_custom_rule_priors(self) -> None:
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(
+            MemoryShotRepository(),
+            MemoryRecommendationRepository(),
+            optimizer,
+            clock=lambda: 10,
+        )
+        rule = PriorRule.from_dict(
+            {
+                "rule_id": "user_fast_grind",
+                "name": "Correct fast shots",
+                "metric": "shot_time_s",
+                "operator": "lt",
+                "condition_value": 30.0,
+                "grind_direction": "finer",
+            }
+        )
+        service.configure_prior_policy(
+            "install_1",
+            "machine_1",
+            PriorSelectionMode.NO_PRIORS,
+            (rule,),
+        )
+        ingest_and_feedback(
+            service,
+            shot_event(
+                "old_bag",
+                1,
+                bean_context_id="bean_coffee_1",
+                bean_context_name="Coffee",
+                grinder_context_id="grinder_1",
+                shot_time_s=20.0,
+            ),
+            rating=5,
+        )
+        ingest_and_feedback(
+            service,
+            shot_event(
+                "new_bag",
+                3,
+                bean_context_id="bean_coffee_2",
+                bean_context_name="Coffee",
+                grinder_context_id="grinder_1",
+                shot_time_s=20.0,
+            ),
+            rating=3,
+        )
+
+        self.assertEqual(list(optimizer.contexts[-1].prior_points), [])
+        self.assertEqual(list(optimizer.contexts[-1].prior_signals), [])
+
     def test_idle_without_rated_shot_does_not_create_baseline_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()

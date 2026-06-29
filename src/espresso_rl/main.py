@@ -353,16 +353,31 @@ def main() -> None:
         )
 
     def on_optimizer_settings(event: OptimizerSettingsEvent) -> None:
+        if event.install_id != config.install_id or not _same_machine_id(event.machine_id, config.machine_id):
+            logger.warning(
+                "Ignoring optimizer settings for unexpected owner install=%s machine=%s",
+                event.install_id,
+                event.machine_id,
+            )
+            return
+        service.configure_prior_policy(
+            event.install_id,
+            event.machine_id,
+            event.prior_mode,
+            event.prior_rules,
+        )
         status = runtime_optimizer.configure(
             optimizer_mode=event.optimizer_mode,
             model_artifact_path=event.model_artifact_path,
             model_artifact_sha256=event.model_artifact_sha256,
         )
         logger.info(
-            "Optimizer settings accepted machine=%s configured=%s effective=%s",
+            "Optimizer settings accepted machine=%s configured=%s effective=%s prior_mode=%s rules=%d",
             event.machine_id,
             status.configured_mode,
             status.effective_mode,
+            event.prior_mode.value,
+            len(event.prior_rules),
         )
         publish_status(event.machine_id, event.bean_context_id, event.grinder_context_id)
 
@@ -824,6 +839,8 @@ def build_status_payload(
         "grinder_context_id": grinder_context_id,
         "optimizer_profile_id": optimizer_profile_id,
         "optimizer_profile_label": optimizer_profile_label,
+        "prior_mode": service.prior_mode_for(config.install_id, machine_id).value,
+        "selected_prior_rule_count": len(service.prior_rules_for(config.install_id, machine_id)),
         **runtime_health,
         "auto_tuning_diagnostic_steps": diagnostic_steps,
         "timestamp": now,
@@ -898,6 +915,7 @@ def build_status_payload(
         "upload_queue_last_rejected_at": latest_rejected.updated_at if latest_rejected else None,
         "community_upload_enabled": community_upload_enabled,
         "grinder_catalog_search_url": grinder_catalog_search_url(config),
+        "prior_rule_catalog_search_url": prior_rule_catalog_search_url(config),
     }
 
 
@@ -1073,6 +1091,14 @@ def _runtime_health_payload(
 def grinder_catalog_search_url(config: Config) -> str:
     for source_url in (config.supabase_ingest_url, config.supabase_registration_url):
         derived = _derive_supabase_function_url(source_url, "espresso-rl-grinder-search")
+        if derived:
+            return derived
+    return ""
+
+
+def prior_rule_catalog_search_url(config: Config) -> str:
+    for source_url in (config.supabase_ingest_url, config.supabase_registration_url):
+        derived = _derive_supabase_function_url(source_url, "espresso-rl-prior-rule-search")
         if derived:
             return derived
     return ""
