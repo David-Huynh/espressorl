@@ -68,22 +68,20 @@ from espresso_rl.application.prior_providers import (
     CompositePriorProvider,
     LocalHistoryPriorProvider,
 )
+from espresso_rl.application.runtime_coordinator import AutoTuningRuntimeCoordinator
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityUploadCredentials
 from espresso_rl.domain.events import (
     LocalResetEvent,
-    MachineStateEvent,
     OptimizerSettingsEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotCorrectionEvent,
-    ShotFeedbackEvent,
-    ShotProfileEvent,
     UploadQueueMaintenanceEvent,
 )
-from espresso_rl.domain.models import SafetyBounds, UploadQueueStatus
+from espresso_rl.domain.models import Recommendation, SafetyBounds, UploadQueueStatus
 from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW
 from espresso_rl.dreamer.dataset import DREAMER_CONTEXT_WINDOW_SIZE
@@ -225,6 +223,8 @@ def main() -> None:
         bean_context_id: str | None,
         grinder_context_id: str | None = None,
         *,
+        profile_id: str | None = None,
+        profile_label: str | None = None,
         last_shot_id: str | None = None,
         last_shot_at: int | None = None,
         last_recommendation_id: str | None = None,
@@ -240,6 +240,8 @@ def main() -> None:
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             grinder_context_id=grinder_context_id,
+            profile_id=profile_id,
+            profile_label=profile_label,
             last_shot_id=last_shot_id,
             last_shot_at=last_shot_at,
             last_recommendation_id=last_recommendation_id,
@@ -251,88 +253,24 @@ def main() -> None:
         )
         mqtt_client.publish_status(machine_id, status)
 
-    def on_shot(event: ShotProfileEvent) -> None:
-        result = service.ingest_shot_profile(event)
-        if result.shot is None:
-            logger.info(
-                "Shot %s dropped before local storage reason=%s",
-                event.shot_id,
-                result.dropped_reason or "unknown",
-            )
-            return
-        if result.recommendation is None:
-            logger.info(
-                "Shot %s stored type=%s local_optimization=%s; waiting for feedback before BO recommendation",
-                result.shot.shot_id,
-                result.shot.shot_type.value,
-                "included" if not result.shot.exclude_from_local_optimization else "excluded",
-            )
-            publish_status(
-                event.machine_id,
-                event.bean_context_id,
-                event.grinder_context_id,
-                last_shot_id=result.shot.shot_id,
-                last_shot_at=result.shot.timestamp,
-            )
-            return
-        logger.info(
-            "Shot %s stored; next rec %s mode=%s grind=%+d dose=%.1f yield=%.1f",
-            result.shot.shot_id,
-            result.recommendation.recommendation_id,
-            result.recommendation.mode.value,
-            result.recommendation.grind_delta_steps_from_current,
-            result.recommendation.next_dose_g,
-            result.recommendation.target_yield_g,
-        )
-        record_shadow_evaluation(result.shot, result.recommendation)
-        mqtt_client.publish_recommendation(result.recommendation)
-        publish_status(
-            event.machine_id,
-            event.bean_context_id,
-            event.grinder_context_id,
-            last_shot_id=result.shot.shot_id,
-            last_shot_at=result.shot.timestamp,
-            last_recommendation_id=result.recommendation.recommendation_id,
-            last_recommendation_at=result.recommendation.created_at,
-            mode=result.recommendation.mode.value,
-        )
+    class RuntimePublisher:
+        def publish_recommendation(self, recommendation: Recommendation) -> None:
+            mqtt_client.publish_recommendation(recommendation)
 
-    def on_feedback(event: ShotFeedbackEvent) -> None:
-        result = service.record_feedback(event)
-        shot = result.shot
-        logger.info(
-            "Feedback for shot %s stored rating=%s reward=%.3f confidence=%.3f",
-            shot.shot_id,
-            shot.human_rating,
-            shot.reward or 0.0,
-            shot.reward_confidence,
-        )
-        if result.recommendation is not None:
-            logger.info(
-                "Feedback for shot %s produced next rec %s mode=%s grind=%+d dose=%.1f yield=%.1f",
-                shot.shot_id,
-                result.recommendation.recommendation_id,
-                result.recommendation.mode.value,
-                result.recommendation.grind_delta_steps_from_current,
-                result.recommendation.next_dose_g,
-                result.recommendation.target_yield_g,
-            )
-            mqtt_client.publish_recommendation(result.recommendation)
-        record_shadow_evaluation(shot, result.recommendation)
-        publish_status(
-            shot.machine_id,
-            shot.bean_context_id,
-            shot.grinder_context_id,
-            last_shot_id=shot.shot_id,
-            last_shot_at=shot.timestamp,
-            last_recommendation_id=(
-                result.recommendation.recommendation_id if result.recommendation else None
-            ),
-            last_recommendation_at=(
-                result.recommendation.created_at if result.recommendation else None
-            ),
-            mode=result.recommendation.mode.value if result.recommendation else None,
-        )
+        def publish_status(
+            self,
+            machine_id: str,
+            bean_context_id: str | None,
+            grinder_context_id: str | None,
+            **kwargs,
+        ) -> None:
+            publish_status(machine_id, bean_context_id, grinder_context_id, **kwargs)
+
+    runtime_coordinator = AutoTuningRuntimeCoordinator(
+        service=service,
+        publisher=RuntimePublisher(),
+        outcome_observer=record_shadow_evaluation,
+    )
 
     def on_correction(event: ShotCorrectionEvent) -> None:
         shot = service.record_shot_correction(event)
@@ -348,6 +286,8 @@ def main() -> None:
             shot.machine_id,
             shot.bean_context_id,
             shot.grinder_context_id,
+            profile_id=shot.profile_id,
+            profile_label=shot.profile_label,
             last_shot_id=shot.shot_id,
             last_shot_at=shot.timestamp,
         )
@@ -388,6 +328,7 @@ def main() -> None:
             recommendation.machine_id,
             recommendation.bean_context_id,
             recommendation.grinder_context_id,
+            profile_id=recommendation.profile_id,
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.updated_at,
             mode=recommendation.mode.value,
@@ -405,27 +346,7 @@ def main() -> None:
             recommendation.machine_id,
             recommendation.bean_context_id,
             recommendation.grinder_context_id,
-            last_recommendation_id=recommendation.recommendation_id,
-            last_recommendation_at=recommendation.updated_at,
-            mode=recommendation.mode.value,
-        )
-
-    def on_machine_state(event: MachineStateEvent) -> None:
-        recommendation = service.handle_machine_state(event)
-        if recommendation is None:
-            publish_status(event.machine_id, event.bean_context_id, event.grinder_context_id)
-            return
-        logger.info(
-            "Machine %s state=%s showing recommendation %s",
-            event.machine_id,
-            event.state.value,
-            recommendation.recommendation_id,
-        )
-        mqtt_client.publish_recommendation(recommendation)
-        publish_status(
-            event.machine_id,
-            event.bean_context_id,
-            event.grinder_context_id,
+            profile_id=recommendation.profile_id,
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.updated_at,
             mode=recommendation.mode.value,
@@ -466,13 +387,13 @@ def main() -> None:
 
     mqtt_client = GaggimateMQTTClient(
         config=config,
-        on_shot=on_shot,
-        on_feedback=on_feedback,
+        on_shot=runtime_coordinator.handle_shot,
+        on_feedback=runtime_coordinator.handle_feedback,
         on_correction=on_correction,
         on_upload_maintenance=on_upload_maintenance,
         on_decision=on_decision,
         on_apply=on_apply,
-        on_machine_state=on_machine_state,
+        on_machine_state=runtime_coordinator.handle_machine_state,
         on_optimizer_settings=on_optimizer_settings,
         on_local_reset=on_local_reset,
     )
@@ -629,6 +550,12 @@ def _same_machine_id(left: str, right: str) -> bool:
     return False
 
 
+def _profile_ids_match(left: str | None, right: str | None) -> bool:
+    if left is None or right is None:
+        return left is right
+    return left.strip().casefold() == right.strip().casefold()
+
+
 def build_status_payload(
     config: Config,
     service: EspressoRLService,
@@ -639,6 +566,8 @@ def build_status_payload(
     bean_context_id: str | None,
     grinder_context_id: str | None = None,
     *,
+    profile_id: str | None = None,
+    profile_label: str | None = None,
     last_shot_id: str | None = None,
     last_shot_at: int | None = None,
     last_recommendation_id: str | None = None,
@@ -649,7 +578,7 @@ def build_status_payload(
     shadow_quality_service: DreamerShadowQualityReportService | None = None,
 ) -> dict:
     now = config.now()
-    recent = (
+    all_recent = (
         shot_repo.list_recent(
             install_id=config.install_id,
             machine_id=machine_id,
@@ -660,14 +589,45 @@ def build_status_payload(
         if shot_repo is not None
         else []
     )
-    last_shot_record = None
-    if recent and last_shot_id is None:
-        last_shot = recent[-1]
-        last_shot_record = last_shot
-        last_shot_id = last_shot.shot_id
-        last_shot_at = last_shot.timestamp
-    elif recent and last_shot_id is not None:
-        last_shot_record = next((shot for shot in reversed(recent) if shot.shot_id == last_shot_id), None)
+    current = service.get_current_recommendation(
+        install_id=config.install_id,
+        machine_id=machine_id,
+        bean_context_id=bean_context_id,
+        grinder_context_id=grinder_context_id,
+    )
+    last_shot_record = (
+        next((shot for shot in reversed(all_recent) if shot.shot_id == last_shot_id), None)
+        if last_shot_id is not None
+        else None
+    )
+    optimizer_profile_id = (
+        profile_id
+        or (last_shot_record.profile_id if last_shot_record is not None else None)
+        or (current.profile_id if current is not None else None)
+        or (all_recent[-1].profile_id if all_recent else None)
+    )
+    recent = [
+        shot
+        for shot in all_recent
+        if optimizer_profile_id is None or _profile_ids_match(shot.profile_id, optimizer_profile_id)
+    ]
+    if last_shot_record is not None and not _profile_ids_match(
+        last_shot_record.profile_id,
+        optimizer_profile_id,
+    ):
+        last_shot_record = None
+    if last_shot_id is None and recent:
+        last_shot_record = recent[-1]
+        last_shot_id = last_shot_record.shot_id
+        last_shot_at = last_shot_record.timestamp
+    optimizer_profile_label = profile_label or next(
+        (
+            shot.profile_label
+            for shot in reversed(recent)
+            if shot.profile_label and _profile_ids_match(shot.profile_id, optimizer_profile_id)
+        ),
+        None,
+    )
 
     optimizer_shots = [
         shot
@@ -678,12 +638,11 @@ def build_status_payload(
     ]
     rated_shots = [shot for shot in optimizer_shots if shot.human_rating is not None]
 
-    current = service.get_current_recommendation(
-        install_id=config.install_id,
-        machine_id=machine_id,
-        bean_context_id=bean_context_id,
-        grinder_context_id=grinder_context_id,
-    )
+    if current is not None and optimizer_profile_id is not None and not _profile_ids_match(
+        current.profile_id,
+        optimizer_profile_id,
+    ):
+        current = None
     if current is not None:
         last_recommendation_id = last_recommendation_id or current.recommendation_id
         last_recommendation_at = last_recommendation_at or current.updated_at
@@ -863,6 +822,8 @@ def build_status_payload(
         "install_id": config.install_id,
         "bean_context_id": bean_context_id,
         "grinder_context_id": grinder_context_id,
+        "optimizer_profile_id": optimizer_profile_id,
+        "optimizer_profile_label": optimizer_profile_label,
         **runtime_health,
         "auto_tuning_diagnostic_steps": diagnostic_steps,
         "timestamp": now,

@@ -398,6 +398,7 @@ class GaggimateMQTTClient:
             dose_in_g=_optional_float(payload.get("dose_in_g")),
             target_yield_g=_optional_float(payload.get("target_yield_g")),
             profile_id=_optional_string(payload.get("profile_id")),
+            profile_label=_optional_string(payload.get("profile_label")),
             raw_profile_hash=_optional_string(payload.get("raw_profile_hash")),
             community_upload_enabled=_optional_bool(payload.get("community_upload_enabled")),
             source=payload.get("source", "gaggimate_mqtt"),

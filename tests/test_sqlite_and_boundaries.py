@@ -310,6 +310,66 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertEqual(recent[0]["shot_end_state"], "manual_or_interrupted")
                 self.assertNotIn("profile_resampled", recent[0])
 
+    def test_status_payload_scopes_progress_and_best_recipe_to_active_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(mqtt_host="localhost", data_dir=Path(tmp), install_id="install_1")
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                service = EspressoRLService(
+                    shots,
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                    clock=lambda: 10,
+                )
+                service.ingest_shot_profile(shot_event())
+                service.record_feedback(
+                    ShotFeedbackEvent(
+                        shot_id="shot_1",
+                        install_id="install_1",
+                        machine_id="machine_1",
+                        timestamp=2,
+                        rating=5,
+                    )
+                )
+                service.ingest_shot_profile(
+                    shot_event(
+                        shot_id="shot_2",
+                        timestamp=3,
+                        profile_id="profile_2",
+                        profile_label="Turbo Profile",
+                        target_yield_g=42.0,
+                        beverage_out_g=42.0,
+                    )
+                )
+                service.record_feedback(
+                    ShotFeedbackEvent(
+                        shot_id="shot_2",
+                        install_id="install_1",
+                        machine_id="machine_1",
+                        timestamp=4,
+                        rating=2,
+                    )
+                )
+
+                status = build_status_payload(
+                    config=config,
+                    service=service,
+                    shot_repo=shots,
+                    upload_maintenance=None,
+                    upload_queue_repo=None,
+                    machine_id="machine_1",
+                    bean_context_id=None,
+                    profile_id="profile_1",
+                    profile_label="Cremina lever machine",
+                )
+
+        self.assertEqual(status["optimizer_profile_id"], "profile_1")
+        self.assertEqual(status["optimizer_profile_label"], "Cremina lever machine")
+        self.assertEqual(status["local_shot_count"], 1)
+        self.assertEqual(status["rated_shot_count"], 1)
+        self.assertEqual([shot["shot_id"] for shot in status["recent_shots"]], ["shot_1"])
+        self.assertEqual(status["best_known_recipe"]["shot_id"], "shot_1")
+
     def test_status_payload_includes_redacted_runtime_health(self) -> None:
         secret = "s" * 32
         with tempfile.TemporaryDirectory() as tmp:

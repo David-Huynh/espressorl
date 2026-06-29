@@ -14,6 +14,7 @@ from espresso_rl.adapters.sqlite_repositories import (
     SQLiteUploadQueueRepository,
 )
 from espresso_rl.application.services import EspressoRLService
+from espresso_rl.application.runtime_coordinator import AutoTuningRuntimeCoordinator
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
 from espresso_rl.domain.models import UploadQueueStatus
@@ -88,6 +89,11 @@ class GaggimateEndToEndHarness:
         self.transport = FakeMQTTTransport()
         self.last_ingest_result = None
         self.last_feedback_result = None
+        self.last_machine_state_recommendation = None
+        self.runtime_coordinator = AutoTuningRuntimeCoordinator(
+            service=self.service,
+            publisher=self,
+        )
         self.client = GaggimateMQTTClient(
             config=self.config,
             on_shot=self._on_shot,
@@ -96,7 +102,7 @@ class GaggimateEndToEndHarness:
             on_upload_maintenance=lambda event: None,
             on_decision=lambda event: None,
             on_apply=lambda event: None,
-            on_machine_state=lambda event: None,
+            on_machine_state=self._on_machine_state,
         )
         self.client._client = self.transport  # type: ignore[assignment]
 
@@ -114,12 +120,17 @@ class GaggimateEndToEndHarness:
             if published_topic == topic
         ]
 
-    def _publish_status(
+    def publish_recommendation(self, recommendation) -> None:
+        self.client.publish_recommendation(recommendation)
+
+    def publish_status(
         self,
         machine_id: str,
         bean_context_id: str | None,
         grinder_context_id: str | None,
         *,
+        profile_id: str | None = None,
+        profile_label: str | None = None,
         last_shot_id: str | None = None,
         last_shot_at: int | None = None,
         last_recommendation_id: str | None = None,
@@ -135,6 +146,8 @@ class GaggimateEndToEndHarness:
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             grinder_context_id=grinder_context_id,
+            profile_id=profile_id,
+            profile_label=profile_label,
             last_shot_id=last_shot_id,
             last_shot_at=last_shot_at,
             last_recommendation_id=last_recommendation_id,
@@ -144,46 +157,13 @@ class GaggimateEndToEndHarness:
         self.client.publish_status(machine_id, status)
 
     def _on_shot(self, event) -> None:
-        result = self.service.ingest_shot_profile(event)
-        self.last_ingest_result = result
-        if result.shot is None:
-            return
-        if result.recommendation is not None:
-            self.client.publish_recommendation(result.recommendation)
-        self._publish_status(
-            event.machine_id,
-            event.bean_context_id,
-            event.grinder_context_id,
-            last_shot_id=result.shot.shot_id,
-            last_shot_at=result.shot.timestamp,
-            last_recommendation_id=(
-                result.recommendation.recommendation_id if result.recommendation else None
-            ),
-            last_recommendation_at=(
-                result.recommendation.created_at if result.recommendation else None
-            ),
-            mode=result.recommendation.mode.value if result.recommendation else None,
-        )
+        self.last_ingest_result = self.runtime_coordinator.handle_shot(event)
 
     def _on_feedback(self, event) -> None:
-        result = self.service.record_feedback(event)
-        self.last_feedback_result = result
-        if result.recommendation is not None:
-            self.client.publish_recommendation(result.recommendation)
-        self._publish_status(
-            result.shot.machine_id,
-            result.shot.bean_context_id,
-            result.shot.grinder_context_id,
-            last_shot_id=result.shot.shot_id,
-            last_shot_at=result.shot.timestamp,
-            last_recommendation_id=(
-                result.recommendation.recommendation_id if result.recommendation else None
-            ),
-            last_recommendation_at=(
-                result.recommendation.created_at if result.recommendation else None
-            ),
-            mode=result.recommendation.mode.value if result.recommendation else None,
-        )
+        self.last_feedback_result = self.runtime_coordinator.handle_feedback(event)
+
+    def _on_machine_state(self, event) -> None:
+        self.last_machine_state_recommendation = self.runtime_coordinator.handle_machine_state(event)
 
 
 class GaggimateEndToEndTests(unittest.TestCase):
@@ -277,6 +257,8 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 self.assertEqual(qos, 1)
                 self.assertTrue(retain)
                 self.assertEqual(final_status["event_type"], "espresso_rl_status")
+                self.assertEqual(final_status["optimizer_profile_id"], "integration_lever")
+                self.assertEqual(final_status["optimizer_profile_label"], "Integration Lever Profile")
                 self.assertEqual(final_status["last_shot_id"], "shot_integration_1")
                 self.assertEqual(final_status["last_shot_human_rating"], 4)
                 self.assertEqual(
@@ -431,6 +413,46 @@ class GaggimateEndToEndTests(unittest.TestCase):
                     turbo_recommendation.recommendation_id,
                 )
 
+                harness.send(
+                    "gaggimate/AA_BB/machine/state",
+                    {
+                        "event_type": "machine_state",
+                        "schema_version": 1,
+                        "machine_id": "gaggimate:AA_BB",
+                        "timestamp": 1_700_000_400,
+                        "state": "idle",
+                        "bean_context_id": "bean_integration_1",
+                        "bean_context_name": "Integration Coffee",
+                        "grinder_context_id": "grinder_integration_1",
+                        "grinder_calibration_mode": "absolute_display_calibrated",
+                        "microns_per_step": 12.5,
+                        "step_direction": "higher_is_coarser",
+                        "relative_grind_steps_from_reference": 2,
+                        "current_absolute_step": 42,
+                        "absolute_reference_step": 40,
+                        "dose_in_g": 18.0,
+                        "target_yield_g": 38.0,
+                        "profile_id": "integration_lever",
+                        "profile_label": "Integration Lever Profile",
+                    },
+                )
+
+                restored = harness.last_machine_state_recommendation
+                self.assertIsNotNone(restored)
+                self.assertEqual(restored.profile_id, "integration_lever")
+                self.assertEqual(
+                    [shot.shot_id for shot in harness.optimizer.contexts[-1].shots],
+                    ["shot_integration_1"],
+                )
+                restored_status = harness.publications("gaggimate/AA_BB/rl/status")[-1][0]
+                self.assertEqual(restored_status["optimizer_profile_id"], "integration_lever")
+                self.assertEqual(
+                    restored_status["optimizer_profile_label"],
+                    "Integration Lever Profile",
+                )
+                self.assertEqual(restored_status["local_shot_count"], 1)
+                self.assertEqual(restored_status["rated_shot_count"], 1)
+
     def test_community_upload_opt_out_keeps_local_optimization(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
@@ -479,10 +501,12 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 self.assertGreater(failed[0].next_retry_at, harness.now)
                 self.assertIsNotNone(harness.shots.get("shot_integration_1"))
 
-                harness._publish_status(
+                harness.publish_status(
                     "gaggimate:AA_BB",
                     "bean_integration_1",
                     "grinder_integration_1",
+                    profile_id="integration_lever",
+                    profile_label="Integration Lever Profile",
                     last_shot_id="shot_integration_1",
                 )
                 retry_status = harness.publications("gaggimate/AA_BB/rl/status")[-1][0]

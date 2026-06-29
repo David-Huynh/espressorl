@@ -334,12 +334,16 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "relative_grind_steps_from_reference": 42,
                 "dose_in_g": 18.0,
                 "target_yield_g": 36.0,
+                "profile_id": "lever",
+                "profile_label": "Lever Profile",
                 "community_upload_enabled": True,
             },
             mac="AA_BB",
         )
 
         self.assertTrue(event.community_upload_enabled)
+        self.assertEqual(event.profile_id, "lever")
+        self.assertEqual(event.profile_label, "Lever Profile")
 
     def test_shot_profile_payload_treats_zero_final_weight_as_missing(self) -> None:
         client = GaggimateMQTTClient(

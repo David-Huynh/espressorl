@@ -531,6 +531,7 @@ class MachineStateEvent:
     dose_in_g: float | None = None
     target_yield_g: float | None = None
     profile_id: str | None = None
+    profile_label: str | None = None
     raw_profile_hash: str | None = None
     community_upload_enabled: bool | None = None
     source: str = "unknown"
@@ -580,6 +581,7 @@ class MachineStateEvent:
         if self.community_upload_enabled is not None and not isinstance(self.community_upload_enabled, bool):
             raise ValueError("community_upload_enabled must be boolean")
         object.__setattr__(self, "profile_id", _optional_string(self.profile_id, "profile_id", 120))
+        object.__setattr__(self, "profile_label", _optional_string(self.profile_label, "profile_label", 160))
         object.__setattr__(self, "raw_profile_hash", _optional_sha256(self.raw_profile_hash))
 
     def current_recipe(self) -> Recipe | None:
