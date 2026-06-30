@@ -399,7 +399,7 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
         errors.append("shot_type must be espresso")
     profile = payload.get("profile_resampled")
     if profile is not None:
-        _validate_profile_resampled(profile, payload.get("beverage_out_g"), errors)
+        _validate_profile_resampled(profile, errors)
 
 
 def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) -> None:
@@ -457,7 +457,7 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
     _optional_string(payload, "apply_error", 500, errors)
 
 
-def _validate_profile_resampled(profile: Any, beverage_out_g: Any, errors: list[str]) -> None:
+def _validate_profile_resampled(profile: Any, errors: list[str]) -> None:
     ranges = [
         (0, 15, "pressure"),
         (0, 15, "target_pressure"),
@@ -480,11 +480,6 @@ def _validate_profile_resampled(profile: Any, beverage_out_g: Any, errors: list[
             if label in {"pump_flow", "target_flow"}:
                 continue
             errors.append(f"profile_resampled {label} out of range")
-    weight = profile[4]
-    if isinstance(beverage_out_g, (int, float)) and isinstance(weight, list) and len(weight) == 100:
-        final_weight = weight[-1]
-        if isinstance(final_weight, (int, float)) and abs(float(final_weight) - float(beverage_out_g)) > 5:
-            errors.append("final profile weight does not match beverage_out_g")
 
 
 def _optional_numeric_profile_vector(

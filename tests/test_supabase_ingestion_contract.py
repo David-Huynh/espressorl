@@ -157,7 +157,7 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("[-1, 120, 'weight']", source)
         self.assertIn("profile_resampled must have 5 channels", source)
         self.assertIn("profile_resampled ${label} channel must have exactly 100 samples", source)
-        self.assertIn("final profile weight does not match beverage_out_g", source)
+        self.assertNotIn("final profile weight does not match beverage_out_g", source)
 
     def test_edge_function_dedups_before_consuming_rate_limit(self) -> None:
         source = FUNCTION.read_text()

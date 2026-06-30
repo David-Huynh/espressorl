@@ -333,7 +333,7 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
     if (!Array.isArray(profile) || profile.length !== 5) {
       errors.push('profile_resampled must have 5 channels');
     } else {
-      validateProfileResampled(profile, payload.beverage_out_g, errors);
+      validateProfileResampled(profile, errors);
     }
   }
 }
@@ -571,7 +571,7 @@ function optionalActionObserved(payload: JsonRecord, errors: string[]) {
   }
 }
 
-function validateProfileResampled(profile: unknown[], beverageOutG: unknown, errors: string[]) {
+function validateProfileResampled(profile: unknown[], errors: string[]) {
   const ranges: Array<[number, number, string]> = [
     [0, 15, 'pressure'],
     [0, 15, 'target_pressure'],
@@ -595,15 +595,6 @@ function validateProfileResampled(profile: unknown[], beverageOutG: unknown, err
         continue;
       }
       errors.push(`profile_resampled ${label} out of range`);
-    }
-  }
-  if (typeof beverageOutG === 'number' && Number.isFinite(beverageOutG)) {
-    const weight = profile[4];
-    if (Array.isArray(weight) && weight.length === 100) {
-      const finalWeight = weight[99];
-      if (typeof finalWeight === 'number' && Number.isFinite(finalWeight) && Math.abs(finalWeight - beverageOutG) > 5) {
-        errors.push('final profile weight does not match beverage_out_g');
-      }
     }
   }
 }

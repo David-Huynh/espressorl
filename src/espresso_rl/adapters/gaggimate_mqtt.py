@@ -196,7 +196,13 @@ class GaggimateMQTTClient:
     def translate_shot_payload(self, payload: dict[str, Any], mac: str) -> ShotProfileEvent:
         install_id = str(payload.get("install_id") or self._config.install_id)
         machine_id = str(payload.get("machine_id") or f"gaggimate:{mac}")
-        time_ms = payload.get("time_ms") or payload.get("time") or []
+        payload = dict(payload)
+        shot_time_s = payload.get("shot_time_s")
+        time_ms, trimmed_to_shot_time = _trim_profile_payload_to_shot_time(
+            payload,
+            payload.get("time_ms") or payload.get("time") or [],
+            shot_time_s,
+        )
         weight = payload.get("weight") or payload.get("weight_g") or []
         n = len(time_ms)
         pressure = _channel(payload, "pressure", n)
@@ -231,10 +237,9 @@ class GaggimateMQTTClient:
         declared_grind_observed = _optional_bool(payload.get("grind_observed"))
         grind_observed = inferred_grind_observed and declared_grind_observed is not False
         beverage_out_g = payload.get("beverage_out_g")
-        if beverage_out_g is None and weight:
+        if (beverage_out_g is None or trimmed_to_shot_time) and weight:
             beverage_out_g = float(weight[-1])
         beverage_out_g = _positive_optional_float(beverage_out_g)
-        shot_time_s = payload.get("shot_time_s")
         if shot_time_s is None and time_ms:
             shot_time_s = float(time_ms[-1]) / 1000.0
         return ShotProfileEvent(
@@ -437,6 +442,45 @@ def _optional_float(value: Any) -> float | None:
     if isinstance(value, bool):
         raise ValueError("optional numeric fields cannot be boolean")
     return float(value)
+
+
+def _trim_profile_payload_to_shot_time(
+    payload: dict[str, Any],
+    time_values: Any,
+    shot_time_s: Any,
+) -> tuple[list[Any], bool]:
+    time_ms = list(time_values or [])
+    shot_time = _optional_float(shot_time_s)
+    if shot_time is None or shot_time <= 0 or len(time_ms) < 2:
+        return time_ms, False
+    cutoff_ms = shot_time * 1000.0
+    if float(time_ms[-1]) <= cutoff_ms:
+        return time_ms, False
+
+    keep_count = sum(1 for value in time_ms if float(value) <= cutoff_ms)
+    keep_count = max(2, min(keep_count, len(time_ms)))
+    if keep_count >= len(time_ms):
+        return time_ms, False
+
+    for key in (
+        "time_ms",
+        "time",
+        "pressure",
+        "target_pressure",
+        "flow",
+        "pump_flow",
+        "target_flow",
+        "temperature",
+        "target_temperature",
+        "pump_target_mode",
+        "valve_open",
+        "weight",
+        "weight_g",
+    ):
+        values = payload.get(key)
+        if isinstance(values, (list, tuple)) and len(values) == len(time_ms):
+            payload[key] = list(values)[:keep_count]
+    return time_ms[:keep_count], True
 
 
 def _relative_grind_steps_from_payload(payload: dict[str, Any], fallback: float | None) -> float | None:

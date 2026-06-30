@@ -328,6 +328,52 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.final_phase_temperature_c, 86.5)
         self.assertEqual(event.shot_end_state, "manual_or_interrupted")
 
+    def test_shot_profile_payload_trims_samples_after_declared_finish_time(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_shot_payload(
+            {
+                "shot_id": "shot_1",
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 100,
+                "time_ms": [0, 250, 500, 750, 1000],
+                "pressure": [0, 4, 9, 0, 0],
+                "target_pressure": [0, 4, 9, 0, 0],
+                "flow": [0, 1, 2, 99, 99],
+                "pump_flow": [0, 1.2, 2.4, 99, 99],
+                "target_flow": [0, 1, 2, 0, 0],
+                "temperature": [86.0, 86.2, 86.5, 86.5, 86.5],
+                "target_temperature": [86.5, 86.5, 86.5, 86.5, 86.5],
+                "pump_target_mode": [1, 1, 1, 0, 0],
+                "valve_open": [False, True, True, False, False],
+                "weight": [0, 8, 36, 70, 120],
+                "target_yield_g": 36.0,
+                "beverage_out_g": 120.0,
+                "shot_time_s": 0.5,
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.time_ms, [0, 250, 500])
+        self.assertEqual(event.pressure, [0, 4, 9])
+        self.assertEqual(event.beverage_flow, [0, 1, 2])
+        self.assertEqual(event.pump_flow, [0, 1.2, 2.4])
+        self.assertEqual(event.temperature, [86.0, 86.2, 86.5])
+        self.assertEqual(event.pump_target_mode, [1, 1, 1])
+        self.assertEqual(event.valve_open, [False, True, True])
+        self.assertEqual(event.weight, [0, 8, 36])
+        self.assertEqual(event.beverage_out_g, 36.0)
+        self.assertEqual(event.shot_time_s, 0.5)
+
     def test_machine_state_payload_accepts_community_upload_consent(self) -> None:
         client = GaggimateMQTTClient(
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),

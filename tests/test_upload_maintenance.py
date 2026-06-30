@@ -199,6 +199,15 @@ class UploadMaintenanceTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("profile_resampled weight out of range", result.errors)
 
+    def test_preflight_allows_profile_weight_to_differ_from_beverage_output(self) -> None:
+        profile = valid_profile()
+        profile[4][-1] = 95.0
+
+        result = validate_upload_payload_json(payload(profile_resampled=profile, beverage_out_g=36.0))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, [])
+
     def test_preflight_rejects_invalid_execution_metadata(self) -> None:
         result = validate_upload_payload_json(
             payload(
