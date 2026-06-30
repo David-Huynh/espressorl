@@ -451,17 +451,33 @@ def _trim_profile_payload_to_shot_time(
 ) -> tuple[list[Any], bool]:
     time_ms = list(time_values or [])
     shot_time = _optional_float(shot_time_s)
+    trimmed = False
     if shot_time is None or shot_time <= 0 or len(time_ms) < 2:
-        return time_ms, False
+        return _trim_profile_payload_to_inactive_control_tail(payload, time_ms, trimmed)
+
     cutoff_ms = shot_time * 1000.0
-    if float(time_ms[-1]) <= cutoff_ms:
-        return time_ms, False
+    if float(time_ms[-1]) > cutoff_ms:
+        keep_count = sum(1 for value in time_ms if float(value) <= cutoff_ms)
+        keep_count = max(2, min(keep_count, len(time_ms)))
+        if keep_count < len(time_ms):
+            time_ms = _trim_profile_payload_samples(payload, time_ms, keep_count)
+            trimmed = True
 
-    keep_count = sum(1 for value in time_ms if float(value) <= cutoff_ms)
-    keep_count = max(2, min(keep_count, len(time_ms)))
-    if keep_count >= len(time_ms):
-        return time_ms, False
+    return _trim_profile_payload_to_inactive_control_tail(payload, time_ms, trimmed)
 
+
+def _trim_profile_payload_to_inactive_control_tail(
+    payload: dict[str, Any],
+    time_ms: list[Any],
+    already_trimmed: bool,
+) -> tuple[list[Any], bool]:
+    keep_count = _inactive_control_tail_keep_count(payload, len(time_ms))
+    if keep_count is None or keep_count >= len(time_ms):
+        return time_ms, already_trimmed
+    return _trim_profile_payload_samples(payload, time_ms, keep_count), True
+
+
+def _trim_profile_payload_samples(payload: dict[str, Any], time_ms: list[Any], keep_count: int) -> list[Any]:
     for key in (
         "time_ms",
         "time",
@@ -480,7 +496,48 @@ def _trim_profile_payload_to_shot_time(
         values = payload.get(key)
         if isinstance(values, (list, tuple)) and len(values) == len(time_ms):
             payload[key] = list(values)[:keep_count]
-    return time_ms[:keep_count], True
+    return time_ms[:keep_count]
+
+
+def _inactive_control_tail_keep_count(payload: dict[str, Any], n: int) -> int | None:
+    if n < 3:
+        return None
+    target_pressure = payload.get("target_pressure")
+    target_flow = payload.get("target_flow")
+    if not isinstance(target_pressure, (list, tuple)) or not isinstance(target_flow, (list, tuple)):
+        return None
+    if len(target_pressure) != n or len(target_flow) != n:
+        return None
+
+    pump_target_mode = payload.get("pump_target_mode")
+    valve_open = payload.get("valve_open")
+    mode_available = isinstance(pump_target_mode, (list, tuple)) and len(pump_target_mode) == n
+    valve_available = isinstance(valve_open, (list, tuple)) and len(valve_open) == n
+    if not mode_available and not valve_available:
+        return None
+
+    saw_active_target = False
+    for index in range(n):
+        target_active = _profile_target_active(target_pressure[index]) or _profile_target_active(target_flow[index])
+        if target_active:
+            saw_active_target = True
+            continue
+        if not saw_active_target:
+            continue
+        mode_inactive = True
+        if mode_available:
+            mode_inactive = _optional_int(pump_target_mode[index]) == 0
+        valve_inactive = True
+        if valve_available:
+            valve_inactive = _optional_bool(valve_open[index]) is False
+        if mode_inactive and valve_inactive:
+            return max(2, index)
+    return None
+
+
+def _profile_target_active(value: Any) -> bool:
+    parsed = _optional_float(value)
+    return parsed is not None and abs(parsed) > 1e-6
 
 
 def _relative_grind_steps_from_payload(payload: dict[str, Any], fallback: float | None) -> float | None:
