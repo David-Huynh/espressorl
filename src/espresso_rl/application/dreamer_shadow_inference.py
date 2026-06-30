@@ -56,6 +56,8 @@ def build_dreamer_shadow_inference_session(
             inference_contract_id=SHADOW_INFERENCE_CONTRACT_LEARNED_CONTEXT_ENCODER_V1,
             tensor_count=len(checkpoint.tensors),
             component_names=checkpoint.component_names,
+            inference_ready=checkpoint.inference_ready,
+            recommendation_enabled=checkpoint.inference_ready,
         ),
         checkpoint=checkpoint,
     )

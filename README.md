@@ -630,8 +630,9 @@ pickle loader.
 
 A successfully loaded preview is reported as `checkpoint_verified=true` and
 `checkpoint_inference_ready=false`. That distinction is intentional: verified
-bytes are not an executable policy, DreamerV3 is not added to the available
-optimizer modes, and Bayesian Optimization remains active.
+bytes may be safe for shadow evaluation without being a release-approved active
+policy. `dreamer_v3_shadow` remains the default Dreamer-compatible mode while
+Bayesian Optimization serves recommendations.
 
 Checkpoint contract v2 also authenticates the exact world-model, actor, and
 critic reconstruction configuration. The trainer records a deterministic
@@ -660,6 +661,21 @@ Shadow proposals are never inserted into the recommendation repository and are
 never published or applied. BO remains the sole active recommendation path.
 Status output contains aggregate shadow counts and safety/outcome metrics, not
 actionable shadow proposals.
+
+The Dreamer candidate builder is shared by shadow evaluation and the active
+runtime path. It consumes only canonical `OptimizationContext` shots, rejects
+mixed or future context replay, supports unknown observed grind fields when the
+current recipe is known, emits relative-grind `dreamer_candidate`
+recommendations, and reuses the normal Dreamer action and recommendation safety
+validators.
+
+Active Dreamer is a code/config switchover, not a per-user shadow promotion.
+The runtime only serves `optimizer_mode=dreamer_v3` when a release-approved
+manifest declares `runtime_compatibility.inference_ready=true`, the model
+artifact SHA-256 matches, checkpoint tensor parity succeeds, and a Dreamer
+optimizer implementation is wired in. If any requirement is missing or the
+candidate fails safety validation, BO remains the fallback. Shadow evaluation is
+for admin/beta evidence and defaults, not a normal-user prerequisite.
 
 ## Warm-Started BO Priors
 

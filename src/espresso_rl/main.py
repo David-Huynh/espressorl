@@ -48,6 +48,7 @@ from espresso_rl.application.dreamer_shadow_inference import (
     DreamerShadowInferenceError,
     build_dreamer_shadow_inference_session,
 )
+from espresso_rl.application.dreamer_recommendations import DreamerRecommendationService
 from espresso_rl.application.dreamer_shadow_evaluation import (
     DreamerShadowEvaluationError,
     DreamerShadowEvaluationService,
@@ -83,7 +84,11 @@ from espresso_rl.domain.events import (
 )
 from espresso_rl.domain.models import Recommendation, SafetyBounds, UploadQueueStatus
 from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
-from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW
+from espresso_rl.domain.optimization import (
+    DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+    OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+)
 from espresso_rl.dreamer.dataset import DREAMER_CONTEXT_WINDOW_SIZE
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
@@ -135,6 +140,14 @@ def main() -> None:
         except DreamerShadowInferenceError as exc:
             checkpoint_inference_parity_reason = str(exc)
             logger.warning("DreamerV3 checkpoint inference parity failed: %s", exc)
+    dreamer_recommendation_service = (
+        DreamerRecommendationService(
+            session=dreamer_shadow_session,
+            safety_bounds=SafetyBounds(),
+        )
+        if dreamer_shadow_session is not None
+        else None
+    )
     runtime_optimizer = RuntimeOptimizer(
         optimizer_mode=config.optimizer_mode,
         model_artifact_path=config.optimizer_model_artifact_path,
@@ -145,6 +158,7 @@ def main() -> None:
         checkpoint_unavailable_reason=checkpoint_unavailable_reason,
         checkpoint_inference_parity_verified=checkpoint_inference_parity_verified,
         checkpoint_inference_parity_reason=checkpoint_inference_parity_reason,
+        dreamer_optimizer=dreamer_recommendation_service,
     )
     shadow_evaluation_service = (
         DreamerShadowEvaluationService(
@@ -153,7 +167,7 @@ def main() -> None:
             safety_bounds=SafetyBounds(),
             clock=config.now,
         )
-        if dreamer_shadow_session is not None
+        if dreamer_shadow_session is not None and config.optimizer_mode != OPTIMIZER_MODE_DREAMER_V3_ACTIVE
         else None
     )
     shadow_quality_service = (
@@ -165,7 +179,7 @@ def main() -> None:
             inference_contract_id=dreamer_shadow_session.status.inference_contract_id,
             clock=config.now,
         )
-        if dreamer_shadow_session is not None
+        if dreamer_shadow_session is not None and config.optimizer_mode != OPTIMIZER_MODE_DREAMER_V3_ACTIVE
         else None
     )
     service = EspressoRLService(
@@ -699,9 +713,11 @@ def build_status_payload(
     # outer hash/manifest checks. Runtime availability requires the typed loader
     # result supplied through optimizer_status.
     config_dreamer_v3_available = False
+    config_dreamer_v3_shadow_available = False
     config_optimizer_mode = (
         config.optimizer_mode
-        if config.optimizer_mode == DEFAULT_OPTIMIZER_MODE or config_dreamer_v3_available
+        if config.optimizer_mode
+        in {DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_ACTIVE, OPTIMIZER_MODE_DREAMER_V3_SHADOW}
         else DEFAULT_OPTIMIZER_MODE
     )
     optimizer_status = optimizer_status or {
@@ -738,14 +754,20 @@ def build_status_payload(
         "checkpoint_inference_parity_verified": False,
         "checkpoint_inference_parity_reason": "DreamerV3 checkpoint has not been materialized.",
         "dreamer_v3_available": config_dreamer_v3_available,
+        "dreamer_v3_shadow_available": config_dreamer_v3_shadow_available,
+        "dreamer_v3_active_available": config_dreamer_v3_available,
         "available_modes": [DEFAULT_OPTIMIZER_MODE]
-        + ([OPTIMIZER_MODE_DREAMER_V3_SHADOW] if config_dreamer_v3_available else []),
+        + ([OPTIMIZER_MODE_DREAMER_V3_SHADOW] if config_dreamer_v3_shadow_available else [])
+        + ([OPTIMIZER_MODE_DREAMER_V3_ACTIVE] if config_dreamer_v3_available else []),
         "unavailable_modes": {}
         if config_dreamer_v3_available
         else {
             OPTIMIZER_MODE_DREAMER_V3_SHADOW: model_manifest_status.unavailable_reason
             or model_artifact_status.unavailable_reason
-            or "DreamerV3 model artifact is not verified."
+            or "DreamerV3 model artifact is not verified.",
+            OPTIMIZER_MODE_DREAMER_V3_ACTIVE: model_manifest_status.unavailable_reason
+            or model_artifact_status.unavailable_reason
+            or "DreamerV3 active model artifact is not verified.",
         },
         "fallback_reason": None
         if config_optimizer_mode == DEFAULT_OPTIMIZER_MODE
@@ -895,6 +917,12 @@ def build_status_payload(
             "checkpoint_inference_parity_reason"
         ),
         "optimizer_dreamer_v3_available": bool(optimizer_status.get("dreamer_v3_available")),
+        "optimizer_dreamer_v3_shadow_available": bool(
+            optimizer_status.get("dreamer_v3_shadow_available")
+        ),
+        "optimizer_dreamer_v3_active_available": bool(
+            optimizer_status.get("dreamer_v3_active_available")
+        ),
         "optimizer_available_modes": optimizer_status.get("available_modes") or [DEFAULT_OPTIMIZER_MODE],
         "optimizer_unavailable_modes": optimizer_status.get("unavailable_modes") or {},
         "optimizer_fallback_reason": optimizer_status.get("fallback_reason"),

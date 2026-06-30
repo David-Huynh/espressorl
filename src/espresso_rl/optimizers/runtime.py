@@ -10,6 +10,7 @@ from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
 from espresso_rl.domain.model_manifest import ModelManifestValidation, validate_model_manifest
 from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
     OptimizationContext,
     normalize_optimizer_mode,
@@ -20,6 +21,9 @@ from espresso_rl.ports.optimizers import Optimizer
 
 _DREAMER_SHADOW_FALLBACK_REASON = (
     "DreamerV3 shadow mode is not active inference; Bayesian Optimization is serving recommendations."
+)
+_DREAMER_ACTIVE_FALLBACK_REASON = (
+    "DreamerV3 active mode is unavailable; Bayesian Optimization is serving recommendations."
 )
 _HASH_CHUNK_BYTES = 1024 * 1024
 _MANIFEST_MAX_BYTES = 256 * 1024
@@ -90,6 +94,8 @@ class RuntimeOptimizerStatus:
     checkpoint_inference_parity_verified: bool = False
     checkpoint_inference_parity_reason: str | None = None
     dreamer_v3_available: bool = False
+    dreamer_v3_shadow_available: bool = False
+    dreamer_v3_active_available: bool = False
     available_modes: tuple[str, ...] = (DEFAULT_OPTIMIZER_MODE,)
     unavailable_modes: dict[str, str] | None = None
     fallback_reason: str | None = None
@@ -129,6 +135,8 @@ class RuntimeOptimizerStatus:
             "checkpoint_inference_parity_verified": self.checkpoint_inference_parity_verified,
             "checkpoint_inference_parity_reason": self.checkpoint_inference_parity_reason,
             "dreamer_v3_available": self.dreamer_v3_available,
+            "dreamer_v3_shadow_available": self.dreamer_v3_shadow_available,
+            "dreamer_v3_active_available": self.dreamer_v3_active_available,
             "available_modes": list(self.available_modes),
             "unavailable_modes": dict(self.unavailable_modes or {}),
             "fallback_reason": self.fallback_reason,
@@ -151,11 +159,13 @@ class RuntimeOptimizer:
         checkpoint_inference_parity_verified: bool = False,
         checkpoint_inference_parity_reason: str | None = None,
         bo_optimizer: Optimizer | None = None,
+        dreamer_optimizer: Optimizer | None = None,
     ) -> None:
         if model_artifact_max_bytes <= 0:
             raise ValueError("model_artifact_max_bytes must be positive")
         self._lock = RLock()
         self._bo_optimizer = bo_optimizer or ConservativeBOOptimizer()
+        self._dreamer_optimizer = dreamer_optimizer
         self._model_artifact_max_bytes = model_artifact_max_bytes
         self._verified_checkpoint = verified_checkpoint
         self._checkpoint_unavailable_reason = _clean_optional_text(checkpoint_unavailable_reason)
@@ -217,27 +227,54 @@ class RuntimeOptimizer:
             checkpoint_reason = "DreamerV3 checkpoint is verified but runtime inference is not enabled."
         elif not checkpoint_verified and checkpoint_reason is None:
             checkpoint_reason = "DreamerV3 checkpoint has not passed strict tensor verification."
-        dreamer_v3_available = checkpoint_verified and checkpoint_inference_ready
-        available_modes = (
-            (DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
-            if dreamer_v3_available
-            else (DEFAULT_OPTIMIZER_MODE,)
+
+        dreamer_v3_shadow_available = bool(
+            checkpoint_verified and self._checkpoint_inference_parity_verified
         )
-        unavailable_modes = (
-            {}
-            if dreamer_v3_available
-            else {
-                OPTIMIZER_MODE_DREAMER_V3_SHADOW: manifest_status.unavailable_reason
-                or artifact_status.unavailable_reason
-                or checkpoint_reason
-                or "DreamerV3 model artifact is not verified."
-            }
+        dreamer_v3_active_available = bool(
+            dreamer_v3_shadow_available
+            and checkpoint_inference_ready
+            and self._dreamer_optimizer is not None
         )
+        dreamer_v3_available = dreamer_v3_active_available
+        shadow_unavailable_reason = (
+            manifest_status.unavailable_reason
+            or artifact_status.unavailable_reason
+            or self._checkpoint_inference_parity_reason
+            or checkpoint_reason
+            or "DreamerV3 shadow model artifact is not verified."
+        )
+        active_unavailable_reason = (
+            "DreamerV3 active optimizer is not wired in."
+            if checkpoint_inference_ready and dreamer_v3_shadow_available and self._dreamer_optimizer is None
+            else manifest_status.unavailable_reason
+            or artifact_status.unavailable_reason
+            or self._checkpoint_inference_parity_reason
+            or checkpoint_reason
+            or "DreamerV3 active model artifact is not verified."
+        )
+
+        modes = [DEFAULT_OPTIMIZER_MODE]
+        unavailable_modes: dict[str, str] = {}
+        if dreamer_v3_shadow_available:
+            modes.append(OPTIMIZER_MODE_DREAMER_V3_SHADOW)
+        else:
+            unavailable_modes[OPTIMIZER_MODE_DREAMER_V3_SHADOW] = shadow_unavailable_reason
+        if dreamer_v3_active_available:
+            modes.append(OPTIMIZER_MODE_DREAMER_V3_ACTIVE)
+        else:
+            unavailable_modes[OPTIMIZER_MODE_DREAMER_V3_ACTIVE] = active_unavailable_reason
+        available_modes = tuple(modes)
+
         configured_mode = requested_mode
         effective_mode = DEFAULT_OPTIMIZER_MODE
         fallback_reason = None
-        if requested_mode == OPTIMIZER_MODE_DREAMER_V3_SHADOW and not dreamer_v3_available:
-            configured_mode = DEFAULT_OPTIMIZER_MODE
+        if requested_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE and dreamer_v3_active_available:
+            effective_mode = OPTIMIZER_MODE_DREAMER_V3_ACTIVE
+        elif requested_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE:
+            fallback_reason = _DREAMER_ACTIVE_FALLBACK_REASON
+        elif requested_mode == OPTIMIZER_MODE_DREAMER_V3_SHADOW and dreamer_v3_shadow_available:
+            fallback_reason = _DREAMER_SHADOW_FALLBACK_REASON
         elif requested_mode == OPTIMIZER_MODE_DREAMER_V3_SHADOW:
             fallback_reason = _DREAMER_SHADOW_FALLBACK_REASON
 
@@ -283,6 +320,8 @@ class RuntimeOptimizer:
             ),
             checkpoint_inference_parity_reason=self._checkpoint_inference_parity_reason,
             dreamer_v3_available=dreamer_v3_available,
+            dreamer_v3_shadow_available=dreamer_v3_shadow_available,
+            dreamer_v3_active_available=dreamer_v3_active_available,
             available_modes=available_modes,
             unavailable_modes=unavailable_modes,
             fallback_reason=fallback_reason,
@@ -298,8 +337,12 @@ class RuntimeOptimizer:
     def recommend(self, context: OptimizationContext) -> Recommendation:
         with self._lock:
             effective_mode = self._status.effective_mode
-        if effective_mode == DEFAULT_OPTIMIZER_MODE:
-            return self._bo_optimizer.recommend(context)
+            dreamer_optimizer = self._dreamer_optimizer
+        if effective_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE and dreamer_optimizer is not None:
+            try:
+                return dreamer_optimizer.recommend(context)
+            except ValueError:
+                return self._bo_optimizer.recommend(context)
         return self._bo_optimizer.recommend(context)
 
 

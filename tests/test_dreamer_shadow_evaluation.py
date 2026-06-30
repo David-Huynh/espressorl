@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -208,6 +209,26 @@ class DreamerShadowEvaluationTests(unittest.TestCase):
             + evaluation.dreamer_proposal.grind_delta_steps_from_current,
         )
         self.assertNotIn("absolute", canonical_json(evaluation.to_dict()))
+
+    def test_release_ready_session_can_still_run_shadow_evaluation(self) -> None:
+        release_session = replace(
+            self.session,
+            status=replace(
+                self.session.status,
+                inference_ready=True,
+                recommendation_enabled=True,
+            ),
+        )
+        service = DreamerShadowEvaluationService(
+            session=release_session,
+            repository=MemoryShadowRepository(),
+            clock=IncrementingClock(),
+        )
+
+        result = service.evaluate_transition(training_row(11))
+
+        self.assertEqual(result.evaluation.dreamer_proposal.source, "dreamer_v3")
+        self.assertEqual(result.evaluation.status, ShadowEvaluationStatus.PENDING_OUTCOME)
 
     def test_next_same_context_transition_resolves_previous_outcome(self) -> None:
         first_row = training_row(20)

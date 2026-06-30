@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from espresso_rl.domain.dreamer_actions import DREAMER_ACTION_SCHEMA_VERSION
-from espresso_rl.domain.optimization import OPTIMIZER_MODE_DREAMER_V3_SHADOW
+from espresso_rl.domain.optimization import (
+    OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+    OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+)
 from espresso_rl.domain.training import TRAINING_DATASET_FORMAT
 
 MODEL_MANIFEST_FORMAT = "espresso_rl_model_manifest_v1"
@@ -22,6 +25,10 @@ RUNTIME_SCHEMA_VERSION = 1
 
 ALLOWED_MODEL_FAMILIES = {MODEL_FAMILY_DREAMER_V3}
 ALLOWED_MODEL_ARTIFACT_FORMATS = {MODEL_ARTIFACT_FORMAT_SAFETENSORS}
+ALLOWED_DREAMER_OPTIMIZER_MODES = {
+    OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+    OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+}
 _HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
@@ -129,7 +136,7 @@ def validate_model_manifest(
     runtime = manifest.get("runtime_compatibility")
     if not isinstance(runtime, dict):
         return _invalid("DreamerV3 model manifest runtime_compatibility is missing.")
-    if runtime.get("optimizer_mode") != OPTIMIZER_MODE_DREAMER_V3_SHADOW:
+    if runtime.get("optimizer_mode") not in ALLOWED_DREAMER_OPTIMIZER_MODES:
         return _invalid("DreamerV3 model manifest optimizer_mode is incompatible.")
     if _int_value(runtime.get("espresso_rl_runtime_schema_version")) != RUNTIME_SCHEMA_VERSION:
         return _invalid("DreamerV3 model manifest runtime schema is incompatible.")

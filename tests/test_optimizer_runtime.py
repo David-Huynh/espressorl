@@ -8,8 +8,49 @@ from pathlib import Path
 from unittest.mock import patch
 
 import espresso_rl.config as config_module
-from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW
+from espresso_rl.domain.optimization import (
+    DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+    OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+)
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
+
+
+class RecordingOptimizer:
+    def __init__(self, result) -> None:
+        self.result = result
+        self.contexts = []
+
+    def recommend(self, context):
+        self.contexts.append(context)
+        return self.result
+
+
+class FailingOptimizer:
+    def recommend(self, context):
+        raise ValueError("unsafe dreamer proposal")
+
+
+class FakeCheckpoint:
+    def __init__(
+        self,
+        *,
+        artifact_reference: str,
+        manifest_reference: str,
+        artifact_sha256: str,
+        manifest_sha256: str,
+        inference_ready: bool,
+    ) -> None:
+        self.artifact_reference = artifact_reference
+        self.manifest_reference = manifest_reference
+        self.artifact_sha256 = artifact_sha256
+        self.manifest_sha256 = manifest_sha256
+        self.inference_ready = inference_ready
+        self.tensors = (object(),)
+        self.component_names = ("actor", "context_encoder", "critic", "world_model")
+        self.architecture_sha256 = "f" * 64
+        self.inference_probe_sha256 = "9" * 64
+        self.heldout_inference_sha256 = "8" * 64
 
 
 class RuntimeOptimizerTests(unittest.TestCase):
@@ -18,11 +59,12 @@ class RuntimeOptimizerTests(unittest.TestCase):
 
         status = optimizer.status()
 
-        self.assertEqual(status.configured_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
         self.assertEqual(status.effective_mode, DEFAULT_OPTIMIZER_MODE)
         self.assertFalse(status.dreamer_v3_available)
         self.assertEqual(status.available_modes, (DEFAULT_OPTIMIZER_MODE,))
         self.assertIn(OPTIMIZER_MODE_DREAMER_V3_SHADOW, status.unavailable_modes or {})
+        self.assertIn(OPTIMIZER_MODE_DREAMER_V3_ACTIVE, status.unavailable_modes or {})
 
     def test_dreamer_mode_with_model_file_but_no_manifest_is_not_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -38,7 +80,7 @@ class RuntimeOptimizerTests(unittest.TestCase):
 
             status = optimizer.status()
 
-        self.assertEqual(status.configured_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
         self.assertEqual(status.effective_mode, DEFAULT_OPTIMIZER_MODE)
         self.assertTrue(status.model_artifact_verified)
         self.assertFalse(status.model_manifest_verified)
@@ -60,7 +102,7 @@ class RuntimeOptimizerTests(unittest.TestCase):
 
             status = optimizer.status()
 
-        self.assertEqual(status.configured_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
         self.assertEqual(status.effective_mode, DEFAULT_OPTIMIZER_MODE)
         self.assertFalse(status.dreamer_v3_available)
         self.assertTrue(status.model_artifact_verified)
@@ -92,9 +134,136 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertEqual(status.model_artifact_path, str(model_path))
         self.assertEqual(status.model_artifact_sha256, digest)
         self.assertEqual(status.model_manifest_path, str(manifest_path))
-        self.assertEqual(status.configured_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
         self.assertTrue(status.model_manifest_verified)
         self.assertFalse(status.checkpoint_verified)
+
+    def test_verified_shadow_checkpoint_keeps_bo_effective_and_lists_shadow_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path, digest, manifest_path, manifest_sha = write_model_bundle(Path(tmp), inference_ready=False)
+            checkpoint = FakeCheckpoint(
+                artifact_reference=str(model_path),
+                manifest_reference=str(manifest_path),
+                artifact_sha256=digest,
+                manifest_sha256=manifest_sha,
+                inference_ready=False,
+            )
+            bo = RecordingOptimizer("bo")
+            optimizer = RuntimeOptimizer(
+                optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+                model_artifact_path=str(model_path),
+                model_artifact_sha256=digest,
+                model_manifest_path=str(manifest_path),
+                verified_checkpoint=checkpoint,
+                checkpoint_inference_parity_verified=True,
+                bo_optimizer=bo,
+            )
+
+            status = optimizer.status()
+
+        self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
+        self.assertEqual(status.effective_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertTrue(status.dreamer_v3_shadow_available)
+        self.assertFalse(status.dreamer_v3_active_available)
+        self.assertIn(OPTIMIZER_MODE_DREAMER_V3_SHADOW, status.available_modes)
+        self.assertNotIn(OPTIMIZER_MODE_DREAMER_V3_ACTIVE, status.available_modes)
+        context = object()
+        self.assertEqual(optimizer.recommend(context), "bo")
+        self.assertEqual(bo.contexts, [context])
+
+    def test_active_mode_uses_dreamer_only_for_inference_ready_release_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path, digest, manifest_path, manifest_sha = write_model_bundle(
+                Path(tmp),
+                inference_ready=True,
+                optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+            )
+            checkpoint = FakeCheckpoint(
+                artifact_reference=str(model_path),
+                manifest_reference=str(manifest_path),
+                artifact_sha256=digest,
+                manifest_sha256=manifest_sha,
+                inference_ready=True,
+            )
+            bo = RecordingOptimizer("bo")
+            dreamer = RecordingOptimizer("dreamer")
+            optimizer = RuntimeOptimizer(
+                optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+                model_artifact_path=str(model_path),
+                model_artifact_sha256=digest,
+                model_manifest_path=str(manifest_path),
+                verified_checkpoint=checkpoint,
+                checkpoint_inference_parity_verified=True,
+                bo_optimizer=bo,
+                dreamer_optimizer=dreamer,
+            )
+
+            status = optimizer.status()
+
+        self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_ACTIVE)
+        self.assertEqual(status.effective_mode, OPTIMIZER_MODE_DREAMER_V3_ACTIVE)
+        self.assertTrue(status.dreamer_v3_available)
+        self.assertTrue(status.dreamer_v3_shadow_available)
+        self.assertTrue(status.dreamer_v3_active_available)
+        self.assertEqual(
+            status.available_modes,
+            (
+                DEFAULT_OPTIMIZER_MODE,
+                OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+                OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+            ),
+        )
+        context = object()
+        self.assertEqual(optimizer.recommend(context), "dreamer")
+        self.assertEqual(dreamer.contexts, [context])
+        self.assertEqual(bo.contexts, [])
+
+    def test_active_mode_falls_back_to_bo_without_dreamer_optimizer_or_on_safety_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path, digest, manifest_path, manifest_sha = write_model_bundle(
+                Path(tmp),
+                inference_ready=True,
+                optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+            )
+            checkpoint = FakeCheckpoint(
+                artifact_reference=str(model_path),
+                manifest_reference=str(manifest_path),
+                artifact_sha256=digest,
+                manifest_sha256=manifest_sha,
+                inference_ready=True,
+            )
+            bo = RecordingOptimizer("bo")
+            optimizer = RuntimeOptimizer(
+                optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+                model_artifact_path=str(model_path),
+                model_artifact_sha256=digest,
+                model_manifest_path=str(manifest_path),
+                verified_checkpoint=checkpoint,
+                checkpoint_inference_parity_verified=True,
+                bo_optimizer=bo,
+            )
+
+            unavailable = optimizer.status()
+
+            bo_on_error = RecordingOptimizer("bo_after_error")
+            fallback = RuntimeOptimizer(
+                optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+                model_artifact_path=str(model_path),
+                model_artifact_sha256=digest,
+                model_manifest_path=str(manifest_path),
+                verified_checkpoint=checkpoint,
+                checkpoint_inference_parity_verified=True,
+                bo_optimizer=bo_on_error,
+                dreamer_optimizer=FailingOptimizer(),
+            )
+
+        self.assertEqual(unavailable.configured_mode, OPTIMIZER_MODE_DREAMER_V3_ACTIVE)
+        self.assertEqual(unavailable.effective_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertFalse(unavailable.dreamer_v3_active_available)
+        self.assertIn(OPTIMIZER_MODE_DREAMER_V3_ACTIVE, unavailable.unavailable_modes or {})
+        context = object()
+        self.assertEqual(optimizer.recommend(context), "bo")
+        self.assertEqual(fallback.recommend(context), "bo_after_error")
 
     def test_model_artifact_hash_mismatch_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -267,6 +436,30 @@ def write_manifest(
     path = root / "dreamer_v3_manifest.json"
     path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     return path
+
+
+def write_model_bundle(
+    root: Path,
+    *,
+    inference_ready: bool,
+    optimizer_mode: str = OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+) -> tuple[Path, str, Path, str]:
+    model_path = root / "dreamer_v3.safetensors"
+    model_path.write_bytes(b"verified model")
+    digest = hashlib.sha256(b"verified model").hexdigest()
+    manifest_path = write_manifest(
+        root,
+        digest,
+        overrides={
+            "runtime_compatibility": {
+                "optimizer_mode": optimizer_mode,
+                "espresso_rl_runtime_schema_version": 1,
+                "inference_ready": inference_ready,
+            }
+        },
+    )
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    return model_path, digest, manifest_path, manifest_sha
 
 
 if __name__ == "__main__":

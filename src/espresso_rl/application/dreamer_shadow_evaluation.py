@@ -4,9 +4,11 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any, Callable
 
-import torch
-import torch.nn.functional as F
-
+from espresso_rl.application.dreamer_recommendations import (
+    DreamerRecommendationError,
+    dreamer_episode_batch_from_training_rows,
+    dreamer_recipe_proposal,
+)
 from espresso_rl.application.dreamer_shadow_inference import DreamerShadowInferenceSession
 from espresso_rl.domain.dreamer_actions import DreamerActionCandidate, validate_dreamer_action
 from espresso_rl.domain.models import (
@@ -24,12 +26,6 @@ from espresso_rl.domain.shadow_evaluation import (
     resolve_shadow_evaluation,
 )
 from espresso_rl.domain.training import validate_training_transition
-from espresso_rl.dreamer.dataset import (
-    DREAMER_CONTEXT_WINDOW_SIZE,
-    DreamerEpisodeDatasetError,
-    build_dreamer_episode_batch,
-    build_dreamer_episodes_from_training_rows,
-)
 from espresso_rl.ports.shadow_evaluations import ShadowEvaluationRepository
 
 
@@ -53,8 +49,8 @@ class DreamerShadowEvaluationService:
         safety_bounds: SafetyBounds | None = None,
         clock: Callable[[], int],
     ) -> None:
-        if not session.status.parity_verified or session.status.inference_ready:
-            raise ValueError("Dreamer shadow evaluation requires a parity-verified shadow-only session")
+        if not session.status.parity_verified:
+            raise ValueError("Dreamer shadow evaluation requires a parity-verified session")
         self._session = session
         self._repository = repository
         self._safety_bounds = safety_bounds or SafetyBounds()
@@ -223,36 +219,14 @@ class DreamerShadowEvaluationService:
         context_transitions: list[dict[str, Any]],
     ) -> tuple[dict[str, Any], int]:
         try:
-            replay_rows = _context_replay_rows(transition, context_transitions)
-            episodes = build_dreamer_episodes_from_training_rows(replay_rows)
-            architecture = self._session.checkpoint.architecture
-            if architecture is None:
-                raise DreamerShadowEvaluationError("checkpoint runtime architecture is missing")
-            batch = build_dreamer_episode_batch(
-                episodes,
-                control_spec=architecture.control_spec,
-                device="cpu",
+            return dreamer_episode_batch_from_training_rows(
+                self._session,
+                transition,
+                context_transitions=context_transitions,
             )
-        except DreamerEpisodeDatasetError as exc:
-            raise DreamerShadowEvaluationError(f"shadow episode conversion failed: {exc}") from exc
-        expected = architecture
-        if (
-            batch["observations"].shape[-1] != expected.observation_dim
-            or batch["static_context"].shape[-1] != expected.static_dim
-            or batch["dynamic_actions"].shape[-1] != expected.dynamic_action_dim
-            or batch["context_static"].shape[-1] != expected.context_encoder.static_dim
-            or batch["context_terminal"].shape[-1] != expected.context_encoder.terminal_dim
-            or batch["context_time"].shape[-1] != expected.context_encoder.time_dim
-            or batch["context_trajectory_embedding"].shape[-1] != expected.context_encoder.trajectory_dim
-        ):
-            raise DreamerShadowEvaluationError("shadow episode feature layout is incompatible with checkpoint")
-        source_ids = [int(item) for item in batch["source_training_row_ids"].tolist()]
-        current_row_id = int(transition["training_row_id"])
-        if current_row_id not in source_ids:
-            raise DreamerShadowEvaluationError("shadow context replay omitted the current transition")
-        return batch, source_ids.index(current_row_id)
+        except DreamerRecommendationError as exc:
+            raise DreamerShadowEvaluationError(str(exc)) from exc
 
-    @torch.no_grad()
     def _dreamer_proposal(
         self,
         batch: dict[str, Any],
@@ -260,43 +234,25 @@ class DreamerShadowEvaluationService:
         current_episode_index: int,
         current_recipe: Recipe,
     ) -> ShadowRecipeProposal:
-        models = self._session.models
-        context_state = models.context_encoder(batch)
-        observed = models.world_model.observe(batch, context_state=context_state, sample=False)
-        valid_index = int(batch["step_mask"][current_episode_index].sum().item()) - 1
-        if valid_index < 0:
-            raise DreamerShadowEvaluationError("shadow episode contains no valid observation steps")
-        features = observed["features"][current_episode_index : current_episode_index + 1, valid_index]
-        control_mask = batch["control_action_mask"][current_episode_index : current_episode_index + 1, valid_index]
-        actor_output = models.actor(features, control_mask)
-        static_actions = actor_output["static_actions"][0].detach().cpu()
-        static_logits = actor_output["static_logits"][0].detach().cpu()
-        grind_delta_steps = int(round(float(static_actions[0].item())))
-        next_dose_g = float(current_recipe.dose_g + static_actions[1].item())
-        target_yield_g = float(current_recipe.target_yield_g + static_actions[2].item())
-        target_ratio = target_yield_g / next_dose_g
-        confidence = float(F.softmax(static_logits, dim=-1).amax(dim=-1).mean().item())
-        safety_errors: tuple[str, ...] = ()
         try:
-            candidate = DreamerActionCandidate(
-                grind_delta_steps_from_current=grind_delta_steps,
-                next_dose_g=next_dose_g,
-                target_yield_g=target_yield_g,
-                target_ratio=target_ratio,
-                confidence=confidence,
+            proposal = dreamer_recipe_proposal(
+                self._session,
+                batch,
+                current_episode_index=current_episode_index,
+                current_recipe=current_recipe,
+                safety_bounds=self._safety_bounds,
                 reason="DreamerV3 shadow proposal.",
             )
-            validate_dreamer_action(candidate, current=current_recipe, bounds=self._safety_bounds)
-        except ValueError as exc:
-            safety_errors = (str(exc),)
+        except DreamerRecommendationError as exc:
+            raise DreamerShadowEvaluationError(str(exc)) from exc
         return _proposal(
             source="dreamer_v3",
             current_recipe=current_recipe,
-            grind_delta_steps=grind_delta_steps,
-            next_dose_g=next_dose_g,
-            target_yield_g=target_yield_g,
-            confidence=confidence,
-            safety_errors=safety_errors,
+            grind_delta_steps=proposal.grind_delta_steps_from_current,
+            next_dose_g=proposal.next_dose_g,
+            target_yield_g=proposal.target_yield_g,
+            confidence=proposal.confidence,
+            safety_errors=proposal.safety_errors,
         )
 
     def _bo_proposal(
@@ -410,53 +366,6 @@ def _proposal(
         confidence=max(0.0, min(1.0, confidence)),
         safety_valid=not safety_errors,
         safety_errors=safety_errors,
-    )
-
-
-def _context_replay_rows(
-    transition: dict[str, Any],
-    context_transitions: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    if not context_transitions:
-        return [transition]
-    current_context = _transition_context_key(transition)
-    current_row_id = int(transition["training_row_id"])
-    current_timestamp = float(transition["observation"]["timestamp"])
-    history: list[dict[str, Any]] = []
-    seen_row_ids: set[int] = {current_row_id}
-    seen_shot_ids: set[str] = {str(transition["observation"]["shot_id"])}
-    for candidate in context_transitions:
-        errors = validate_training_transition(candidate)
-        if errors:
-            raise DreamerShadowEvaluationError(
-                f"shadow context transition is invalid: {'; '.join(errors[:10])}"
-            )
-        row_id = int(candidate["training_row_id"])
-        shot_id = str(candidate["observation"]["shot_id"])
-        if row_id in seen_row_ids or shot_id in seen_shot_ids:
-            raise DreamerShadowEvaluationError("shadow context replay contains duplicate shots")
-        if _transition_context_key(candidate) != current_context:
-            raise DreamerShadowEvaluationError("shadow context replay mixes bean or grinder contexts")
-        if float(candidate["observation"]["timestamp"]) >= current_timestamp:
-            raise DreamerShadowEvaluationError("shadow context replay contains stale or future context")
-        seen_row_ids.add(row_id)
-        seen_shot_ids.add(shot_id)
-        history.append(candidate)
-    history = sorted(
-        history,
-        key=lambda row: (float(row["observation"]["timestamp"]), int(row["training_row_id"])),
-    )
-    return [*history[-DREAMER_CONTEXT_WINDOW_SIZE:], transition]
-
-
-def _transition_context_key(row: dict[str, Any]) -> tuple[str, str, str, str]:
-    source = row["source"]
-    context = row["context"]
-    return (
-        _required_context(source.get("install_id"), "install_id"),
-        _required_context(context.get("machine_id"), "machine_id"),
-        _required_context(context.get("bean_context_id"), "bean_context_id"),
-        _required_context(context.get("grinder_context_id"), "grinder_context_id"),
     )
 
 

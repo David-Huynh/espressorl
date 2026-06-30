@@ -148,8 +148,6 @@ def load_verified_dreamer_checkpoint(
     )
     if not validation.verified:
         raise CheckpointLoadError(validation.unavailable_reason or "checkpoint manifest is invalid")
-    if validation.inference_ready:
-        raise CheckpointLoadError("runtime-ready checkpoints are not enabled by this loader contract")
 
     artifact = _require_object(manifest.get("model_artifact"), "checkpoint manifest model_artifact")
     _require_exact_fields(artifact, _ARTIFACT_FIELDS, "checkpoint manifest model_artifact")
@@ -255,7 +253,7 @@ def load_verified_dreamer_checkpoint(
         heldout_inference_sha256=heldout_inference_sha256,
         architecture=architecture,
         artifact_stage=artifact_stage,
-        inference_ready=False,
+        inference_ready=bool(validation.inference_ready),
         tensors=tensors,
         payload=artifact_payload,
     )
@@ -337,7 +335,7 @@ def _validate_metadata(
         "format": CHECKPOINT_ARTIFACT_FORMAT,
         "schema_version": str(CHECKPOINT_ARTIFACT_SCHEMA_VERSION),
         "model_family": MODEL_FAMILY_DREAMER_V3,
-        "inference_ready": "false",
+        "inference_ready": "true" if manifest["runtime_compatibility"]["inference_ready"] else "false",
         "dataset_sha256": dataset["sha256"],
         "training_config_sha256": trainer["training_config_sha256"],
         "dreamer_tensor_contract_sha256": artifact["dreamer_tensor_contract_sha256"],

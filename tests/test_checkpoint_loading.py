@@ -10,7 +10,11 @@ from pathlib import Path
 from espresso_rl.adapters.local_model_store import LocalModelArtifactStore
 from espresso_rl.application.checkpoint_loading import CheckpointLoadError, load_verified_dreamer_checkpoint
 from espresso_rl.domain.model_checkpoint import DreamerCheckpointCompatibility
-from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_SHADOW
+from espresso_rl.domain.optimization import (
+    DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+    OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+)
 from espresso_rl.optimizers.runtime import RuntimeOptimizer
 
 
@@ -47,6 +51,17 @@ class CheckpointLoadingTests(unittest.TestCase):
         self.assertEqual(bytes(checkpoint.tensor_bytes("actor.weight")), struct.pack("<f", 1.0))
         self.assertEqual(checkpoint.artifact_sha256, bundle["artifact_sha256"])
         self.assertEqual(checkpoint.evaluation_report_sha256, "7" * 64)
+
+    def test_loads_release_ready_checkpoint_without_local_shadow_promotion(self) -> None:
+        bundle = checkpoint_bundle(
+            inference_ready=True,
+            optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+        )
+
+        checkpoint = load_bundle(bundle)
+
+        self.assertTrue(checkpoint.inference_ready)
+        self.assertEqual(checkpoint.component_names, ("actor", "context_encoder", "critic", "world_model"))
 
     def test_rejects_configured_artifact_hash_mismatch(self) -> None:
         bundle = checkpoint_bundle()
@@ -204,7 +219,11 @@ def load_bundle(
     )
 
 
-def checkpoint_bundle() -> dict:
+def checkpoint_bundle(
+    *,
+    inference_ready: bool = False,
+    optimizer_mode: str = OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+) -> dict:
     tensor_payloads = {
         "actor.weight": struct.pack("<f", 1.0),
         "context_encoder.weight": struct.pack("<f", 4.0),
@@ -321,7 +340,7 @@ def checkpoint_bundle() -> dict:
         "schema_version": "2",
         "model_family": "dreamer_v3",
         "artifact_stage": "world_model_train_preview",
-        "inference_ready": "false",
+        "inference_ready": "true" if inference_ready else "false",
         "dataset_sha256": "1" * 64,
         "training_config_sha256": "3" * 64,
         "dreamer_tensor_contract_sha256": "4" * 64,
@@ -378,9 +397,9 @@ def checkpoint_bundle() -> dict:
             "reward_schema_version": 1,
         },
         "runtime_compatibility": {
-            "optimizer_mode": "dreamer_v3_shadow",
+            "optimizer_mode": optimizer_mode,
             "espresso_rl_runtime_schema_version": 1,
-            "inference_ready": False,
+            "inference_ready": inference_ready,
         },
     }
     bundle = {

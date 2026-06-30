@@ -195,7 +195,7 @@ class DreamerCheckpointArchitecture:
 
 @dataclass(frozen=True)
 class VerifiedDreamerCheckpoint:
-    """Authenticated checkpoint bytes that are not yet executable runtime state."""
+    """Authenticated checkpoint bytes plus release-declared runtime readiness."""
 
     artifact_reference: str
     manifest_reference: str
@@ -218,8 +218,8 @@ class VerifiedDreamerCheckpoint:
     payload: bytes
 
     def __post_init__(self) -> None:
-        if self.inference_ready:
-            raise ValueError("runtime inference readiness is not enabled by the checkpoint loader contract")
+        if not isinstance(self.inference_ready, bool):
+            raise ValueError("checkpoint inference_ready must be boolean")
 
     @property
     def component_names(self) -> tuple[str, ...]:
