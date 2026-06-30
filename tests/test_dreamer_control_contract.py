@@ -3,9 +3,14 @@ from __future__ import annotations
 import unittest
 
 from espresso_rl.domain.dreamer_control import (
+    DREAMER_DYNAMIC_CONTROL_ACCEPT,
+    DREAMER_DYNAMIC_CONTROL_FAIL_SAFE,
+    DREAMER_DYNAMIC_CONTROL_REPLAY_LAST,
+    DREAMER_DYNAMIC_CONTROL_WAIT_FOR_FIRST_COMMAND,
     DreamerControlSafetyLimits,
     DreamerControlSpec,
     expand_decision_actions_to_observation_steps,
+    resolve_live_dynamic_control_action,
     sanitize_dynamic_action_for_control_spec,
     validate_dynamic_action_for_control_spec,
 )
@@ -204,6 +209,116 @@ class DreamerControlContractTests(unittest.TestCase):
         self.assertFalse(bad_stop.ok)
         self.assertIsNone(bad_stop.sanitized_action)
         self.assertTrue(any("stop must be boolean" in error for error in bad_stop.errors))
+
+    def test_live_dynamic_control_accepts_sanitized_commands_and_reports_clamps(self) -> None:
+        spec = DreamerControlSpec(
+            dynamic_control_enabled=True,
+            pressure_control_allowed=True,
+            temperature_control_allowed=True,
+            stop_control_allowed=True,
+        )
+
+        decision = resolve_live_dynamic_control_action(
+            {
+                "pressure_target_bar": 13.5,
+                "temperature_target_c": 10.0,
+                "yield_stop_target_g": 95.0,
+            },
+            last_sanitized_action=None,
+            control_spec=spec,
+            step_index=0,
+            milliseconds_since_last_command=0,
+        )
+
+        self.assertEqual(decision.status, DREAMER_DYNAMIC_CONTROL_ACCEPT)
+        self.assertFalse(decision.fail_safe_required)
+        self.assertEqual(
+            decision.action,
+            {
+                "pressure_target_bar": 12.0,
+                "temperature_target_c": 20.0,
+                "yield_stop_target_g": 90.0,
+            },
+        )
+        self.assertEqual(
+            set(decision.clamped_fields),
+            {"pressure_target_bar", "temperature_target_c", "yield_stop_target_g"},
+        )
+
+    def test_live_dynamic_control_replays_missed_commands_until_grace_expires(self) -> None:
+        spec = DreamerControlSpec(
+            dynamic_control_enabled=True,
+            pressure_control_allowed=True,
+        )
+        last_action = {"pressure_target_bar": 8.0}
+
+        replay = resolve_live_dynamic_control_action(
+            None,
+            last_sanitized_action=last_action,
+            control_spec=spec,
+            step_index=4,
+            milliseconds_since_last_command=4_999,
+        )
+        stale = resolve_live_dynamic_control_action(
+            None,
+            last_sanitized_action=last_action,
+            control_spec=spec,
+            step_index=8,
+            milliseconds_since_last_command=5_001,
+        )
+
+        self.assertEqual(replay.status, DREAMER_DYNAMIC_CONTROL_REPLAY_LAST)
+        self.assertEqual(replay.action, last_action)
+        self.assertFalse(replay.fail_safe_required)
+        self.assertEqual(stale.status, DREAMER_DYNAMIC_CONTROL_FAIL_SAFE)
+        self.assertEqual(stale.reason, "command_timeout")
+        self.assertTrue(stale.fail_safe_required)
+
+    def test_live_dynamic_control_waits_for_first_command_then_fails_safe(self) -> None:
+        spec = DreamerControlSpec(
+            dynamic_control_enabled=True,
+            pressure_control_allowed=True,
+        )
+
+        waiting = resolve_live_dynamic_control_action(
+            None,
+            last_sanitized_action=None,
+            control_spec=spec,
+            step_index=0,
+            milliseconds_since_last_command=5_000,
+        )
+        timeout = resolve_live_dynamic_control_action(
+            None,
+            last_sanitized_action=None,
+            control_spec=spec,
+            step_index=0,
+            milliseconds_since_last_command=5_001,
+        )
+
+        self.assertEqual(waiting.status, DREAMER_DYNAMIC_CONTROL_WAIT_FOR_FIRST_COMMAND)
+        self.assertFalse(waiting.fail_safe_required)
+        self.assertEqual(timeout.status, DREAMER_DYNAMIC_CONTROL_FAIL_SAFE)
+        self.assertEqual(timeout.reason, "initial_command_timeout")
+
+    def test_live_dynamic_control_fails_safe_on_invalid_new_command(self) -> None:
+        spec = DreamerControlSpec(
+            dynamic_control_enabled=True,
+            pressure_control_allowed=True,
+            flow_control_allowed=True,
+        )
+
+        decision = resolve_live_dynamic_control_action(
+            {"pressure_target_bar": 8.0, "flow_target_ml_s": 2.0},
+            last_sanitized_action={"pressure_target_bar": 7.0},
+            control_spec=spec,
+            step_index=0,
+            milliseconds_since_last_command=250,
+        )
+
+        self.assertEqual(decision.status, DREAMER_DYNAMIC_CONTROL_FAIL_SAFE)
+        self.assertEqual(decision.reason, "invalid_command")
+        self.assertTrue(decision.fail_safe_required)
+        self.assertTrue(any("pressure and flow" in error for error in decision.errors))
 
     def test_decision_actions_are_held_across_observation_steps(self) -> None:
         spec = DreamerControlSpec(

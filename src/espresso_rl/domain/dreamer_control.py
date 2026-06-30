@@ -21,6 +21,12 @@ DREAMER_MIN_TEMPERATURE_TARGET_C = 20.0
 DREAMER_MAX_TEMPERATURE_TARGET_C = 100.0
 DREAMER_MAX_YIELD_STOP_TARGET_G = 90.0
 DREAMER_MAX_SHOT_DURATION_S = 90.0
+DREAMER_COMMAND_REPLAY_GRACE_MS = 5_000
+
+DREAMER_DYNAMIC_CONTROL_ACCEPT = "accept"
+DREAMER_DYNAMIC_CONTROL_REPLAY_LAST = "replay_last"
+DREAMER_DYNAMIC_CONTROL_WAIT_FOR_FIRST_COMMAND = "wait_for_first_command"
+DREAMER_DYNAMIC_CONTROL_FAIL_SAFE = "fail_safe"
 
 DREAMER_DYNAMIC_ACTION_FIELDS = (
     "pressure_target_bar",
@@ -176,6 +182,19 @@ class DreamerDynamicActionSanitization:
     @property
     def ok(self) -> bool:
         return not self.errors
+
+
+@dataclass(frozen=True)
+class DreamerLiveControlDecision:
+    status: str
+    action: dict[str, Any] | None = None
+    clamped_fields: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    reason: str | None = None
+
+    @property
+    def fail_safe_required(self) -> bool:
+        return self.status == DREAMER_DYNAMIC_CONTROL_FAIL_SAFE
 
 
 @dataclass(frozen=True)
@@ -377,6 +396,64 @@ def sanitize_dynamic_action_for_control_spec(
     if errors:
         return DreamerDynamicActionSanitization(None, errors=tuple(errors))
     return DreamerDynamicActionSanitization(sanitized, clamped_fields=tuple(clamped_fields))
+
+
+def resolve_live_dynamic_control_action(
+    action: dict[str, Any] | None,
+    *,
+    last_sanitized_action: dict[str, Any] | None,
+    control_spec: DreamerControlSpec,
+    step_index: int,
+    milliseconds_since_last_command: int,
+) -> DreamerLiveControlDecision:
+    if (
+        isinstance(milliseconds_since_last_command, bool)
+        or not isinstance(milliseconds_since_last_command, int)
+        or milliseconds_since_last_command < 0
+    ):
+        raise ValueError("milliseconds_since_last_command must be a non-negative integer")
+
+    if action is not None:
+        sanitized = sanitize_dynamic_action_for_control_spec(
+            action,
+            control_spec=control_spec,
+            step_index=step_index,
+        )
+        if not sanitized.ok:
+            return DreamerLiveControlDecision(
+                status=DREAMER_DYNAMIC_CONTROL_FAIL_SAFE,
+                errors=sanitized.errors,
+                reason="invalid_command",
+            )
+        return DreamerLiveControlDecision(
+            status=DREAMER_DYNAMIC_CONTROL_ACCEPT,
+            action=dict(sanitized.sanitized_action or {}),
+            clamped_fields=sanitized.clamped_fields,
+        )
+
+    if last_sanitized_action is None:
+        if milliseconds_since_last_command <= DREAMER_COMMAND_REPLAY_GRACE_MS:
+            return DreamerLiveControlDecision(
+                status=DREAMER_DYNAMIC_CONTROL_WAIT_FOR_FIRST_COMMAND,
+                reason="waiting_for_first_command",
+            )
+        return DreamerLiveControlDecision(
+            status=DREAMER_DYNAMIC_CONTROL_FAIL_SAFE,
+            reason="initial_command_timeout",
+        )
+
+    if milliseconds_since_last_command <= DREAMER_COMMAND_REPLAY_GRACE_MS:
+        return DreamerLiveControlDecision(
+            status=DREAMER_DYNAMIC_CONTROL_REPLAY_LAST,
+            action=dict(last_sanitized_action),
+            reason="missed_command_within_grace",
+        )
+
+    return DreamerLiveControlDecision(
+        status=DREAMER_DYNAMIC_CONTROL_FAIL_SAFE,
+        action=dict(last_sanitized_action),
+        reason="command_timeout",
+    )
 
 
 def expand_decision_actions_to_observation_steps(
