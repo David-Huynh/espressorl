@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from espresso_rl.dreamer.dataset import DREAMER_DYNAMIC_ACTION_FEATURES
+from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC
 from espresso_rl.dreamer.context_encoder import DreamerContextEncoder
 from espresso_rl.dreamer.reference_world_model import (
     DreamerV3VectorWorldModel,
@@ -71,6 +72,9 @@ class DreamerV3ImaginationActor(nn.Module):
         self.static_head = nn.Linear(config.actor_hidden_dim, self.static_head_count * self.static_bin_count)
         self.dynamic_head = nn.Linear(config.actor_hidden_dim, dynamic_action_dim)
         self.register_buffer("static_action_bins", _static_action_bin_tensor(), persistent=False)
+        dynamic_low, dynamic_high = _dynamic_action_bound_tensors(dynamic_action_dim)
+        self.register_buffer("dynamic_action_low", dynamic_low, persistent=False)
+        self.register_buffer("dynamic_action_high", dynamic_high, persistent=False)
 
     def forward(self, features: torch.Tensor, control_action_mask: torch.Tensor) -> dict[str, torch.Tensor]:
         hidden = self.trunk(features)
@@ -86,7 +90,11 @@ class DreamerV3ImaginationActor(nn.Module):
         static_entropy = -(F.softmax(static_logits, dim=-1) * static_log_probs).sum(dim=(-1, -2))
 
         dynamic_action_mask = (control_action_mask > 0.5).to(dtype=features.dtype)
-        dynamic_actions = torch.tanh(self.dynamic_head(hidden)) * dynamic_action_mask
+        raw_dynamic_actions = torch.tanh(self.dynamic_head(hidden))
+        dynamic_low = self.dynamic_action_low.to(dtype=features.dtype, device=features.device)
+        dynamic_high = self.dynamic_action_high.to(dtype=features.dtype, device=features.device)
+        bounded_dynamic_actions = dynamic_low + (raw_dynamic_actions + 1.0) * 0.5 * (dynamic_high - dynamic_low)
+        dynamic_actions = bounded_dynamic_actions * dynamic_action_mask
         return {
             "static_logits": static_logits,
             "static_action_indexes": static_indexes,
@@ -348,6 +356,24 @@ def _static_action_bin_tensor() -> torch.Tensor:
         [DREAMER_STATIC_RECIPE_ACTION_BINS[name] for name in DREAMER_STATIC_RECIPE_ACTION_HEADS],
         dtype=torch.float32,
     )
+
+
+def _dynamic_action_bound_tensors(dynamic_action_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if dynamic_action_dim != len(DREAMER_DYNAMIC_ACTION_FEATURES):
+        raise ValueError("Dreamer dynamic_action_dim must match the canonical dynamic action feature count")
+    limits = DEFAULT_DREAMER_CONTROL_SPEC.safety_limits
+    ranges = {
+        "pressure_target_bar": (limits.min_pressure_bar, limits.max_pressure_bar),
+        "flow_target_ml_s": (limits.min_flow_ml_s, limits.max_flow_ml_s),
+        "pump_duty": (limits.min_pump_duty, limits.max_pump_duty),
+        "valve_position": (limits.min_valve_position, limits.max_valve_position),
+        "temperature_target_c": (limits.min_temperature_c, limits.max_temperature_c),
+        "yield_stop_target_g": (limits.min_yield_stop_target_g, limits.max_yield_stop_target_g),
+        "stop": (0.0, 1.0),
+    }
+    low = torch.tensor([ranges[name][0] for name in DREAMER_DYNAMIC_ACTION_FEATURES], dtype=torch.float32)
+    high = torch.tensor([ranges[name][1] for name in DREAMER_DYNAMIC_ACTION_FEATURES], dtype=torch.float32)
+    return low, high
 
 
 def _gather_static_action_bins(action_bins: torch.Tensor, indexes: torch.Tensor) -> torch.Tensor:

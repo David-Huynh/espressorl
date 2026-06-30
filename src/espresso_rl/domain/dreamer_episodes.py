@@ -3,7 +3,14 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from espresso_rl.domain.dreamer_control import DREAMER_CONTROL_CONSTRAINT_FIELDS, DREAMER_DYNAMIC_ACTION_FIELDS
+from espresso_rl.domain.dreamer_control import (
+    DREAMER_CONTROL_CONSTRAINT_FIELDS,
+    DREAMER_DYNAMIC_ACTION_FIELDS,
+    DREAMER_MAX_PRESSURE_TARGET_BAR,
+    DREAMER_MIN_TEMPERATURE_TARGET_C,
+    DREAMER_MAX_TEMPERATURE_TARGET_C,
+    DREAMER_MAX_YIELD_STOP_TARGET_G,
+)
 from espresso_rl.domain.models import (
     FIXED_CADENCE_MAX_STEPS,
     FIXED_CADENCE_SAMPLE_INTERVAL_MS,
@@ -410,12 +417,30 @@ def _validate_dynamic_action(dynamic_action: dict[str, Any], step_index: int, er
     if forbidden:
         errors.append(f"episode.steps[{step_index}].dynamic_action contains static recipe fields: {', '.join(forbidden[:10])}")
     _reject_unknown_fields(dynamic_action, _DYNAMIC_ACTION_FIELDS, errors, path=f"episode.steps[{step_index}].dynamic_action")
-    _optional_number_range(dynamic_action.get("pressure_target_bar"), f"episode.steps[{step_index}].dynamic_action.pressure_target_bar", 0.0, 15.0, errors)
+    _optional_number_range(
+        dynamic_action.get("pressure_target_bar"),
+        f"episode.steps[{step_index}].dynamic_action.pressure_target_bar",
+        0.0,
+        DREAMER_MAX_PRESSURE_TARGET_BAR,
+        errors,
+    )
     _optional_number_range(dynamic_action.get("flow_target_ml_s"), f"episode.steps[{step_index}].dynamic_action.flow_target_ml_s", 0.0, 20.0, errors)
     _optional_number_range(dynamic_action.get("pump_duty"), f"episode.steps[{step_index}].dynamic_action.pump_duty", 0.0, 1.0, errors)
     _optional_number_range(dynamic_action.get("valve_position"), f"episode.steps[{step_index}].dynamic_action.valve_position", 0.0, 1.0, errors)
-    _optional_number_range(dynamic_action.get("temperature_target_c"), f"episode.steps[{step_index}].dynamic_action.temperature_target_c", 80.0, 105.0, errors)
-    _optional_number_range(dynamic_action.get("yield_stop_target_g"), f"episode.steps[{step_index}].dynamic_action.yield_stop_target_g", 5.0, 100.0, errors)
+    _optional_number_range(
+        dynamic_action.get("temperature_target_c"),
+        f"episode.steps[{step_index}].dynamic_action.temperature_target_c",
+        DREAMER_MIN_TEMPERATURE_TARGET_C,
+        DREAMER_MAX_TEMPERATURE_TARGET_C,
+        errors,
+    )
+    _optional_number_range(
+        dynamic_action.get("yield_stop_target_g"),
+        f"episode.steps[{step_index}].dynamic_action.yield_stop_target_g",
+        5.0,
+        DREAMER_MAX_YIELD_STOP_TARGET_G,
+        errors,
+    )
     _optional_bool(dynamic_action.get("stop"), f"episode.steps[{step_index}].dynamic_action.stop", errors)
 
 

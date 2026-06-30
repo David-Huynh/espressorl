@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from espresso_rl.dreamer.dataset import DREAMER_DYNAMIC_ACTION_FEATURES
 from espresso_rl.dreamer.imagination import (
     DREAMER_STATIC_RECIPE_ACTION_HEADS,
     DreamerV3ImaginationActor,
@@ -38,6 +39,45 @@ class DreamerImaginationTests(unittest.TestCase):
         self.assertEqual(output["static_actions"].shape, (2, len(DREAMER_STATIC_RECIPE_ACTION_HEADS)))
         self.assertTrue(torch.equal(output["dynamic_action_mask"], control_mask))
         self.assertEqual(float((output["dynamic_actions"] * (1.0 - control_mask)).abs().max().item()), 0.0)
+
+    def test_actor_forward_bounds_supported_dynamic_actions_in_physical_units(self) -> None:
+        actor = DreamerV3ImaginationActor(
+            feature_dim=6,
+            dynamic_action_dim=7,
+            config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
+        )
+        with torch.no_grad():
+            actor.dynamic_head.weight.zero_()
+            actor.dynamic_head.bias.fill_(100.0)
+
+        features = torch.ones((1, 6), dtype=torch.float32)
+        control_mask = torch.ones((1, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=torch.float32)
+
+        output = actor(features, control_mask)
+        actions = output["dynamic_actions"][0]
+
+        self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")].item(), 12.0)
+        self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("temperature_target_c")].item(), 100.0)
+        self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("yield_stop_target_g")].item(), 90.0)
+        self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("stop")].item(), 1.0)
+
+    def test_actor_forward_allows_low_temperature_targets_down_to_twenty_c(self) -> None:
+        actor = DreamerV3ImaginationActor(
+            feature_dim=6,
+            dynamic_action_dim=7,
+            config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
+        )
+        with torch.no_grad():
+            actor.dynamic_head.weight.zero_()
+            actor.dynamic_head.bias.fill_(-100.0)
+
+        features = torch.ones((1, 6), dtype=torch.float32)
+        control_mask = torch.ones((1, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=torch.float32)
+
+        output = actor(features, control_mask)
+        actions = output["dynamic_actions"][0]
+
+        self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("temperature_target_c")].item(), 20.0)
 
     def test_lambda_returns_are_deterministic(self) -> None:
         rewards = torch.tensor([[1.0, 2.0]], dtype=torch.float32)

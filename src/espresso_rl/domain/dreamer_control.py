@@ -16,6 +16,11 @@ DREAMER_MIN_OBSERVATION_INTERVAL_MS = FIXED_CADENCE_SAMPLE_INTERVAL_MS
 DREAMER_MIN_DECISION_INTERVAL_MS = 500
 DREAMER_DEFAULT_DECISION_INTERVAL_MS = 1000
 DREAMER_MAX_DECISION_INTERVAL_MS = 10_000
+DREAMER_MAX_PRESSURE_TARGET_BAR = 12.0
+DREAMER_MIN_TEMPERATURE_TARGET_C = 20.0
+DREAMER_MAX_TEMPERATURE_TARGET_C = 100.0
+DREAMER_MAX_YIELD_STOP_TARGET_G = 90.0
+DREAMER_MAX_SHOT_DURATION_S = 90.0
 
 DREAMER_DYNAMIC_ACTION_FIELDS = (
     "pressure_target_bar",
@@ -63,6 +68,7 @@ _SAFETY_LIMIT_FIELDS = frozenset(
         "max_temperature_c",
         "min_yield_stop_target_g",
         "max_yield_stop_target_g",
+        "max_shot_duration_s",
         "min_pump_duty",
         "max_pump_duty",
         "min_valve_position",
@@ -74,13 +80,14 @@ _SAFETY_LIMIT_FIELDS = frozenset(
 @dataclass(frozen=True)
 class DreamerControlSafetyLimits:
     min_pressure_bar: float = 0.0
-    max_pressure_bar: float = 15.0
+    max_pressure_bar: float = DREAMER_MAX_PRESSURE_TARGET_BAR
     min_flow_ml_s: float = 0.0
     max_flow_ml_s: float = 20.0
-    min_temperature_c: float = 80.0
-    max_temperature_c: float = 105.0
+    min_temperature_c: float = DREAMER_MIN_TEMPERATURE_TARGET_C
+    max_temperature_c: float = DREAMER_MAX_TEMPERATURE_TARGET_C
     min_yield_stop_target_g: float = 5.0
-    max_yield_stop_target_g: float = 100.0
+    max_yield_stop_target_g: float = DREAMER_MAX_YIELD_STOP_TARGET_G
+    max_shot_duration_s: float = DREAMER_MAX_SHOT_DURATION_S
     min_pump_duty: float = 0.0
     max_pump_duty: float = 1.0
     min_valve_position: float = 0.0
@@ -93,12 +100,18 @@ class DreamerControlSafetyLimits:
         _validate_range(self.min_yield_stop_target_g, self.max_yield_stop_target_g, "yield stop target")
         _validate_range(self.min_pump_duty, self.max_pump_duty, "pump duty")
         _validate_range(self.min_valve_position, self.max_valve_position, "valve position")
-        if self.max_yield_stop_target_g > 100.0:
-            raise ValueError("Dreamer yield stop target safety limit must not exceed 100g")
-        if self.max_temperature_c > 105.0:
-            raise ValueError("Dreamer temperature safety limit must not exceed 105C")
-        if self.max_pressure_bar > 15.0:
-            raise ValueError("Dreamer pressure safety limit must not exceed 15 bar")
+        if not _is_finite_number(self.max_shot_duration_s) or self.max_shot_duration_s <= 0:
+            raise ValueError("Dreamer shot duration safety limit is invalid")
+        if self.max_yield_stop_target_g > DREAMER_MAX_YIELD_STOP_TARGET_G:
+            raise ValueError("Dreamer yield stop target safety limit must not exceed 90g")
+        if self.max_shot_duration_s > DREAMER_MAX_SHOT_DURATION_S:
+            raise ValueError("Dreamer shot duration safety limit must not exceed 90s")
+        if self.min_temperature_c < DREAMER_MIN_TEMPERATURE_TARGET_C:
+            raise ValueError("Dreamer temperature safety limit must not go below 20C")
+        if self.max_temperature_c > DREAMER_MAX_TEMPERATURE_TARGET_C:
+            raise ValueError("Dreamer temperature safety limit must not exceed 100C")
+        if self.max_pressure_bar > DREAMER_MAX_PRESSURE_TARGET_BAR:
+            raise ValueError("Dreamer pressure safety limit must not exceed 12 bar")
         if self.max_flow_ml_s > 20.0:
             raise ValueError("Dreamer flow safety limit must not exceed 20 ml/s")
 
@@ -112,6 +125,7 @@ class DreamerControlSafetyLimits:
             "max_temperature_c": float(self.max_temperature_c),
             "min_yield_stop_target_g": float(self.min_yield_stop_target_g),
             "max_yield_stop_target_g": float(self.max_yield_stop_target_g),
+            "max_shot_duration_s": float(self.max_shot_duration_s),
             "min_pump_duty": float(self.min_pump_duty),
             "max_pump_duty": float(self.max_pump_duty),
             "min_valve_position": float(self.min_valve_position),
@@ -145,11 +159,23 @@ class DreamerControlSafetyLimits:
                 "max_yield_stop_target_g",
                 defaults.max_yield_stop_target_g,
             ),
+            max_shot_duration_s=_optional_float(value, "max_shot_duration_s", defaults.max_shot_duration_s),
             min_pump_duty=_optional_float(value, "min_pump_duty", defaults.min_pump_duty),
             max_pump_duty=_optional_float(value, "max_pump_duty", defaults.max_pump_duty),
             min_valve_position=_optional_float(value, "min_valve_position", defaults.min_valve_position),
             max_valve_position=_optional_float(value, "max_valve_position", defaults.max_valve_position),
         )
+
+
+@dataclass(frozen=True)
+class DreamerDynamicActionSanitization:
+    sanitized_action: dict[str, Any] | None
+    clamped_fields: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
 
 
 @dataclass(frozen=True)
@@ -303,6 +329,56 @@ def validate_dynamic_action_for_control_spec(
     return errors
 
 
+def sanitize_dynamic_action_for_control_spec(
+    action: dict[str, Any] | None,
+    *,
+    control_spec: DreamerControlSpec,
+    step_index: int,
+) -> DreamerDynamicActionSanitization:
+    if action is None:
+        return DreamerDynamicActionSanitization(None)
+    errors: list[str] = []
+    if not isinstance(action, dict):
+        return DreamerDynamicActionSanitization(None, errors=("Dreamer dynamic action must be an object or null",))
+    unknown = sorted(str(key) for key in action if key not in DREAMER_DYNAMIC_ACTION_FIELDS)
+    if unknown:
+        errors.append(f"Dreamer dynamic action contains unsupported fields: {', '.join(unknown[:5])}")
+    if not control_spec.is_decision_step(step_index):
+        errors.append("Dreamer dynamic action may only be emitted on decision steps")
+    if not control_spec.dynamic_control_enabled:
+        errors.append("Dreamer dynamic action provided while dynamic control is disabled")
+    if "pressure_target_bar" in action and "flow_target_ml_s" in action:
+        errors.append("Dreamer dynamic action cannot request pressure and flow targets at the same decision step")
+
+    sanitized: dict[str, Any] = {}
+    clamped_fields: list[str] = []
+    for field_name in DREAMER_DYNAMIC_ACTION_FIELDS:
+        if field_name not in action:
+            continue
+        if not control_spec.control_allowed_for_field(field_name):
+            errors.append(f"Dreamer dynamic action field {field_name} is not allowed by the control spec")
+            continue
+        if field_name == "stop":
+            if not isinstance(action[field_name], bool):
+                errors.append("Dreamer dynamic action stop must be boolean")
+                continue
+            sanitized[field_name] = bool(action[field_name])
+            continue
+        value = action[field_name]
+        action_range = _action_field_range(field_name, control_spec.safety_limits)
+        if action_range is None or not _is_finite_number(value):
+            errors.append(f"Dreamer dynamic action field {field_name} is invalid")
+            continue
+        minimum, maximum = action_range
+        clamped = min(max(float(value), minimum), maximum)
+        sanitized[field_name] = clamped
+        if clamped != float(value):
+            clamped_fields.append(field_name)
+    if errors:
+        return DreamerDynamicActionSanitization(None, errors=tuple(errors))
+    return DreamerDynamicActionSanitization(sanitized, clamped_fields=tuple(clamped_fields))
+
+
 def expand_decision_actions_to_observation_steps(
     decision_actions: Sequence[dict[str, Any] | None],
     *,
@@ -342,6 +418,16 @@ def _validate_action_field(
 ) -> list[str]:
     if field_name == "stop":
         return [] if isinstance(value, bool) else ["Dreamer dynamic action stop must be boolean"]
+    action_range = _action_field_range(field_name, limits)
+    if action_range is None:
+        return [f"Dreamer dynamic action field {field_name} is invalid"]
+    minimum, maximum = action_range
+    if not _is_finite_number(value) or not minimum <= float(value) <= maximum:
+        return [f"Dreamer dynamic action field {field_name} is outside safety limits"]
+    return []
+
+
+def _action_field_range(field_name: str, limits: DreamerControlSafetyLimits) -> tuple[float, float] | None:
     ranges = {
         "pressure_target_bar": (limits.min_pressure_bar, limits.max_pressure_bar),
         "flow_target_ml_s": (limits.min_flow_ml_s, limits.max_flow_ml_s),
@@ -350,10 +436,7 @@ def _validate_action_field(
         "temperature_target_c": (limits.min_temperature_c, limits.max_temperature_c),
         "yield_stop_target_g": (limits.min_yield_stop_target_g, limits.max_yield_stop_target_g),
     }
-    minimum, maximum = ranges[field_name]
-    if not _is_finite_number(value) or not minimum <= float(value) <= maximum:
-        return [f"Dreamer dynamic action field {field_name} is outside safety limits"]
-    return []
+    return ranges.get(field_name)
 
 
 def _validate_range(minimum: float, maximum: float, label: str) -> None:

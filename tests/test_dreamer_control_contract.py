@@ -6,6 +6,7 @@ from espresso_rl.domain.dreamer_control import (
     DreamerControlSafetyLimits,
     DreamerControlSpec,
     expand_decision_actions_to_observation_steps,
+    sanitize_dynamic_action_for_control_spec,
     validate_dynamic_action_for_control_spec,
 )
 from espresso_rl.domain.optimization import (
@@ -30,6 +31,11 @@ class DreamerControlContractTests(unittest.TestCase):
         self.assertTrue(spec.is_decision_step(4))
         self.assertFalse(spec.dynamic_control_enabled)
         self.assertEqual(spec.action_capability_mask(), (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertEqual(spec.safety_limits.max_pressure_bar, 12.0)
+        self.assertEqual(spec.safety_limits.min_temperature_c, 20.0)
+        self.assertEqual(spec.safety_limits.max_temperature_c, 100.0)
+        self.assertEqual(spec.safety_limits.max_yield_stop_target_g, 90.0)
+        self.assertEqual(spec.safety_limits.max_shot_duration_s, 90.0)
 
     def test_control_spec_rejects_implausibly_fast_cadence(self) -> None:
         with self.assertRaisesRegex(ValueError, "sensor cadence"):
@@ -103,6 +109,16 @@ class DreamerControlContractTests(unittest.TestCase):
                 )
             )
         )
+        self.assertTrue(
+            any(
+                "outside safety limits" in error
+                for error in validate_dynamic_action_for_control_spec(
+                    {"yield_stop_target_g": 90.5},
+                    control_spec=spec,
+                    step_index=0,
+                )
+            )
+        )
 
     def test_dynamic_action_rejects_simultaneous_pressure_and_flow_targets(self) -> None:
         spec = DreamerControlSpec(
@@ -119,11 +135,75 @@ class DreamerControlContractTests(unittest.TestCase):
 
         self.assertTrue(any("pressure and flow" in error for error in errors))
 
-    def test_safety_limits_reject_crazy_yield_and_temperature_ranges(self) -> None:
-        with self.assertRaisesRegex(ValueError, "100g"):
-            DreamerControlSafetyLimits(max_yield_stop_target_g=120.0)
-        with self.assertRaisesRegex(ValueError, "105C"):
-            DreamerControlSafetyLimits(max_temperature_c=120.0)
+    def test_safety_limits_reject_crazy_pressure_temperature_yield_and_duration_ranges(self) -> None:
+        with self.assertRaisesRegex(ValueError, "12 bar"):
+            DreamerControlSafetyLimits(max_pressure_bar=12.5)
+        with self.assertRaisesRegex(ValueError, "20C"):
+            DreamerControlSafetyLimits(min_temperature_c=19.5)
+        with self.assertRaisesRegex(ValueError, "100C"):
+            DreamerControlSafetyLimits(max_temperature_c=100.5)
+        with self.assertRaisesRegex(ValueError, "90g"):
+            DreamerControlSafetyLimits(max_yield_stop_target_g=91.0)
+        with self.assertRaisesRegex(ValueError, "90s"):
+            DreamerControlSafetyLimits(max_shot_duration_s=91.0)
+
+    def test_dynamic_action_sanitizer_clamps_finite_values_without_fallback_errors(self) -> None:
+        spec = DreamerControlSpec(
+            dynamic_control_enabled=True,
+            pressure_control_allowed=True,
+            temperature_control_allowed=True,
+            stop_control_allowed=True,
+        )
+
+        sanitized = sanitize_dynamic_action_for_control_spec(
+            {
+                "pressure_target_bar": 13.5,
+                "temperature_target_c": 10.0,
+                "yield_stop_target_g": 120.0,
+                "stop": False,
+            },
+            control_spec=spec,
+            step_index=0,
+        )
+
+        self.assertTrue(sanitized.ok)
+        self.assertEqual(sanitized.errors, ())
+        self.assertEqual(set(sanitized.clamped_fields), {"pressure_target_bar", "temperature_target_c", "yield_stop_target_g"})
+        self.assertEqual(
+            sanitized.sanitized_action,
+            {
+                "pressure_target_bar": 12.0,
+                "temperature_target_c": 20.0,
+                "yield_stop_target_g": 90.0,
+                "stop": False,
+            },
+        )
+
+    def test_dynamic_action_sanitizer_rejects_malformed_or_conflicting_values(self) -> None:
+        spec = DreamerControlSpec(
+            dynamic_control_enabled=True,
+            pressure_control_allowed=True,
+            flow_control_allowed=True,
+            stop_control_allowed=True,
+        )
+
+        conflict = sanitize_dynamic_action_for_control_spec(
+            {"pressure_target_bar": 8.0, "flow_target_ml_s": 2.0},
+            control_spec=spec,
+            step_index=0,
+        )
+        bad_stop = sanitize_dynamic_action_for_control_spec(
+            {"stop": 1},
+            control_spec=spec,
+            step_index=0,
+        )
+
+        self.assertFalse(conflict.ok)
+        self.assertIsNone(conflict.sanitized_action)
+        self.assertTrue(any("pressure and flow" in error for error in conflict.errors))
+        self.assertFalse(bad_stop.ok)
+        self.assertIsNone(bad_stop.sanitized_action)
+        self.assertTrue(any("stop must be boolean" in error for error in bad_stop.errors))
 
     def test_decision_actions_are_held_across_observation_steps(self) -> None:
         spec = DreamerControlSpec(
