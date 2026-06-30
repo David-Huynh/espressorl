@@ -513,6 +513,11 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         "checkpoint_inference_parity_verified": True,
                         "checkpoint_inference_parity_reason": None,
                         "dreamer_v3_available": False,
+                        "dreamer_v3_active_recommendation_count": 2,
+                        "dreamer_v3_bo_fallback_count": 1,
+                        "dreamer_v3_bo_fallback_reason_counts": {"dreamer_candidate_rejected": 1},
+                        "dreamer_v3_last_runtime_event": "bo_fallback",
+                        "dreamer_v3_last_bo_fallback_reason": "dreamer_candidate_rejected",
                         "available_modes": ["bayesian_optimization"],
                         "unavailable_modes": {"dreamer_v3_shadow": "Runtime inference is not enabled."},
                         "fallback_reason": None,
@@ -538,6 +543,17 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertEqual(status["optimizer_model_manifest_trainer_git_sha"], "trainerabc")
             self.assertNotIn("dreamer_v3_shadow", status["optimizer_available_modes"])
             self.assertIn("not enabled", status["optimizer_checkpoint_unavailable_reason"])
+            self.assertEqual(status["optimizer_dreamer_v3_active_recommendation_count"], 2)
+            self.assertEqual(status["optimizer_dreamer_v3_bo_fallback_count"], 1)
+            self.assertEqual(
+                status["optimizer_dreamer_v3_bo_fallback_reason_counts"],
+                {"dreamer_candidate_rejected": 1},
+            )
+            self.assertEqual(status["optimizer_dreamer_v3_last_runtime_event"], "bo_fallback")
+            self.assertEqual(
+                status["optimizer_dreamer_v3_last_bo_fallback_reason"],
+                "dreamer_candidate_rejected",
+            )
 
     def test_status_payload_exposes_only_aggregate_shadow_quality_results(self) -> None:
         class AggregateReport:

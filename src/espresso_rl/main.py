@@ -772,6 +772,11 @@ def build_status_payload(
         "fallback_reason": None
         if config_optimizer_mode == DEFAULT_OPTIMIZER_MODE
         else "Bayesian Optimization is serving recommendations.",
+        "dreamer_v3_active_recommendation_count": 0,
+        "dreamer_v3_bo_fallback_count": 0,
+        "dreamer_v3_bo_fallback_reason_counts": {},
+        "dreamer_v3_last_runtime_event": None,
+        "dreamer_v3_last_bo_fallback_reason": None,
     }
     shadow_summary = {
         "inference_contract_id": None,
@@ -926,6 +931,19 @@ def build_status_payload(
         "optimizer_available_modes": optimizer_status.get("available_modes") or [DEFAULT_OPTIMIZER_MODE],
         "optimizer_unavailable_modes": optimizer_status.get("unavailable_modes") or {},
         "optimizer_fallback_reason": optimizer_status.get("fallback_reason"),
+        "optimizer_dreamer_v3_active_recommendation_count": int(
+            optimizer_status.get("dreamer_v3_active_recommendation_count") or 0
+        ),
+        "optimizer_dreamer_v3_bo_fallback_count": int(
+            optimizer_status.get("dreamer_v3_bo_fallback_count") or 0
+        ),
+        "optimizer_dreamer_v3_bo_fallback_reason_counts": (
+            optimizer_status.get("dreamer_v3_bo_fallback_reason_counts") or {}
+        ),
+        "optimizer_dreamer_v3_last_runtime_event": optimizer_status.get("dreamer_v3_last_runtime_event"),
+        "optimizer_dreamer_v3_last_bo_fallback_reason": optimizer_status.get(
+            "dreamer_v3_last_bo_fallback_reason"
+        ),
         "dreamer_shadow_evaluation": shadow_summary,
         "dreamer_shadow_quality_report": shadow_quality_summary,
         "local_shot_count": len(optimizer_shots),

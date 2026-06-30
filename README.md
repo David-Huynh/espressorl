@@ -676,6 +676,12 @@ artifact SHA-256 matches, checkpoint tensor parity succeeds, and a Dreamer
 optimizer implementation is wired in. If any requirement is missing or the
 candidate fails safety validation, BO remains the fallback. Shadow evaluation is
 for admin/beta evidence and defaults, not a normal-user prerequisite.
+That BO fallback applies only to shot-level Dreamer recipe recommendations.
+Future Dreamer automatic/adaptive profile control must use an explicit
+Dreamer-controlled profile and fail safe if the model is unavailable or unsafe;
+it must not silently switch to BO in the middle of live machine control. Runtime
+status exposes only aggregate active-Dreamer success and BO-fallback counts with
+sanitized reasons, not raw model proposals.
 
 ## Warm-Started BO Priors
 

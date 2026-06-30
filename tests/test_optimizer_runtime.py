@@ -8,6 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import espresso_rl.config as config_module
+from espresso_rl.domain.dreamer_runtime_audit import (
+    DREAMER_FALLBACK_REASON_ACTIVE_UNAVAILABLE,
+    DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED,
+    DREAMER_RUNTIME_EVENT_ACTIVE_RECOMMENDATION,
+    DREAMER_RUNTIME_EVENT_BO_FALLBACK,
+)
 from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
     OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
@@ -28,7 +34,7 @@ class RecordingOptimizer:
 
 class FailingOptimizer:
     def recommend(self, context):
-        raise ValueError("unsafe dreamer proposal")
+        raise ValueError("unsafe dreamer proposal with raw grind=42")
 
 
 class FakeCheckpoint:
@@ -217,6 +223,13 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertEqual(optimizer.recommend(context), "dreamer")
         self.assertEqual(dreamer.contexts, [context])
         self.assertEqual(bo.contexts, [])
+        runtime_status = optimizer.status()
+        self.assertEqual(runtime_status.dreamer_v3_active_recommendation_count, 1)
+        self.assertEqual(runtime_status.dreamer_v3_bo_fallback_count, 0)
+        self.assertEqual(
+            runtime_status.dreamer_v3_last_runtime_event,
+            DREAMER_RUNTIME_EVENT_ACTIVE_RECOMMENDATION,
+        )
 
     def test_active_mode_falls_back_to_bo_without_dreamer_optimizer_or_on_safety_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -263,7 +276,31 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertIn(OPTIMIZER_MODE_DREAMER_V3_ACTIVE, unavailable.unavailable_modes or {})
         context = object()
         self.assertEqual(optimizer.recommend(context), "bo")
+        unavailable_after_recommend = optimizer.status()
+        self.assertEqual(unavailable_after_recommend.dreamer_v3_active_recommendation_count, 0)
+        self.assertEqual(unavailable_after_recommend.dreamer_v3_bo_fallback_count, 1)
+        self.assertEqual(
+            unavailable_after_recommend.dreamer_v3_bo_fallback_reason_counts,
+            {DREAMER_FALLBACK_REASON_ACTIVE_UNAVAILABLE: 1},
+        )
+        self.assertEqual(
+            unavailable_after_recommend.dreamer_v3_last_runtime_event,
+            DREAMER_RUNTIME_EVENT_BO_FALLBACK,
+        )
         self.assertEqual(fallback.recommend(context), "bo_after_error")
+        fallback_status = fallback.status()
+        fallback_payload = json.dumps(fallback_status.to_dict(), sort_keys=True)
+        self.assertEqual(fallback_status.dreamer_v3_active_recommendation_count, 0)
+        self.assertEqual(fallback_status.dreamer_v3_bo_fallback_count, 1)
+        self.assertEqual(
+            fallback_status.dreamer_v3_bo_fallback_reason_counts,
+            {DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED: 1},
+        )
+        self.assertEqual(
+            fallback_status.dreamer_v3_last_bo_fallback_reason,
+            DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED,
+        )
+        self.assertNotIn("raw grind=42", fallback_payload)
 
     def test_model_artifact_hash_mismatch_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
