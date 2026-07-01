@@ -709,6 +709,19 @@ it must not silently switch to BO in the middle of live machine control. Runtime
 status exposes only aggregate active-Dreamer success and BO-fallback counts with
 sanitized reasons, not raw model proposals.
 
+The core live-control command path is machine-agnostic. The application layer
+resolves Dreamer live actions into canonical `accept`, `replay_last`,
+`wait_for_first_command`, or `fail_safe` publications using the active
+`DreamerControlSpec`; unsupported, conflicting, or stale actions fail safe.
+The Gaggimate MQTT adapter translates only those bounded canonical publications
+to non-retained command topics:
+
+- `gaggimate/<machine>/rl/dreamer/live_target`
+- `gaggimate/<machine>/rl/dreamer/fail_safe`
+
+The live target payload requests `ack_scope=esp32_received`; controller-applied
+acknowledgement is intentionally not required by the core contract.
+
 ## Warm-Started BO Priors
 
 Runtime recommendation generation can consume canonical `PriorPoint` values

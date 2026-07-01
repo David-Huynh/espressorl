@@ -13,6 +13,12 @@ from espresso_rl.adapters.sqlite_repositories import (
 )
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.config import Config
+from espresso_rl.domain.dreamer_control import (
+    DREAMER_DYNAMIC_CONTROL_ACCEPT,
+    DREAMER_DYNAMIC_CONTROL_FAIL_SAFE,
+    DreamerLiveControlDecision,
+    DreamerLiveControlPublication,
+)
 from espresso_rl.domain.models import (
     FollowThroughState,
     Recommendation,
@@ -683,6 +689,88 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(decoded["current_absolute_step"], 42)
         self.assertEqual(decoded["absolute_reference_step"], 40)
         self.assertEqual(decoded["projected_absolute_step"], 43)
+
+    def test_publish_dreamer_live_control_target_update_uses_non_retained_command_topic(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+        fake = FakeMQTT()
+        client._client = fake  # type: ignore[assignment]
+
+        publication = DreamerLiveControlPublication(
+            machine_id="gaggimate:AA_BB",
+            profile_id="dreamer_auto",
+            sequence=3,
+            step_index=12,
+            issued_at_ms=22_000,
+            decision=DreamerLiveControlDecision(
+                status=DREAMER_DYNAMIC_CONTROL_ACCEPT,
+                action={"pressure_target_bar": 8.5, "temperature_target_c": 92.0},
+                clamped_fields=("pressure_target_bar",),
+            ),
+        )
+
+        client.publish_dreamer_live_control(publication)
+
+        topic, payload, qos, retain = fake.published[0]
+        self.assertEqual(topic, "gaggimate/AA_BB/rl/dreamer/live_target")
+        self.assertEqual(qos, 1)
+        self.assertFalse(retain)
+        decoded = json.loads(payload)
+        self.assertEqual(decoded["event_type"], "dreamer_live_target_update")
+        self.assertEqual(decoded["publication_id"], "gaggimate:AA_BB:3")
+        self.assertEqual(decoded["ack_scope"], "esp32_received")
+        self.assertTrue(decoded["ack_required"])
+        self.assertFalse(decoded["fail_safe_required"])
+        self.assertEqual(decoded["target_update"]["pressure_target_bar"], 8.5)
+        self.assertEqual(decoded["target_update"]["temperature_target_c"], 92.0)
+        self.assertEqual(decoded["clamped_fields"], ["pressure_target_bar"])
+
+    def test_publish_dreamer_live_control_fail_safe_uses_fail_safe_topic(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+        fake = FakeMQTT()
+        client._client = fake  # type: ignore[assignment]
+
+        publication = DreamerLiveControlPublication(
+            machine_id="gaggimate:AA_BB",
+            profile_id="dreamer_auto",
+            sequence=4,
+            step_index=16,
+            issued_at_ms=26_000,
+            decision=DreamerLiveControlDecision(
+                status=DREAMER_DYNAMIC_CONTROL_FAIL_SAFE,
+                reason="command_timeout",
+            ),
+        )
+
+        client.publish_dreamer_live_control(publication)
+
+        topic, payload, qos, retain = fake.published[0]
+        self.assertEqual(topic, "gaggimate/AA_BB/rl/dreamer/fail_safe")
+        self.assertEqual(qos, 1)
+        self.assertFalse(retain)
+        decoded = json.loads(payload)
+        self.assertEqual(decoded["event_type"], "dreamer_live_fail_safe")
+        self.assertEqual(decoded["reason"], "command_timeout")
+        self.assertTrue(decoded["fallback_required"])
+        self.assertTrue(decoded["fail_safe_required"])
+        self.assertIsNone(decoded["target_update"])
 
     def test_clear_recommendation_publishes_retained_empty_payload(self) -> None:
         client = GaggimateMQTTClient(

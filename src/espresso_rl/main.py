@@ -74,6 +74,7 @@ from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityUploadCredentials
+from espresso_rl.domain.dreamer_control import DreamerLiveControlPublication
 from espresso_rl.domain.events import (
     LocalResetEvent,
     OptimizerSettingsEvent,
@@ -270,6 +271,9 @@ def main() -> None:
     class RuntimePublisher:
         def publish_recommendation(self, recommendation: Recommendation) -> None:
             mqtt_client.publish_recommendation(recommendation)
+
+        def publish_dreamer_live_control(self, publication: DreamerLiveControlPublication) -> None:
+            mqtt_client.publish_dreamer_live_control(publication)
 
         def publish_status(
             self,

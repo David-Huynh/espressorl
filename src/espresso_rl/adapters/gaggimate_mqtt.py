@@ -19,6 +19,7 @@ from espresso_rl.domain.events import (
     ShotProfileEvent,
     UploadQueueMaintenanceEvent,
 )
+from espresso_rl.domain.dreamer_control import DreamerLiveControlPublication
 from espresso_rl.domain.models import Recommendation
 from espresso_rl.domain.models import new_id
 
@@ -110,6 +111,42 @@ class GaggimateMQTTClient:
         }
         self._client.publish(topic, json.dumps(payload), qos=1, retain=True)
         logger.info("Published recommendation %s to %s", recommendation.recommendation_id, topic)
+
+    def publish_dreamer_live_control(self, publication: DreamerLiveControlPublication) -> None:
+        machine_topic_id = _machine_topic_id(publication.machine_id)
+        event_type = (
+            "dreamer_live_fail_safe"
+            if publication.fail_safe_required
+            else "dreamer_live_target_update"
+        )
+        topic_suffix = "fail_safe" if publication.fail_safe_required else "live_target"
+        topic = f"gaggimate/{machine_topic_id}/rl/dreamer/{topic_suffix}"
+        payload = {
+            "event_type": event_type,
+            "schema_version": 1,
+            "publication_id": publication.publication_id,
+            "machine_id": publication.machine_id,
+            "profile_id": publication.profile_id,
+            "sequence": publication.sequence,
+            "step_index": publication.step_index,
+            "issued_at_ms": publication.issued_at_ms,
+            "status": publication.decision.status,
+            "reason": publication.decision.reason,
+            "fail_safe_required": publication.fail_safe_required,
+            "ack_required": True,
+            "ack_scope": "esp32_received",
+            "target_update": publication.action if not publication.fail_safe_required else None,
+            "clamped_fields": list(publication.decision.clamped_fields),
+        }
+        if publication.fail_safe_required:
+            payload["fallback_required"] = True
+        self._client.publish(topic, json.dumps(payload), qos=1, retain=False)
+        logger.info(
+            "Published Dreamer live control %s status=%s to %s",
+            publication.publication_id,
+            publication.decision.status,
+            topic,
+        )
 
     def clear_recommendation(self, machine_id: str) -> None:
         for machine_topic_id in _machine_topic_id_variants(machine_id):

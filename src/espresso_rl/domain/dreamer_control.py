@@ -27,6 +27,8 @@ DREAMER_DYNAMIC_CONTROL_ACCEPT = "accept"
 DREAMER_DYNAMIC_CONTROL_REPLAY_LAST = "replay_last"
 DREAMER_DYNAMIC_CONTROL_WAIT_FOR_FIRST_COMMAND = "wait_for_first_command"
 DREAMER_DYNAMIC_CONTROL_FAIL_SAFE = "fail_safe"
+DREAMER_LIVE_CONTROL_PUBLICATION_FORMAT = "espresso_rl_dreamer_live_control_publication_v1"
+DREAMER_LIVE_CONTROL_PUBLICATION_SCHEMA_VERSION = 1
 
 DREAMER_DYNAMIC_ACTION_FIELDS = (
     "pressure_target_bar",
@@ -195,6 +197,68 @@ class DreamerLiveControlDecision:
     @property
     def fail_safe_required(self) -> bool:
         return self.status == DREAMER_DYNAMIC_CONTROL_FAIL_SAFE
+
+
+@dataclass(frozen=True)
+class DreamerLiveControlPublication:
+    machine_id: str
+    sequence: int
+    step_index: int
+    issued_at_ms: int
+    decision: DreamerLiveControlDecision
+    profile_id: str | None = None
+    format: str = DREAMER_LIVE_CONTROL_PUBLICATION_FORMAT
+    schema_version: int = DREAMER_LIVE_CONTROL_PUBLICATION_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.format != DREAMER_LIVE_CONTROL_PUBLICATION_FORMAT:
+            raise ValueError("Dreamer live control publication format is unsupported")
+        if self.schema_version != DREAMER_LIVE_CONTROL_PUBLICATION_SCHEMA_VERSION:
+            raise ValueError("Dreamer live control publication schema_version is unsupported")
+        if not isinstance(self.machine_id, str) or not self.machine_id.strip():
+            raise ValueError("Dreamer live control publication machine_id is required")
+        _bounded_non_negative_int(self.sequence, "sequence")
+        _bounded_non_negative_int(self.step_index, "step_index")
+        _bounded_non_negative_int(self.issued_at_ms, "issued_at_ms")
+        if not isinstance(self.decision, DreamerLiveControlDecision):
+            raise ValueError("Dreamer live control publication decision is invalid")
+        if self.decision.status not in {
+            DREAMER_DYNAMIC_CONTROL_ACCEPT,
+            DREAMER_DYNAMIC_CONTROL_REPLAY_LAST,
+            DREAMER_DYNAMIC_CONTROL_WAIT_FOR_FIRST_COMMAND,
+            DREAMER_DYNAMIC_CONTROL_FAIL_SAFE,
+        }:
+            raise ValueError("Dreamer live control publication status is unsupported")
+
+    @property
+    def publication_id(self) -> str:
+        return f"{self.machine_id}:{self.sequence}"
+
+    @property
+    def fail_safe_required(self) -> bool:
+        return self.decision.fail_safe_required
+
+    @property
+    def action(self) -> dict[str, Any] | None:
+        return dict(self.decision.action) if self.decision.action is not None else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format": self.format,
+            "schema_version": self.schema_version,
+            "publication_id": self.publication_id,
+            "machine_id": self.machine_id,
+            "profile_id": self.profile_id,
+            "sequence": self.sequence,
+            "step_index": self.step_index,
+            "issued_at_ms": self.issued_at_ms,
+            "status": self.decision.status,
+            "reason": self.decision.reason,
+            "fail_safe_required": self.decision.fail_safe_required,
+            "action": self.action,
+            "clamped_fields": list(self.decision.clamped_fields),
+            "errors": list(self.decision.errors),
+        }
 
 
 @dataclass(frozen=True)
@@ -531,6 +595,12 @@ def _integer_ms(value: object, field_name: str) -> int:
     if parsed != value and not (isinstance(value, str) and str(parsed) == value.strip()):
         raise ValueError(f"Dreamer {field_name} must be an integer millisecond value")
     return parsed
+
+
+def _bounded_non_negative_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"Dreamer live control publication {field_name} must be a non-negative integer")
+    return value
 
 
 def _optional_float(value: dict[str, Any], key: str, default: float) -> float:
