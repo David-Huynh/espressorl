@@ -31,6 +31,7 @@ from espresso_rl.domain.model_manifest import (
 )
 from espresso_rl.domain.optimization import OPTIMIZER_MODE_DREAMER_V3_SHADOW
 from espresso_rl.domain.trainer_artifacts import (
+    TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE,
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
     TRAINER_AUDIT_REPORT_FORMAT,
@@ -49,7 +50,9 @@ from espresso_rl.dreamer.checkpoint_inference import (
 )
 from espresso_rl.dreamer.world_model_training import (
     FixedCadenceWorldModelTrainingError,
+    WorldModelReleaseCandidateConfig,
     WorldModelTrainPreviewConfig,
+    run_fixed_cadence_world_model_release_candidate,
     run_fixed_cadence_world_model_train_preview,
     run_fixed_cadence_world_model_smoke_train,
 )
@@ -201,34 +204,46 @@ def build_dreamer_trainer_artifacts(
         taste_objective_spec=taste_objective_spec,
         training_config=training_config,
     )
+    world_model_release_candidate_result = _world_model_release_candidate_metrics(
+        dreamer_tensor_build["episodes"],
+        control_spec=control_spec,
+        pre_shot_action_spec=pre_shot_action_spec,
+        live_action_spec=live_action_spec,
+        taste_objective_spec=taste_objective_spec,
+        training_config=training_config,
+    )
     world_model_train_preview = (
         world_model_train_preview_result["metrics"] if world_model_train_preview_result is not None else None
     )
+    world_model_release_candidate = (
+        world_model_release_candidate_result["metrics"] if world_model_release_candidate_result is not None else None
+    )
+    world_model_training_result = world_model_release_candidate_result or world_model_train_preview_result
     evaluation_report = (
-        world_model_train_preview.get("evaluation_report") if world_model_train_preview is not None else None
+        world_model_training_result["evaluation_report"] if world_model_training_result is not None else None
     )
     checkpoint_tensors = (
-        world_model_train_preview_result["checkpoint_tensors"] if world_model_train_preview_result is not None else {}
+        world_model_training_result["checkpoint_tensors"] if world_model_training_result is not None else {}
     )
     checkpoint_architecture = (
-        world_model_train_preview_result["checkpoint_architecture"]
-        if world_model_train_preview_result is not None
+        world_model_training_result["checkpoint_architecture"]
+        if world_model_training_result is not None
         else {}
     )
     checkpoint_architecture_sha256 = _sha256_json(checkpoint_architecture)
     inference_probe_sha256 = (
-        world_model_train_preview_result["inference_probe_sha256"]
-        if world_model_train_preview_result is not None
+        world_model_training_result["inference_probe_sha256"]
+        if world_model_training_result is not None
         else None
     )
     heldout_inference_sha256 = (
-        world_model_train_preview_result["heldout_inference_sha256"]
-        if world_model_train_preview_result is not None
+        world_model_training_result["heldout_inference_sha256"]
+        if world_model_training_result is not None
         else None
     )
     parity_batch = (
-        world_model_train_preview_result["parity_batch"]
-        if world_model_train_preview_result is not None
+        world_model_training_result["parity_batch"]
+        if world_model_training_result is not None
         else None
     )
     canonical_training_config_text = _canonical_json(training_config) + "\n"
@@ -238,6 +253,9 @@ def build_dreamer_trainer_artifacts(
     world_model_smoke_sha256 = _sha256_json(world_model_smoke) if world_model_smoke is not None else None
     world_model_train_preview_sha256 = (
         _sha256_json(world_model_train_preview) if world_model_train_preview is not None else None
+    )
+    world_model_release_candidate_sha256 = (
+        _sha256_json(world_model_release_candidate) if world_model_release_candidate is not None else None
     )
     evaluation_report_sha256 = _sha256_json(evaluation_report) if evaluation_report is not None else None
     checkpoint_tensor_manifest = _checkpoint_tensor_manifest(checkpoint_tensors)
@@ -258,6 +276,7 @@ def build_dreamer_trainer_artifacts(
         evaluation_report_sha256=evaluation_report_sha256,
         world_model_smoke_sha256=world_model_smoke_sha256,
         world_model_train_preview_sha256=world_model_train_preview_sha256,
+        world_model_release_candidate_sha256=world_model_release_candidate_sha256,
         artifact_stage=artifact_stage,
         row_count=row_count,
         created_at=created_at,
@@ -314,6 +333,7 @@ def build_dreamer_trainer_artifacts(
                 evaluation_report_sha256=evaluation_report_sha256,
                 world_model_smoke=world_model_smoke,
                 world_model_train_preview=world_model_train_preview,
+                world_model_release_candidate=world_model_release_candidate,
                 artifact_stage=artifact_stage,
             )
         )
@@ -345,7 +365,7 @@ def build_dreamer_trainer_artifacts(
         files=files,
         warnings=(
             f"{artifact_stage} output is a non-runtime safetensors checkpoint and is not inference-ready",
-            "DreamerV3 active inference is not implemented in this command",
+            "DreamerV3 active inference requires a separate explicit release artifact",
         ),
     )
 
@@ -488,9 +508,10 @@ def _world_model_train_preview_metrics(
 ) -> dict[str, Any] | None:
     if training_config.get("artifact_stage") != TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
         return None
-    split = _split_episodes_for_preview(
+    split = _split_episodes_for_training(
         episodes,
         validation_split=float(training_config["world_model_preview_validation_split"]),
+        stage_label="train preview",
     )
     train_batch = build_dreamer_episode_batch(
         split["train_episodes"],
@@ -508,61 +529,20 @@ def _world_model_train_preview_metrics(
         result = run_fixed_cadence_world_model_train_preview(
             train_batch=train_batch,
             validation_batch=validation_batch,
-            config=WorldModelTrainPreviewConfig(
-                seed=int(training_config["seed"]),
-                epochs=int(training_config["world_model_preview_epochs"]),
-                batch_size=int(training_config["world_model_preview_batch_size"]),
-                learning_rate=float(training_config["world_model_preview_learning_rate"]),
-                gradient_steps_per_epoch=int(training_config["world_model_preview_gradient_steps_per_epoch"]),
-                model=DreamerV3WorldModelConfig(
-                    model_preset=str(training_config["world_model_preview_model_preset"]),
-                    deter_dim=int(training_config["world_model_preview_deter_dim"]),
-                    hidden_dim=int(training_config["world_model_preview_hidden_dim"]),
-                    stoch_size=int(training_config["world_model_preview_stoch_size"]),
-                    class_size=int(training_config["world_model_preview_class_size"]),
-                    action_embed_dim=int(training_config["world_model_preview_action_embed_dim"]),
-                    reward_bins=int(training_config["world_model_preview_reward_bins"]),
-                    unimix=float(training_config["world_model_preview_unimix"]),
-                    free_nats=float(training_config["world_model_preview_free_nats"]),
-                    dyn_loss_scale=1.0,
-                    rep_loss_scale=0.1,
-                    observation_loss_scale=1.0,
-                    reward_loss_scale=1.0,
-                    continuation_loss_scale=1.0,
-                ),
-                validation_split=float(training_config["world_model_preview_validation_split"]),
-                early_stop_patience=int(training_config["world_model_preview_early_stop_patience"]),
+            config=_world_model_run_config(
+                "world_model_preview",
+                training_config,
                 control_spec=control_spec,
                 pre_shot_action_spec=pre_shot_action_spec,
                 live_action_spec=live_action_spec,
                 taste_objective_spec=taste_objective_spec,
-                imagination_horizon=int(training_config["world_model_preview_imagination_horizon"]),
-                imagination_actor_hidden_dim=int(
-                    training_config["world_model_preview_imagination_actor_hidden_dim"]
-                ),
-                imagination_critic_hidden_dim=int(
-                    training_config["world_model_preview_imagination_critic_hidden_dim"]
-                ),
-                imagination_actor_entropy_scale=float(
-                    training_config["world_model_preview_imagination_actor_entropy_scale"]
-                ),
-                pre_shot_behavior_loss_scale=float(
-                    training_config["world_model_preview_pre_shot_behavior_loss_scale"]
-                ),
-                imagination_lambda_return=float(training_config["world_model_preview_imagination_lambda_return"]),
-                imagination_discount=float(training_config["world_model_preview_imagination_discount"]),
-                actor_critic_train_steps=int(training_config["world_model_preview_actor_critic_train_steps"]),
-                actor_learning_rate=float(training_config["world_model_preview_actor_learning_rate"]),
-                critic_learning_rate=float(training_config["world_model_preview_critic_learning_rate"]),
-                imagination_batch_size=int(training_config["world_model_preview_imagination_batch_size"]),
-                actor_critic_gradient_clip_norm=float(
-                    training_config["world_model_preview_actor_critic_gradient_clip_norm"]
-                ),
+                config_type=WorldModelTrainPreviewConfig,
             ),
             dataset_split=split["summary"],
         )
         return {
             "metrics": result.to_dict(),
+            "evaluation_report": result.evaluation_report,
             "checkpoint_tensors": result.checkpoint_tensors,
             "checkpoint_architecture": result.checkpoint_architecture.to_dict(),
             "inference_probe_sha256": result.inference_probe_sha256,
@@ -573,13 +553,127 @@ def _world_model_train_preview_metrics(
         raise TrainerArtifactError(f"Dreamer world-model train preview failed: {exc}") from exc
 
 
-def _split_episodes_for_preview(
+def _world_model_release_candidate_metrics(
+    episodes: list[dict[str, Any]],
+    *,
+    control_spec: DreamerControlSpec,
+    pre_shot_action_spec: DreamerPreShotActionSpec,
+    live_action_spec: DreamerLiveActionSpec,
+    taste_objective_spec: DreamerTasteObjectiveSpec,
+    training_config: dict[str, Any],
+) -> dict[str, Any] | None:
+    if training_config.get("artifact_stage") != TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE:
+        return None
+    split = _split_episodes_for_training(
+        episodes,
+        validation_split=float(training_config["world_model_release_validation_split"]),
+        stage_label="release candidate",
+    )
+    train_batch = build_dreamer_episode_batch(
+        split["train_episodes"],
+        control_spec=control_spec,
+        pre_shot_action_spec=pre_shot_action_spec,
+        live_action_spec=live_action_spec,
+    )
+    validation_batch = build_dreamer_episode_batch(
+        split["validation_episodes"],
+        control_spec=control_spec,
+        pre_shot_action_spec=pre_shot_action_spec,
+        live_action_spec=live_action_spec,
+    )
+    try:
+        result = run_fixed_cadence_world_model_release_candidate(
+            train_batch=train_batch,
+            validation_batch=validation_batch,
+            config=_world_model_run_config(
+                "world_model_release",
+                training_config,
+                control_spec=control_spec,
+                pre_shot_action_spec=pre_shot_action_spec,
+                live_action_spec=live_action_spec,
+                taste_objective_spec=taste_objective_spec,
+                config_type=WorldModelReleaseCandidateConfig,
+            ),
+            dataset_split=split["summary"],
+        )
+        return {
+            "metrics": result.to_dict(),
+            "evaluation_report": result.evaluation_report,
+            "checkpoint_tensors": result.checkpoint_tensors,
+            "checkpoint_architecture": result.checkpoint_architecture.to_dict(),
+            "inference_probe_sha256": result.inference_probe_sha256,
+            "heldout_inference_sha256": result.heldout_inference_sha256,
+            "parity_batch": result.parity_batch,
+        }
+    except FixedCadenceWorldModelTrainingError as exc:
+        raise TrainerArtifactError(f"Dreamer world-model release candidate training failed: {exc}") from exc
+
+
+def _world_model_run_config(
+    prefix: str,
+    training_config: dict[str, Any],
+    *,
+    control_spec: DreamerControlSpec,
+    pre_shot_action_spec: DreamerPreShotActionSpec,
+    live_action_spec: DreamerLiveActionSpec,
+    taste_objective_spec: DreamerTasteObjectiveSpec,
+    config_type,
+):
+    kwargs = {
+        "seed": int(training_config["seed"]),
+        "epochs": int(training_config[f"{prefix}_epochs"]),
+        "batch_size": int(training_config[f"{prefix}_batch_size"]),
+        "learning_rate": float(training_config[f"{prefix}_learning_rate"]),
+        "gradient_steps_per_epoch": int(training_config[f"{prefix}_gradient_steps_per_epoch"]),
+        "model": DreamerV3WorldModelConfig(
+            model_preset=str(training_config[f"{prefix}_model_preset"]),
+            deter_dim=int(training_config[f"{prefix}_deter_dim"]),
+            hidden_dim=int(training_config[f"{prefix}_hidden_dim"]),
+            stoch_size=int(training_config[f"{prefix}_stoch_size"]),
+            class_size=int(training_config[f"{prefix}_class_size"]),
+            action_embed_dim=int(training_config[f"{prefix}_action_embed_dim"]),
+            reward_bins=int(training_config[f"{prefix}_reward_bins"]),
+            unimix=float(training_config[f"{prefix}_unimix"]),
+            free_nats=float(training_config[f"{prefix}_free_nats"]),
+            dyn_loss_scale=1.0,
+            rep_loss_scale=0.1,
+            observation_loss_scale=1.0,
+            reward_loss_scale=1.0,
+            continuation_loss_scale=1.0,
+        ),
+        "validation_split": float(training_config[f"{prefix}_validation_split"]),
+        "early_stop_patience": int(training_config[f"{prefix}_early_stop_patience"]),
+        "control_spec": control_spec,
+        "pre_shot_action_spec": pre_shot_action_spec,
+        "live_action_spec": live_action_spec,
+        "taste_objective_spec": taste_objective_spec,
+        "imagination_horizon": int(training_config[f"{prefix}_imagination_horizon"]),
+        "imagination_actor_hidden_dim": int(training_config[f"{prefix}_imagination_actor_hidden_dim"]),
+        "imagination_critic_hidden_dim": int(training_config[f"{prefix}_imagination_critic_hidden_dim"]),
+        "imagination_actor_entropy_scale": float(training_config[f"{prefix}_imagination_actor_entropy_scale"]),
+        "pre_shot_behavior_loss_scale": float(training_config[f"{prefix}_pre_shot_behavior_loss_scale"]),
+        "imagination_lambda_return": float(training_config[f"{prefix}_imagination_lambda_return"]),
+        "imagination_discount": float(training_config[f"{prefix}_imagination_discount"]),
+        "actor_critic_train_steps": int(training_config[f"{prefix}_actor_critic_train_steps"]),
+        "actor_learning_rate": float(training_config[f"{prefix}_actor_learning_rate"]),
+        "critic_learning_rate": float(training_config[f"{prefix}_critic_learning_rate"]),
+        "imagination_batch_size": int(training_config[f"{prefix}_imagination_batch_size"]),
+        "actor_critic_gradient_clip_norm": float(training_config[f"{prefix}_actor_critic_gradient_clip_norm"]),
+    }
+    if config_type is WorldModelReleaseCandidateConfig:
+        kwargs["min_train_episodes"] = int(training_config["world_model_release_min_train_episodes"])
+        kwargs["min_validation_episodes"] = int(training_config["world_model_release_min_validation_episodes"])
+    return config_type(**kwargs)
+
+
+def _split_episodes_for_training(
     episodes: list[dict[str, Any]],
     *,
     validation_split: float,
+    stage_label: str,
 ) -> dict[str, Any]:
     if len(episodes) < 2:
-        raise TrainerArtifactError("Dreamer world-model train preview requires at least two episodes")
+        raise TrainerArtifactError(f"Dreamer world-model {stage_label} requires at least two episodes")
     validation_count = max(1, min(len(episodes) - 1, round(len(episodes) * validation_split)))
     train_episodes = episodes[:-validation_count]
     validation_episodes = episodes[-validation_count:]
@@ -718,6 +812,7 @@ def _audit_report(
     evaluation_report_sha256: str | None,
     world_model_smoke: dict[str, Any] | None,
     world_model_train_preview: dict[str, Any] | None,
+    world_model_release_candidate: dict[str, Any] | None,
     artifact_stage: str,
 ) -> dict[str, Any]:
     return {
@@ -742,17 +837,20 @@ def _audit_report(
         "evaluation_report_sha256": evaluation_report_sha256,
         "world_model_smoke": world_model_smoke,
         "world_model_train_preview": world_model_train_preview,
+        "world_model_release_candidate": world_model_release_candidate,
         "zero_trust": {
             "dataset_manifest_hash_verified": True,
             "training_rows_revalidated": True,
             "dreamer_tensors_revalidated": True,
             "world_model_smoke_trained": world_model_smoke is not None,
             "world_model_train_preview_trained": world_model_train_preview is not None,
+            "world_model_release_candidate_trained": world_model_release_candidate is not None,
             "checkpoint_safetensors_validated": True,
             "deterministic_inference_probe_recorded": inference_probe_sha256 is not None,
             "heldout_inference_parity_verified": heldout_inference_sha256 is not None,
             "absolute_grinder_fields_allowed": False,
             "pickle_outputs_allowed": False,
+            "explicit_release_required": world_model_release_candidate is not None,
             "runtime_inference_enabled": False,
         },
     }
@@ -775,6 +873,7 @@ def _checkpoint_metadata(
     evaluation_report_sha256: str | None,
     world_model_smoke_sha256: str | None,
     world_model_train_preview_sha256: str | None,
+    world_model_release_candidate_sha256: str | None,
     artifact_stage: str,
     row_count: int,
     created_at: int,
@@ -800,6 +899,7 @@ def _checkpoint_metadata(
         "evaluation_report_sha256": evaluation_report_sha256 or "",
         "world_model_smoke_sha256": world_model_smoke_sha256 or "",
         "world_model_train_preview_sha256": world_model_train_preview_sha256 or "",
+        "world_model_release_candidate_sha256": world_model_release_candidate_sha256 or "",
         "row_count": str(row_count),
         "created_at": str(int(created_at)),
     }

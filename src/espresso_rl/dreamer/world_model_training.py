@@ -46,6 +46,8 @@ WORLD_MODEL_SMOKE_FORMAT = "espresso_rl_world_model_smoke_v1"
 WORLD_MODEL_SMOKE_SCHEMA_VERSION = 1
 WORLD_MODEL_TRAIN_PREVIEW_FORMAT = "espresso_rl_world_model_train_preview_v1"
 WORLD_MODEL_TRAIN_PREVIEW_SCHEMA_VERSION = 1
+WORLD_MODEL_RELEASE_CANDIDATE_FORMAT = "espresso_rl_world_model_release_candidate_v1"
+WORLD_MODEL_RELEASE_CANDIDATE_SCHEMA_VERSION = 1
 DREAMER_V3_EVALUATION_REPORT_FORMAT = "espresso_rl_dreamer_v3_offline_evaluation_report_v1"
 DREAMER_V3_EVALUATION_REPORT_SCHEMA_VERSION = 1
 _EVAL_WORLD_MODEL_LOSS_MAX = 1_000_000.0
@@ -103,6 +105,12 @@ class WorldModelTrainPreviewConfig:
     critic_learning_rate: float = 0.0003
     imagination_batch_size: int = 4
     actor_critic_gradient_clip_norm: float = 10.0
+
+
+@dataclass(frozen=True)
+class WorldModelReleaseCandidateConfig(WorldModelTrainPreviewConfig):
+    min_train_episodes: int = 128
+    min_validation_episodes: int = 32
 
 
 @dataclass(frozen=True)
@@ -166,6 +174,54 @@ class WorldModelTrainPreviewResult:
             "inference_probe_sha256": self.inference_probe_sha256,
             "heldout_inference_sha256": self.heldout_inference_sha256,
         }
+
+
+@dataclass(frozen=True)
+class WorldModelReleaseCandidateResult:
+    preview_result: WorldModelTrainPreviewResult
+    config: WorldModelReleaseCandidateConfig
+
+    @property
+    def checkpoint_tensors(self) -> dict[str, torch.Tensor]:
+        return self.preview_result.checkpoint_tensors
+
+    @property
+    def checkpoint_architecture(self) -> DreamerCheckpointArchitecture:
+        return self.preview_result.checkpoint_architecture
+
+    @property
+    def inference_probe_sha256(self) -> str:
+        return self.preview_result.inference_probe_sha256
+
+    @property
+    def heldout_inference_sha256(self) -> str:
+        return self.preview_result.heldout_inference_sha256
+
+    @property
+    def parity_batch(self) -> dict[str, torch.Tensor]:
+        return self.preview_result.parity_batch
+
+    @property
+    def evaluation_report(self) -> dict[str, Any]:
+        report = dict(self.preview_result.evaluation_report)
+        report["contract_only"] = False
+        report["release_candidate"] = True
+        report["inference_ready"] = False
+        report["requires_explicit_release"] = True
+        return report
+
+    def to_dict(self) -> dict[str, Any]:
+        data = self.preview_result.to_dict()
+        data["format"] = WORLD_MODEL_RELEASE_CANDIDATE_FORMAT
+        data["schema_version"] = WORLD_MODEL_RELEASE_CANDIDATE_SCHEMA_VERSION
+        data["release_candidate"] = {
+            "inference_ready": False,
+            "requires_explicit_release": True,
+            "min_train_episodes": self.config.min_train_episodes,
+            "min_validation_episodes": self.config.min_validation_episodes,
+        }
+        data["evaluation_report"] = self.evaluation_report
+        return data
 
 
 class FixedCadenceWorldModelTrainingError(ValueError):
@@ -375,6 +431,23 @@ def run_fixed_cadence_world_model_train_preview(
     )
 
 
+def run_fixed_cadence_world_model_release_candidate(
+    *,
+    train_batch: dict[str, Any],
+    validation_batch: dict[str, Any],
+    config: WorldModelReleaseCandidateConfig,
+    dataset_split: dict[str, Any],
+) -> WorldModelReleaseCandidateResult:
+    _validate_release_candidate_config(config, dataset_split)
+    result = run_fixed_cadence_world_model_train_preview(
+        train_batch=train_batch,
+        validation_batch=validation_batch,
+        config=config,
+        dataset_split=dataset_split,
+    )
+    return WorldModelReleaseCandidateResult(preview_result=result, config=config)
+
+
 def _cpu_float_batch(batch: dict[str, Any]) -> dict[str, torch.Tensor]:
     required = (
         "observations",
@@ -491,18 +564,32 @@ def _context_encoder_for_batch(
 
 
 def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
+    release_candidate = isinstance(config, WorldModelReleaseCandidateConfig)
+    max_epochs = 100_000 if release_candidate else 50
+    max_batch_size = 4096 if release_candidate else 128
+    max_gradient_steps_per_epoch = 100_000 if release_candidate else 32
+    max_early_stop_patience = 100_000 if release_candidate else 20
+    max_imagination_horizon = 256 if release_candidate else 32
+    max_actor_critic_train_steps = 1_000_000 if release_candidate else 128
+    max_imagination_batch_size = 4096 if release_candidate else 128
     if isinstance(config.seed, bool) or not isinstance(config.seed, int) or not 0 <= config.seed <= 2**32 - 1:
         raise FixedCadenceWorldModelTrainingError("world model preview seed must be a uint32 integer")
-    if isinstance(config.epochs, bool) or not isinstance(config.epochs, int) or not 1 <= config.epochs <= 50:
-        raise FixedCadenceWorldModelTrainingError("world model preview epochs must be 1..50")
-    if isinstance(config.batch_size, bool) or not isinstance(config.batch_size, int) or not 1 <= config.batch_size <= 128:
-        raise FixedCadenceWorldModelTrainingError("world model preview batch_size must be 1..128")
+    if isinstance(config.epochs, bool) or not isinstance(config.epochs, int) or not 1 <= config.epochs <= max_epochs:
+        raise FixedCadenceWorldModelTrainingError(f"world model preview epochs must be 1..{max_epochs}")
+    if (
+        isinstance(config.batch_size, bool)
+        or not isinstance(config.batch_size, int)
+        or not 1 <= config.batch_size <= max_batch_size
+    ):
+        raise FixedCadenceWorldModelTrainingError(f"world model preview batch_size must be 1..{max_batch_size}")
     if (
         isinstance(config.gradient_steps_per_epoch, bool)
         or not isinstance(config.gradient_steps_per_epoch, int)
-        or not 1 <= config.gradient_steps_per_epoch <= 32
+        or not 1 <= config.gradient_steps_per_epoch <= max_gradient_steps_per_epoch
     ):
-        raise FixedCadenceWorldModelTrainingError("world model preview gradient_steps_per_epoch must be 1..32")
+        raise FixedCadenceWorldModelTrainingError(
+            f"world model preview gradient_steps_per_epoch must be 1..{max_gradient_steps_per_epoch}"
+        )
     if (
         isinstance(config.validation_split, bool)
         or not isinstance(config.validation_split, (int, float))
@@ -513,22 +600,57 @@ def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
     if (
         isinstance(config.early_stop_patience, bool)
         or not isinstance(config.early_stop_patience, int)
-        or not 1 <= config.early_stop_patience <= 20
+        or not 1 <= config.early_stop_patience <= max_early_stop_patience
     ):
-        raise FixedCadenceWorldModelTrainingError("world model preview early_stop_patience must be 1..20")
-    _range_int(config.imagination_horizon, "imagination_horizon", 1, 32)
+        raise FixedCadenceWorldModelTrainingError(
+            f"world model preview early_stop_patience must be 1..{max_early_stop_patience}"
+        )
+    _range_int(config.imagination_horizon, "imagination_horizon", 1, max_imagination_horizon)
     _range_int(config.imagination_actor_hidden_dim, "imagination_actor_hidden_dim", 8, 2048)
     _range_int(config.imagination_critic_hidden_dim, "imagination_critic_hidden_dim", 8, 2048)
     _range_float(config.imagination_actor_entropy_scale, "imagination_actor_entropy_scale", 0.0, 1.0)
     _range_float(config.imagination_lambda_return, "imagination_lambda_return", 0.0, 1.0)
     _range_float(config.imagination_discount, "imagination_discount", 0.0, 1.0)
-    _range_int(config.actor_critic_train_steps, "actor_critic_train_steps", 1, 128)
-    _range_int(config.imagination_batch_size, "imagination_batch_size", 1, 128)
+    _range_int(config.actor_critic_train_steps, "actor_critic_train_steps", 1, max_actor_critic_train_steps)
+    _range_int(config.imagination_batch_size, "imagination_batch_size", 1, max_imagination_batch_size)
     _range_float(config.actor_critic_gradient_clip_norm, "actor_critic_gradient_clip_norm", 0.1, 100.0)
     _validate_learning_rate(config.actor_learning_rate, "actor")
     _validate_learning_rate(config.critic_learning_rate, "critic")
     _validate_reference_model_config(config.model)
     _validate_learning_rate(config.learning_rate, "world model preview")
+
+
+def _validate_release_candidate_config(
+    config: WorldModelReleaseCandidateConfig,
+    dataset_split: dict[str, Any],
+) -> None:
+    if not isinstance(config, WorldModelReleaseCandidateConfig):
+        raise FixedCadenceWorldModelTrainingError("world model release candidate config is invalid")
+    _validate_preview_config(config)
+    if (
+        isinstance(config.min_train_episodes, bool)
+        or not isinstance(config.min_train_episodes, int)
+        or config.min_train_episodes < 1
+    ):
+        raise FixedCadenceWorldModelTrainingError("world model release min_train_episodes must be positive")
+    if (
+        isinstance(config.min_validation_episodes, bool)
+        or not isinstance(config.min_validation_episodes, int)
+        or config.min_validation_episodes < 1
+    ):
+        raise FixedCadenceWorldModelTrainingError("world model release min_validation_episodes must be positive")
+    train_count = _positive_count(dataset_split.get("train_episode_count"), "train_episode_count")
+    validation_count = _positive_count(dataset_split.get("validation_episode_count"), "validation_episode_count")
+    if train_count < config.min_train_episodes:
+        raise FixedCadenceWorldModelTrainingError("world model release candidate has too few train episodes")
+    if validation_count < config.min_validation_episodes:
+        raise FixedCadenceWorldModelTrainingError("world model release candidate has too few validation episodes")
+
+
+def _positive_count(value: object, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise FixedCadenceWorldModelTrainingError(f"world model release candidate {label} is invalid")
+    return value
 
 
 def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:

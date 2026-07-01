@@ -18,7 +18,10 @@ from espresso_rl.domain.model_checkpoint import (
 )
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
 from espresso_rl.domain.dreamer_live_action import DreamerLiveActionSpec
-from espresso_rl.domain.trainer_artifacts import TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW
+from espresso_rl.domain.trainer_artifacts import (
+    TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE,
+    TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
+)
 from espresso_rl.dreamer.imagination import (
     DreamerV3ImaginationActor,
     DreamerV3ImaginationConfig,
@@ -44,6 +47,12 @@ _COMPONENT_BUFFER_NAMES = {
     ),
     "critic": ("value_bins",),
 }
+_TENSOR_BEARING_STAGES = frozenset(
+    {
+        TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
+        TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE,
+    }
+)
 
 
 class DreamerCheckpointMaterializationError(ValueError):
@@ -133,8 +142,8 @@ def checkpoint_architecture_from_models(
 def materialize_verified_dreamer_checkpoint(
     checkpoint: VerifiedDreamerCheckpoint,
 ) -> DreamerShadowModels:
-    if checkpoint.artifact_stage != TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
-        raise DreamerCheckpointMaterializationError("only train-preview checkpoints contain model tensors")
+    if checkpoint.artifact_stage not in _TENSOR_BEARING_STAGES:
+        raise DreamerCheckpointMaterializationError("checkpoint does not contain model tensors")
     if sys.byteorder != "little":
         raise DreamerCheckpointMaterializationError("checkpoint materialization requires a little-endian runtime")
 

@@ -8,7 +8,9 @@ from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC
 from espresso_rl.dreamer.reference_world_model import default_world_model_config
 from espresso_rl.dreamer.world_model_training import (
     FixedCadenceWorldModelTrainingError,
+    WorldModelReleaseCandidateConfig,
     WorldModelTrainPreviewConfig,
+    run_fixed_cadence_world_model_release_candidate,
     run_fixed_cadence_world_model_train_preview,
     run_fixed_cadence_world_model_smoke_train,
 )
@@ -140,6 +142,56 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         evaluation = result["evaluation_report"]
         self.assertTrue(evaluation["gates"]["action_mask_ok"])
         self.assertEqual(evaluation["actor"]["unsupported_dynamic_action_abs_max"], 0.0)
+
+    def test_release_candidate_training_reports_explicit_release_requirement(self) -> None:
+        config = WorldModelReleaseCandidateConfig(
+            seed=17,
+            epochs=1,
+            batch_size=2,
+            learning_rate=0.001,
+            gradient_steps_per_epoch=1,
+            model=default_world_model_config("espresso_debug"),
+            validation_split=0.25,
+            early_stop_patience=1,
+            control_spec=DEFAULT_DREAMER_CONTROL_SPEC,
+            actor_critic_train_steps=1,
+            imagination_batch_size=2,
+            min_train_episodes=2,
+            min_validation_episodes=1,
+        )
+        split = {
+            "strategy": "test",
+            "train_source_training_row_ids": [1, 2],
+            "validation_source_training_row_ids": [3],
+            "train_episode_count": 2,
+            "validation_episode_count": 1,
+            "validation_split": 0.25,
+        }
+
+        result = run_fixed_cadence_world_model_release_candidate(
+            train_batch=dynamic_control_batch(batch_size=2),
+            validation_batch=dynamic_control_batch(batch_size=1),
+            config=config,
+            dataset_split=split,
+        ).to_dict()
+
+        self.assertEqual(result["format"], "espresso_rl_world_model_release_candidate_v1")
+        self.assertFalse(result["evaluation_report"]["contract_only"])
+        self.assertTrue(result["evaluation_report"]["release_candidate"])
+        self.assertTrue(result["release_candidate"]["requires_explicit_release"])
+        self.assertFalse(result["release_candidate"]["inference_ready"])
+        self.assertEqual(result["release_candidate"]["min_train_episodes"], 2)
+        self.assertEqual(result["release_candidate"]["min_validation_episodes"], 1)
+
+        undersized = dict(split)
+        undersized["train_episode_count"] = 1
+        with self.assertRaisesRegex(FixedCadenceWorldModelTrainingError, "too few train episodes"):
+            run_fixed_cadence_world_model_release_candidate(
+                train_batch=dynamic_control_batch(batch_size=2),
+                validation_batch=dynamic_control_batch(batch_size=1),
+                config=config,
+                dataset_split=undersized,
+            )
 
 
 def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:

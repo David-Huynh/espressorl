@@ -408,6 +408,7 @@ def checkpoint_bundle(
         "evaluation_report_sha256": "7" * 64,
         "world_model_smoke_sha256": "",
         "world_model_train_preview_sha256": "8" * 64,
+        "world_model_release_candidate_sha256": "",
         "row_count": "4",
         "created_at": "1800000000",
     }

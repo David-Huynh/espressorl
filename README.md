@@ -578,6 +578,10 @@ uv run espresso-rl-build-dreamer-artifacts \
   --artifact-stage world_model_train_preview
 
 uv run espresso-rl-build-dreamer-artifacts \
+  --write-default-config training_config.json \
+  --artifact-stage world_model_release_candidate
+
+uv run espresso-rl-build-dreamer-artifacts \
   --dataset-jsonl training_rows.jsonl \
   --dataset-manifest manifest.json \
   --training-config training_config.json \
@@ -620,6 +624,11 @@ metrics in the audit report. After training, it writes a deterministic offline
 evaluation report covering world-model validation loss, reward/continuation
 calibration, critic value error, actor entropy, imagined-return stability, and
 dynamic-action mask conformance.
+For release-candidate training, `world_model_release_candidate` uses the same
+reference-aligned RSSM plus latent-imagination actor/critic path with
+production-oriented hyperparameter limits and minimum train/validation episode
+guards. Its audit section is marked `requires_explicit_release=true`, and the
+model manifest still remains `inference_ready=false`.
 
 It produces:
 
@@ -637,14 +646,16 @@ DreamerV3 model. The
 same reference-aligned categorical RSSM path used by the preview trainer and
 records initial/final losses in `audit_report.json`; `world_model_train_preview`
 extends that to deterministic train/validation curves plus actor/critic
-training curves from latent imagination and an offline evaluation report.
-Neither stage produces a useful runtime model artifact. The train-preview stage
-serializes its deterministic RSSM, trained actor-head, and trained critic-head
-tensors with explicit tensor names, shapes, component metadata, feature-layout
-hash, control-spec hash, pre-shot action spec hash, live-action spec hash,
-taste-objective spec hash, tensor-manifest hash, and evaluation-report hash;
-runtime compatibility should only be set after inference is safe. The command
-has a configurable `--max-dataset-bytes` resource
+training curves from latent imagination and an offline evaluation report. The
+`world_model_release_candidate` stage runs the same checkpoint-producing path
+with larger release-oriented training knobs, but it still does not activate
+runtime inference. Preview and release-candidate stages serialize deterministic
+RSSM, trained actor-head, and trained critic-head tensors with explicit tensor
+names, shapes, component metadata, feature-layout hash, control-spec hash,
+pre-shot action spec hash, live-action spec hash, taste-objective spec hash,
+tensor-manifest hash, and evaluation-report hash; runtime compatibility should
+only be set by a separate explicit release step after inference is safe. The
+command has a configurable `--max-dataset-bytes` resource
 guard, defaulting to 8 GiB, because this skeleton validates JSONL in-process.
 That guard is not a training policy; real large-scale Dreamer training should
 use streaming or sharded dataset loading so the corpus can grow beyond one

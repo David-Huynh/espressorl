@@ -24,6 +24,7 @@ from espresso_rl.application.trainer_artifacts import (
 )
 from espresso_rl.domain.model_manifest import validate_model_manifest
 from espresso_rl.domain.trainer_artifacts import (
+    TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE,
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
     default_training_config,
@@ -478,6 +479,101 @@ class TrainerArtifactTests(unittest.TestCase):
             all(not parameter.requires_grad for parameter in shadow_session.models.context_encoder.parameters())
         )
 
+    def test_world_model_release_candidate_stage_trains_model_without_enabling_runtime(self) -> None:
+        dataset_text, manifest_text = dataset_export_text(
+            [training_row(1), training_row(2), training_row(3), training_row(4)]
+        )
+        config = default_training_config(seed=23, artifact_stage=TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE)
+        config.update(
+            {
+                "world_model_release_epochs": 1,
+                "world_model_release_batch_size": 2,
+                "world_model_release_model_preset": "espresso_debug",
+                "world_model_release_deter_dim": 16,
+                "world_model_release_hidden_dim": 16,
+                "world_model_release_stoch_size": 2,
+                "world_model_release_class_size": 4,
+                "world_model_release_action_embed_dim": 8,
+                "world_model_release_gradient_steps_per_epoch": 1,
+                "world_model_release_early_stop_patience": 1,
+                "world_model_release_imagination_horizon": 3,
+                "world_model_release_imagination_actor_hidden_dim": 16,
+                "world_model_release_imagination_critic_hidden_dim": 16,
+                "world_model_release_actor_critic_train_steps": 1,
+                "world_model_release_imagination_batch_size": 2,
+                "world_model_release_min_train_episodes": 3,
+                "world_model_release_min_validation_episodes": 1,
+            }
+        )
+        config_text = canonical_json(config) + "\n"
+
+        first = build_dreamer_trainer_artifacts(
+            training_rows_jsonl=dataset_text,
+            training_dataset_manifest_json=manifest_text,
+            training_config_json=config_text,
+            trainer_git_sha="trainerabc",
+            created_at=1_800_000_000,
+        )
+        second = build_dreamer_trainer_artifacts(
+            training_rows_jsonl=dataset_text,
+            training_dataset_manifest_json=manifest_text,
+            training_config_json=config_text,
+            trainer_git_sha="trainerabc",
+            created_at=1_800_000_000,
+        )
+
+        first_files = {file.relative_path: file for file in first.files}
+        second_files = {file.relative_path: file for file in second.files}
+        self.assertEqual(first_files[AUDIT_REPORT_FILENAME].content, second_files[AUDIT_REPORT_FILENAME].content)
+        self.assertEqual(first_files[MODEL_FILENAME].content, second_files[MODEL_FILENAME].content)
+        audit = json.loads(first_files[AUDIT_REPORT_FILENAME].content.decode("utf-8"))
+        manifest = json.loads(first_files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
+        model_metadata = safetensors_metadata(first_files[MODEL_FILENAME].content)
+        release = audit["world_model_release_candidate"]
+
+        self.assertEqual(audit["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE)
+        self.assertIsNone(audit["world_model_train_preview"])
+        self.assertEqual(release["format"], "espresso_rl_world_model_release_candidate_v1")
+        self.assertTrue(audit["zero_trust"]["world_model_release_candidate_trained"])
+        self.assertTrue(audit["zero_trust"]["explicit_release_required"])
+        self.assertFalse(audit["zero_trust"]["runtime_inference_enabled"])
+        self.assertFalse(audit["inference_ready"])
+        self.assertFalse(manifest["runtime_compatibility"]["inference_ready"])
+        self.assertEqual(manifest["trainer"]["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE)
+        self.assertEqual(model_metadata["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE)
+        self.assertEqual(len(model_metadata["world_model_release_candidate_sha256"]), 64)
+        self.assertEqual(model_metadata["world_model_train_preview_sha256"], "")
+        self.assertGreater(manifest["model_artifact"]["tensor_count"], 0)
+        self.assertEqual(
+            manifest["model_artifact"]["component_names"],
+            ["actor", "context_encoder", "critic", "world_model"],
+        )
+        self.assertFalse(release["evaluation_report"]["contract_only"])
+        self.assertTrue(release["evaluation_report"]["release_candidate"])
+        self.assertTrue(release["evaluation_report"]["requires_explicit_release"])
+        self.assertFalse(release["evaluation_report"]["inference_ready"])
+        self.assertEqual(release["release_candidate"]["min_train_episodes"], 3)
+        self.assertEqual(release["release_candidate"]["min_validation_episodes"], 1)
+        self.assertEqual(release["actor_critic_train_steps"], 1)
+        validate_dreamer_checkpoint_safetensors(first_files[MODEL_FILENAME].content, manifest)
+
+        loaded = load_verified_dreamer_checkpoint(
+            MemoryArtifactStore(
+                {
+                    MODEL_FILENAME: first_files[MODEL_FILENAME].content,
+                    MODEL_MANIFEST_FILENAME: first_files[MODEL_MANIFEST_FILENAME].content,
+                }
+            ),
+            artifact_reference=MODEL_FILENAME,
+            manifest_reference=MODEL_MANIFEST_FILENAME,
+            expected_artifact_sha256=first_files[MODEL_FILENAME].sha256,
+        )
+        self.assertEqual(loaded.artifact_stage, TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE)
+        shadow_session = build_dreamer_shadow_inference_session(loaded)
+        self.assertTrue(shadow_session.status.parity_verified)
+        self.assertFalse(shadow_session.status.inference_ready)
+        self.assertFalse(shadow_session.status.machine_control_enabled)
+
     def test_checkpoint_safetensors_validation_rejects_manifest_tampering(self) -> None:
         dataset_text, manifest_text = dataset_export_text(
             [training_row(1), training_row(2), training_row(3), training_row(4)]
@@ -638,6 +734,33 @@ class TrainerArtifactTests(unittest.TestCase):
             self.assertEqual(config["world_model_preview_critic_learning_rate"], 0.0003)
             self.assertEqual(config["world_model_preview_imagination_batch_size"], 4)
             self.assertEqual(config["world_model_preview_actor_critic_gradient_clip_norm"], 10.0)
+
+    def test_cli_writes_world_model_release_candidate_default_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "training_config.json"
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = trainer_cli_main(
+                    [
+                        "--write-default-config",
+                        str(config_path),
+                        "--artifact-stage",
+                        "world_model_release_candidate",
+                        "--seed",
+                        "29",
+                    ]
+                )
+
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(config["artifact_stage"], TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE)
+            self.assertEqual(config["seed"], 29)
+            self.assertEqual(config["world_model_release_model_preset"], "espresso_small")
+            self.assertEqual(config["world_model_release_epochs"], 100)
+            self.assertEqual(config["world_model_release_gradient_steps_per_epoch"], 128)
+            self.assertEqual(config["world_model_release_actor_critic_train_steps"], 10_000)
+            self.assertEqual(config["world_model_release_min_train_episodes"], 128)
+            self.assertEqual(config["world_model_release_min_validation_episodes"], 32)
 
 
 def dataset_export_text(rows: list[dict]) -> tuple[str, str]:

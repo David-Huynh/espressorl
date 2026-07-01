@@ -39,6 +39,7 @@ from espresso_rl.domain.model_manifest import (
 )
 from espresso_rl.domain.trainer_artifacts import (
     TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
+    TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE,
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
 )
@@ -53,6 +54,7 @@ _CHECKPOINT_STAGES = frozenset(
         TRAINER_ARTIFACT_STAGE_CONTRACT_ONLY,
         TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE,
         TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
+        TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE,
     }
 )
 _PREVIEW_COMPONENTS = ("actor", "context_encoder", "critic", "world_model")
@@ -116,6 +118,7 @@ _METADATA_FIELDS = frozenset(
         "evaluation_report_sha256",
         "world_model_smoke_sha256",
         "world_model_train_preview_sha256",
+        "world_model_release_candidate_sha256",
         "row_count",
         "created_at",
     }
@@ -423,9 +426,16 @@ def _validate_metadata(
         raise CheckpointLoadError("checkpoint artifact stage is unsupported")
     _nonnegative_decimal(metadata["row_count"], "checkpoint metadata row_count")
     _nonnegative_decimal(metadata["created_at"], "checkpoint metadata created_at")
-    for key in ("world_model_smoke_sha256", "world_model_train_preview_sha256"):
+    for key in (
+        "world_model_smoke_sha256",
+        "world_model_train_preview_sha256",
+        "world_model_release_candidate_sha256",
+    ):
         _optional_sha256(metadata[key], f"checkpoint metadata {key}")
-    if metadata["artifact_stage"] == TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
+    if metadata["artifact_stage"] in (
+        TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
+        TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE,
+    ):
         _require_sha256(metadata["evaluation_report_sha256"], "checkpoint evaluation report SHA-256")
 
 
@@ -458,9 +468,12 @@ def _validate_tensors(
         raise CheckpointLoadError("checkpoint component names do not match manifest")
     if tensor_manifest.get("component_count") != len(component_names) or artifact.get("component_count") != len(component_names):
         raise CheckpointLoadError("checkpoint component count does not match manifest")
-    if artifact_stage == TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
+    if artifact_stage in (
+        TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
+        TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE,
+    ):
         if tuple(component_names) != _PREVIEW_COMPONENTS or not expected_names:
-            raise CheckpointLoadError("checkpoint train-preview components are incomplete")
+            raise CheckpointLoadError("checkpoint Dreamer model components are incomplete")
     elif expected_names:
         raise CheckpointLoadError("checkpoint stage must not contain runtime tensors")
 
