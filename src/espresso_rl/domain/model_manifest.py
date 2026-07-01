@@ -14,8 +14,8 @@ MODEL_MANIFEST_FORMAT = "espresso_rl_model_manifest_v1"
 MODEL_MANIFEST_SCHEMA_VERSION = 1
 MODEL_FAMILY_DREAMER_V3 = "dreamer_v3"
 MODEL_ARTIFACT_FORMAT_SAFETENSORS = "safetensors"
-CHECKPOINT_ARTIFACT_FORMAT = "espresso_rl_dreamer_v3_checkpoint_safetensors_v2"
-CHECKPOINT_ARTIFACT_SCHEMA_VERSION = 2
+CHECKPOINT_ARTIFACT_FORMAT = "espresso_rl_dreamer_v3_checkpoint_safetensors_v3"
+CHECKPOINT_ARTIFACT_SCHEMA_VERSION = 3
 CHECKPOINT_TENSOR_MANIFEST_FORMAT = "espresso_rl_checkpoint_tensor_manifest_v1"
 CHECKPOINT_TENSOR_MANIFEST_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 1
@@ -52,6 +52,8 @@ class ModelManifestValidation:
     dreamer_tensor_contract_sha256: str | None = None
     feature_layout_sha256: str | None = None
     control_spec_sha256: str | None = None
+    pre_shot_action_spec_sha256: str | None = None
+    taste_objective_spec_sha256: str | None = None
     evaluation_report_sha256: str | None = None
     inference_ready: bool | None = None
     architecture_sha256: str | None = None
@@ -152,6 +154,8 @@ def validate_model_manifest(
     dreamer_tensor_contract_sha256 = _sha256(artifact.get("dreamer_tensor_contract_sha256"))
     feature_layout_sha256 = _sha256(artifact.get("feature_layout_sha256"))
     control_spec_sha256 = _sha256(artifact.get("control_spec_sha256"))
+    pre_shot_action_spec_sha256 = _sha256(artifact.get("pre_shot_action_spec_sha256"))
+    taste_objective_spec_sha256 = _sha256(artifact.get("taste_objective_spec_sha256"))
     evaluation_report_value = artifact.get("evaluation_report_sha256")
     evaluation_report_sha256 = _sha256(evaluation_report_value) if evaluation_report_value else None
     architecture_sha256 = _sha256(artifact.get("architecture_sha256"))
@@ -176,6 +180,8 @@ def validate_model_manifest(
         dreamer_tensor_contract_sha256=dreamer_tensor_contract_sha256,
         feature_layout_sha256=feature_layout_sha256,
         control_spec_sha256=control_spec_sha256,
+        pre_shot_action_spec_sha256=pre_shot_action_spec_sha256,
+        taste_objective_spec_sha256=taste_objective_spec_sha256,
         evaluation_report_sha256=evaluation_report_sha256,
         inference_ready=inference_ready,
         architecture_sha256=architecture_sha256,
@@ -206,6 +212,10 @@ def _validate_checkpoint_artifact_metadata(artifact: dict[str, Any], *, required
         return "DreamerV3 model manifest feature_layout_sha256 is invalid."
     if _sha256(artifact.get("control_spec_sha256")) is None:
         return "DreamerV3 model manifest control_spec_sha256 is invalid."
+    if _sha256(artifact.get("pre_shot_action_spec_sha256")) is None:
+        return "DreamerV3 model manifest pre_shot_action_spec_sha256 is invalid."
+    if _sha256(artifact.get("taste_objective_spec_sha256")) is None:
+        return "DreamerV3 model manifest taste_objective_spec_sha256 is invalid."
     if _sha256(artifact.get("architecture_sha256")) is None:
         return "DreamerV3 model manifest architecture_sha256 is invalid."
     if not isinstance(artifact.get("architecture"), dict):

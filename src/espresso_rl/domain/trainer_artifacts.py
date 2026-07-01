@@ -4,6 +4,14 @@ import math
 from typing import Any
 
 from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC, DreamerControlSpec
+from espresso_rl.domain.dreamer_pre_shot import (
+    DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
+    DreamerPreShotActionSpec,
+)
+from espresso_rl.domain.dreamer_taste import (
+    DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC,
+    DreamerTasteObjectiveSpec,
+)
 from espresso_rl.domain.model_manifest import MODEL_FAMILY_DREAMER_V3
 
 TRAINING_CONFIG_FORMAT = "espresso_rl_training_config_v1"
@@ -28,6 +36,8 @@ _TRAINING_CONFIG_FIELDS = frozenset(
         "model_family",
         "artifact_stage",
         "dreamer_control_spec",
+        "dreamer_pre_shot_action_spec",
+        "dreamer_taste_objective_spec",
         "world_model_smoke_steps",
         "world_model_preview_epochs",
         "world_model_preview_batch_size",
@@ -88,6 +98,17 @@ def validate_training_config(config: dict[str, Any]) -> list[str]:
         DreamerControlSpec.from_dict(config.get("dreamer_control_spec"))
     except ValueError as exc:
         errors.append(str(exc))
+    if "dreamer_pre_shot_action_spec" not in config:
+        errors.append("training config dreamer_pre_shot_action_spec is required")
+    else:
+        try:
+            DreamerPreShotActionSpec.from_dict(config.get("dreamer_pre_shot_action_spec"))
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
+    try:
+        DreamerTasteObjectiveSpec.from_dict(config.get("dreamer_taste_objective_spec"))
+    except (TypeError, ValueError) as exc:
+        errors.append(str(exc))
     seed = config.get("seed")
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1:
         errors.append("training config seed must be a uint32 integer")
@@ -108,6 +129,8 @@ def default_training_config(
         "model_family": MODEL_FAMILY_DREAMER_V3,
         "artifact_stage": artifact_stage,
         "dreamer_control_spec": DEFAULT_DREAMER_CONTROL_SPEC.to_dict(),
+        "dreamer_pre_shot_action_spec": DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.to_dict(),
+        "dreamer_taste_objective_spec": DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict(),
         "seed": seed,
     }
     if artifact_stage == TRAINER_ARTIFACT_STAGE_WORLD_MODEL_SMOKE:

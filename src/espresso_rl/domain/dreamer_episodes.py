@@ -11,6 +11,8 @@ from espresso_rl.domain.dreamer_control import (
     DREAMER_MAX_TEMPERATURE_TARGET_C,
     DREAMER_MAX_YIELD_STOP_TARGET_G,
 )
+from espresso_rl.domain.dreamer_pre_shot import validate_dreamer_pre_shot_action
+from espresso_rl.domain.dreamer_taste import validate_dreamer_taste_objective
 from espresso_rl.domain.models import (
     FIXED_CADENCE_MAX_STEPS,
     FIXED_CADENCE_SAMPLE_INTERVAL_MS,
@@ -18,8 +20,8 @@ from espresso_rl.domain.models import (
 )
 from espresso_rl.domain.training import FORBIDDEN_TRAINING_FIELD_NAMES, TRAINING_SOURCE_KINDS
 
-DREAMER_EPISODE_FORMAT = "espresso_rl_dreamer_episode_v2"
-DREAMER_EPISODE_SCHEMA_VERSION = 2
+DREAMER_EPISODE_FORMAT = "espresso_rl_dreamer_episode_v3"
+DREAMER_EPISODE_SCHEMA_VERSION = 3
 
 DREAMER_PROFILE_CHANNELS = (
     "pressure_bar",
@@ -40,6 +42,7 @@ _ROOT_FIELDS = frozenset(
         "source",
         "context",
         "static_context",
+        "pre_shot_action",
         "steps",
         "terminal",
         "recommendation",
@@ -75,20 +78,6 @@ _STATIC_CONTEXT_FIELDS = frozenset(
         "taste_objective",
     }
 )
-_TASTE_OBJECTIVE_FIELDS = frozenset(
-    {
-        "mode",
-        "acidity",
-        "sweetness",
-        "clarity",
-        "body",
-        "bitterness",
-        "chocolatiness",
-        "fruitiness",
-        "roastiness",
-    }
-)
-_TASTE_OBJECTIVE_LEVELS = frozenset({"none", "low", "medium", "high"})
 _STEP_FIELDS = frozenset({"step_index", "elapsed_ms", "observation", "observed_profile_target", "dynamic_action", "constraints"})
 _STEP_OBSERVATION_FIELDS = frozenset(DREAMER_PROFILE_CHANNELS)
 _OBSERVED_PROFILE_TARGET_FIELDS = frozenset(
@@ -199,6 +188,10 @@ def validate_dreamer_episode(episode: dict[str, Any]) -> list[str]:
     if static_context is not None:
         _validate_static_context(static_context, errors)
 
+    pre_shot_action = _require_object(episode, "pre_shot_action", errors)
+    if pre_shot_action is not None:
+        errors.extend(validate_dreamer_pre_shot_action(pre_shot_action))
+
     steps = episode.get("steps")
     if not isinstance(steps, list) or not steps:
         errors.append("episode.steps must be a non-empty list")
@@ -288,17 +281,12 @@ def _validate_static_context(static_context: dict[str, Any], errors: list[str]) 
     _optional_string(static_context.get("profile_type"), "episode.static_context.profile_type", errors)
     _optional_int(static_context.get("profile_phase_count"), "episode.static_context.profile_phase_count", errors)
 
-    taste_objective = static_context.get("taste_objective")
-    if not isinstance(taste_objective, dict):
-        errors.append("episode.static_context.taste_objective must be an object")
-        return
-    _reject_unknown_fields(taste_objective, _TASTE_OBJECTIVE_FIELDS, errors, path="episode.static_context.taste_objective")
-    if taste_objective.get("mode") not in {"auto", "explicit"}:
-        errors.append("episode.static_context.taste_objective.mode is invalid")
-    for key in sorted(_TASTE_OBJECTIVE_FIELDS - {"mode"}):
-        value = taste_objective.get(key)
-        if value is not None and value not in _TASTE_OBJECTIVE_LEVELS:
-            errors.append(f"episode.static_context.taste_objective.{key} is invalid")
+    errors.extend(
+        validate_dreamer_taste_objective(
+            static_context.get("taste_objective"),
+            path="episode.static_context.taste_objective",
+        )
+    )
 
 
 def _validate_step(step: object, expected_index: int, errors: list[str]) -> None:

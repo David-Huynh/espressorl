@@ -504,7 +504,7 @@ should group rows by `install_id`, `machine_id`, `bean_context_id`, and
 `grinder_context_id`.
 
 The Dreamer helper `espresso_rl.dreamer.dataset.load_dreamer_episodes_from_jsonl`
-converts those canonical rows into `espresso_rl_dreamer_episode_v2` shot
+converts those canonical rows into `espresso_rl_dreamer_episode_v3` shot
 episodes for recurrent training. Dreamer uses the additional named
 `fixed_cadence_sequence`, resampled onto exact 250 ms intervals from the first
 real telemetry sample. Shots remain variable length and are padded only during
@@ -541,6 +541,17 @@ cadence. Decision steps are fixed and equally spaced; the batcher forward-fills
 the latest decision as the held action between decision ticks. BO and other
 shot-level optimizers do not emit adaptive in-shot profile controls.
 
+Episode v3 also contains a versioned `pre_shot_action`. It deterministically
+encodes factorized categorical behavior targets for the observed dose, yield,
+initial temperature, pressure-or-flow mode and target, and valve state. A grind
+delta is included only when both the current shot and the immediately previous
+exact install/machine/bean/grinder-context shot have observed relative grind.
+Unknown values remain absent and carry a zero supervision mask; they do not
+discard the rest of the trajectory. The reserved initial-stage-duration field
+stays masked because fixed-cadence target changes cannot prove a profile phase
+boundary. Batches expose pre-shot values, categorical indexes, observation
+masks, and capability masks.
+
 No export artifact uses pickle, model binaries, SQLite dumps, parquet, macros,
 absolute grinder settings, or another executable/opaque format. Trainers should
 publish the model file SHA-256 separately and configure it with
@@ -570,9 +581,13 @@ uv run espresso-rl-build-dreamer-artifacts \
 ```
 
 It validates the dataset hash, revalidates every JSONL transition, rejects
-absolute grinder fields, builds `espresso_rl_dreamer_episode_v2` episodes,
-constructs deterministic Dreamer tensors under the configured control spec,
-writes tensor feature/cadence hashes into the audit report, optionally runs a
+absolute grinder fields, builds `espresso_rl_dreamer_episode_v3` episodes,
+constructs deterministic Dreamer tensors under the configured control and
+pre-shot action specs, writes tensor feature/cadence hashes into the audit
+report, and binds the pre-shot action and taste-objective schema hashes into
+the model manifest and safetensors metadata. The checkpoint loader rejects
+artifacts whose authenticated schemas differ from the runtime contracts. The
+builder optionally runs a
 deterministic CPU-only `world_model_smoke` step through the reference-aligned
 categorical RSSM world model, and writes only fixed safe filenames.
 For a larger offline-loop preview, `world_model_train_preview` deterministically

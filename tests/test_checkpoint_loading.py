@@ -10,6 +10,9 @@ from pathlib import Path
 from espresso_rl.adapters.local_model_store import LocalModelArtifactStore
 from espresso_rl.application.checkpoint_loading import CheckpointLoadError, load_verified_dreamer_checkpoint
 from espresso_rl.domain.model_checkpoint import DreamerCheckpointCompatibility
+from espresso_rl.domain.dreamer_pre_shot import DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC
+from espresso_rl.domain.dreamer_taste import DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC
+from espresso_rl.domain.model_manifest import CHECKPOINT_ARTIFACT_FORMAT, CHECKPOINT_ARTIFACT_SCHEMA_VERSION
 from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
     OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
@@ -51,6 +54,14 @@ class CheckpointLoadingTests(unittest.TestCase):
         self.assertEqual(bytes(checkpoint.tensor_bytes("actor.weight")), struct.pack("<f", 1.0))
         self.assertEqual(checkpoint.artifact_sha256, bundle["artifact_sha256"])
         self.assertEqual(checkpoint.evaluation_report_sha256, "7" * 64)
+        self.assertEqual(
+            checkpoint.pre_shot_action_spec_sha256,
+            sha256_json(DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.to_dict()),
+        )
+        self.assertEqual(
+            checkpoint.taste_objective_spec_sha256,
+            sha256_json(DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict()),
+        )
 
     def test_loads_release_ready_checkpoint_without_local_shadow_promotion(self) -> None:
         bundle = checkpoint_bundle(
@@ -120,6 +131,35 @@ class CheckpointLoadingTests(unittest.TestCase):
                 bundle,
                 compatibility=DreamerCheckpointCompatibility(feature_layout_sha256="9" * 64),
             )
+
+    def test_rejects_runtime_pre_shot_action_spec_mismatch(self) -> None:
+        bundle = checkpoint_bundle()
+
+        with self.assertRaisesRegex(CheckpointLoadError, "pre-shot action spec"):
+            load_bundle(
+                bundle,
+                compatibility=DreamerCheckpointCompatibility(pre_shot_action_spec_sha256="9" * 64),
+            )
+
+    def test_rejects_manifest_pre_shot_spec_that_differs_from_runtime_default(self) -> None:
+        bundle = checkpoint_bundle()
+        bundle["manifest"]["model_artifact"]["pre_shot_action_spec_sha256"] = "9" * 64
+        header, data = split_safetensors(bundle["artifact"])
+        header["__metadata__"]["pre_shot_action_spec_sha256"] = "9" * 64
+        replace_artifact(bundle, encode_safetensors(header, data))
+
+        with self.assertRaisesRegex(CheckpointLoadError, "pre-shot action spec"):
+            load_bundle(bundle)
+
+    def test_rejects_manifest_taste_spec_that_differs_from_runtime_default(self) -> None:
+        bundle = checkpoint_bundle()
+        bundle["manifest"]["model_artifact"]["taste_objective_spec_sha256"] = "9" * 64
+        header, data = split_safetensors(bundle["artifact"])
+        header["__metadata__"]["taste_objective_spec_sha256"] = "9" * 64
+        replace_artifact(bundle, encode_safetensors(header, data))
+
+        with self.assertRaisesRegex(CheckpointLoadError, "taste-objective spec"):
+            load_bundle(bundle)
 
     def test_rejects_invalid_authenticated_runtime_architecture(self) -> None:
         bundle = checkpoint_bundle()
@@ -293,6 +333,8 @@ def checkpoint_bundle(
         },
     }
     control_spec_sha256 = sha256_json(control_spec)
+    pre_shot_action_spec_sha256 = sha256_json(DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.to_dict())
+    taste_objective_spec_sha256 = sha256_json(DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict())
     architecture = {
         "format": "espresso_rl_dreamer_v3_checkpoint_architecture_v1",
         "schema_version": 1,
@@ -337,8 +379,8 @@ def checkpoint_bundle(
     }
     architecture_sha256 = sha256_json(architecture)
     metadata = {
-        "format": "espresso_rl_dreamer_v3_checkpoint_safetensors_v2",
-        "schema_version": "2",
+        "format": CHECKPOINT_ARTIFACT_FORMAT,
+        "schema_version": str(CHECKPOINT_ARTIFACT_SCHEMA_VERSION),
         "model_family": "dreamer_v3",
         "artifact_stage": "world_model_train_preview",
         "inference_ready": "true" if inference_ready else "false",
@@ -347,6 +389,8 @@ def checkpoint_bundle(
         "dreamer_tensor_contract_sha256": "4" * 64,
         "feature_layout_sha256": "5" * 64,
         "control_spec_sha256": control_spec_sha256,
+        "pre_shot_action_spec_sha256": pre_shot_action_spec_sha256,
+        "taste_objective_spec_sha256": taste_objective_spec_sha256,
         "tensor_manifest_sha256": tensor_manifest_sha256,
         "architecture_sha256": architecture_sha256,
         "inference_probe_sha256": "9" * 64,
@@ -366,8 +410,8 @@ def checkpoint_bundle(
         "model_artifact": {
             "format": "safetensors",
             "sha256": artifact_sha256,
-            "checkpoint_format": "espresso_rl_dreamer_v3_checkpoint_safetensors_v2",
-            "checkpoint_schema_version": 2,
+            "checkpoint_format": CHECKPOINT_ARTIFACT_FORMAT,
+            "checkpoint_schema_version": CHECKPOINT_ARTIFACT_SCHEMA_VERSION,
             "tensor_manifest_sha256": tensor_manifest_sha256,
             "architecture": architecture,
             "architecture_sha256": architecture_sha256,
@@ -381,6 +425,8 @@ def checkpoint_bundle(
             "dreamer_tensor_contract_sha256": "4" * 64,
             "feature_layout_sha256": "5" * 64,
             "control_spec_sha256": control_spec_sha256,
+            "pre_shot_action_spec_sha256": pre_shot_action_spec_sha256,
+            "taste_objective_spec_sha256": taste_objective_spec_sha256,
         },
         "dataset": {
             "format": "espresso_rl_training_dataset_v1",

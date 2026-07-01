@@ -5,6 +5,10 @@ import unittest
 
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
 from espresso_rl.domain.dreamer_episodes import DREAMER_EPISODE_FORMAT, validate_dreamer_episode
+from espresso_rl.domain.dreamer_pre_shot import (
+    DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
+    DREAMER_PRE_SHOT_ACTION_FIELDS,
+)
 from espresso_rl.dreamer.dataset import (
     DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
     DREAMER_CONTEXT_WINDOW_SIZE,
@@ -141,6 +145,115 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(batch["static_context"][0, grind_mask_index].item(), 0.0)
         self.assertEqual(batch["static_context"][0, dose_mask_index].item(), 0.0)
         self.assertEqual(batch["static_context"][0, yield_mask_index].item(), 1.0)
+
+    def test_pre_shot_actions_are_deterministic_and_grind_delta_uses_exact_context_history(self) -> None:
+        episodes = build_dreamer_episodes_from_training_rows(
+            [
+                training_row(1, action_overrides={"relative_grind_steps_from_reference": 0.0}),
+                training_row(
+                    2,
+                    action_overrides={
+                        "relative_grind_steps_from_reference": 3.0,
+                        "relative_grind_um_from_reference": 37.5,
+                    },
+                ),
+            ]
+        )
+
+        first_action = episodes[0]["pre_shot_action"]
+        second_action = episodes[1]["pre_shot_action"]
+        self.assertFalse(first_action["observed"]["grind_delta_steps_from_current"])
+        self.assertNotIn("grind_delta_steps_from_current", first_action["values"])
+        self.assertEqual(second_action["values"]["grind_delta_steps_from_current"], 3.0)
+        self.assertEqual(second_action["values"]["dose_target_g"], 18.0)
+        self.assertEqual(second_action["values"]["yield_target_g"], 36.0)
+        self.assertEqual(second_action["values"]["pump_target_mode"], 1)
+        self.assertEqual(second_action["values"]["pressure_target_bar"], 8.0)
+        self.assertEqual(second_action["values"]["temperature_target_c"], 92.5)
+        self.assertFalse(second_action["capabilities"]["flow_target_ml_s"])
+
+        batch = build_dreamer_episode_batch(episodes)
+        grind_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("grind_delta_steps_from_current")
+        pressure_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("pressure_target_bar")
+        expected_grind_bin = DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.bins[
+            "grind_delta_steps_from_current"
+        ].index(3.0)
+        self.assertEqual(batch["pre_shot_action_mask"][:, grind_index].tolist(), [0.0, 1.0])
+        self.assertEqual(batch["pre_shot_action_indexes"][1, grind_index].item(), expected_grind_bin)
+        self.assertEqual(batch["pre_shot_actions"][1, pressure_index].item(), 8.0)
+
+    def test_unknown_grind_does_not_cross_or_poison_context_boundaries(self) -> None:
+        episodes = build_dreamer_episodes_from_training_rows(
+            [
+                training_row(1, bean_context_id="bean_a"),
+                training_row(
+                    2,
+                    bean_context_id="bean_a",
+                    action_overrides={"observed": {"grind": False, "dose": True, "target_yield": True}},
+                ),
+                training_row(
+                    3,
+                    bean_context_id="bean_a",
+                    action_overrides={
+                        "relative_grind_steps_from_reference": 2.0,
+                        "relative_grind_um_from_reference": 25.0,
+                    },
+                ),
+                training_row(
+                    4,
+                    bean_context_id="bean_b",
+                    action_overrides={
+                        "relative_grind_steps_from_reference": 9.0,
+                        "relative_grind_um_from_reference": 112.5,
+                    },
+                ),
+            ]
+        )
+
+        by_row = {episode["source_training_row_id"]: episode for episode in episodes}
+        self.assertFalse(by_row[1]["pre_shot_action"]["observed"]["grind_delta_steps_from_current"])
+        self.assertFalse(by_row[2]["pre_shot_action"]["observed"]["grind_delta_steps_from_current"])
+        self.assertFalse(by_row[3]["pre_shot_action"]["observed"]["grind_delta_steps_from_current"])
+        self.assertFalse(by_row[4]["pre_shot_action"]["observed"]["grind_delta_steps_from_current"])
+
+    def test_pre_shot_flow_mode_is_extracted_without_fabricating_stage_duration(self) -> None:
+        episode = build_dreamer_episodes_from_training_rows(
+            [
+                training_row(
+                    1,
+                    observation_overrides={
+                        "fixed_cadence_sequence": fixed_cadence_sequence(
+                            pressure_target_bar=[1.0, 1.0, 8.0, 8.0],
+                            pump_flow_target_ml_s=[2.0, 2.0, 0.0, 0.0],
+                            pump_target_mode=[2, 2, 1, 1],
+                        )
+                    },
+                )
+            ]
+        )[0]
+
+        action = episode["pre_shot_action"]
+        self.assertEqual(action["values"]["pump_target_mode"], 2)
+        self.assertEqual(action["values"]["flow_target_ml_s"], 2.0)
+        self.assertNotIn("pressure_target_bar", action["values"])
+        self.assertTrue(action["capabilities"]["pressure_target_bar"])
+        self.assertTrue(action["capabilities"]["flow_target_ml_s"])
+        self.assertNotIn("initial_stage_duration_s", action["values"])
+        self.assertFalse(action["observed"]["initial_stage_duration_s"])
+        self.assertFalse(action["capabilities"]["initial_stage_duration_s"])
+
+    def test_pre_shot_extraction_rejects_unsafe_initial_profile_target(self) -> None:
+        row = training_row(
+            1,
+            observation_overrides={
+                "fixed_cadence_sequence": fixed_cadence_sequence(
+                    pressure_target_bar=[13.0, 13.0, 13.0, 13.0]
+                )
+            },
+        )
+
+        with self.assertRaisesRegex(DreamerEpisodeDatasetError, "pressure_target_bar is outside hard bounds"):
+            build_dreamer_episodes_from_training_rows([row])
 
     def test_future_dynamic_yield_stop_target_is_not_initial_static_yield(self) -> None:
         episode = build_dreamer_episodes_from_training_rows([training_row(1)])[0]

@@ -93,8 +93,8 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertFalse(audit["inference_ready"])
         self.assertTrue(audit["zero_trust"]["dreamer_tensors_revalidated"])
         tensor_contract = audit["dreamer_tensor_contract"]
-        self.assertEqual(tensor_contract["episode_format"], "espresso_rl_dreamer_episode_v2")
-        self.assertEqual(tensor_contract["episode_schema_version"], 2)
+        self.assertEqual(tensor_contract["episode_format"], "espresso_rl_dreamer_episode_v3")
+        self.assertEqual(tensor_contract["episode_schema_version"], 3)
         self.assertEqual(tensor_contract["episode_count"], 1)
         self.assertEqual(tensor_contract["episode_length_steps"], {"avg": 4.0, "max": 4, "min": 4})
         self.assertEqual(tensor_contract["observation_interval_ms"], 250)
@@ -103,12 +103,17 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(tensor_contract["context_window_size"], 16)
         self.assertEqual(tensor_contract["tensor_shapes"]["observations"], [1, 4, 5])
         self.assertEqual(tensor_contract["tensor_shapes"]["dynamic_actions"], [1, 4, 7])
+        self.assertEqual(tensor_contract["tensor_shapes"]["pre_shot_actions"], [1, 9])
+        self.assertEqual(tensor_contract["tensor_shapes"]["pre_shot_action_indexes"], [1, 9])
+        self.assertEqual(tensor_contract["tensor_shapes"]["pre_shot_action_mask"], [1, 9])
+        self.assertEqual(tensor_contract["tensor_shapes"]["pre_shot_capability_mask"], [1, 9])
         self.assertEqual(tensor_contract["tensor_shapes"]["context_static"], [1, 16, 20])
         self.assertEqual(tensor_contract["tensor_shapes"]["context_terminal"], [1, 16, 18])
         self.assertEqual(tensor_contract["tensor_shapes"]["context_trajectory_embedding"], [1, 16, 77])
         self.assertEqual(tensor_contract["tensor_shapes"]["context_mask"], [1, 16])
         self.assertIn("temperature_c", tensor_contract["feature_names"]["observations"])
         self.assertIn("yield_stop_target_g", tensor_contract["feature_names"]["dynamic_actions"])
+        self.assertIn("pump_target_mode", tensor_contract["feature_names"]["pre_shot_actions"])
         self.assertIn("reward", tensor_contract["feature_names"]["context_terminal"])
         self.assertIn(
             "observation_pressure_bar_mean",
@@ -116,7 +121,25 @@ class TrainerArtifactTests(unittest.TestCase):
         )
         self.assertEqual(len(tensor_contract["feature_layout_sha256"]), 64)
         self.assertEqual(len(tensor_contract["control_spec_sha256"]), 64)
+        self.assertEqual(len(tensor_contract["pre_shot_action_spec_sha256"]), 64)
+        self.assertEqual(len(tensor_contract["taste_objective_spec_sha256"]), 64)
         self.assertEqual(len(tensor_contract["tensor_contract_sha256"]), 64)
+        self.assertEqual(
+            manifest["model_artifact"]["pre_shot_action_spec_sha256"],
+            tensor_contract["pre_shot_action_spec_sha256"],
+        )
+        self.assertEqual(
+            model_metadata["pre_shot_action_spec_sha256"],
+            tensor_contract["pre_shot_action_spec_sha256"],
+        )
+        self.assertEqual(
+            manifest["model_artifact"]["taste_objective_spec_sha256"],
+            tensor_contract["taste_objective_spec_sha256"],
+        )
+        self.assertEqual(
+            model_metadata["taste_objective_spec_sha256"],
+            tensor_contract["taste_objective_spec_sha256"],
+        )
         self.assertTrue(audit["zero_trust"]["checkpoint_safetensors_validated"])
         self.assertIn(f"{files[MODEL_FILENAME].sha256}  {MODEL_FILENAME}", files[CHECKSUMS_FILENAME].content.decode("utf-8"))
         loaded = load_verified_dreamer_checkpoint(
@@ -204,6 +227,41 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(tensor_contract["decision_interval_ms"], 500)
         self.assertEqual(tensor_contract["decision_step_count"], 2)
         self.assertTrue(tensor_contract["control_spec"]["pressure_control_allowed"])
+
+    def test_training_config_pre_shot_spec_changes_authenticated_contract(self) -> None:
+        dataset_text, manifest_text = dataset_export_text([training_row(1)])
+        config = default_training_config()
+        config["dreamer_pre_shot_action_spec"]["bins"]["pressure_target_bar"] = [
+            float(value) for value in range(13)
+        ]
+
+        result = build_dreamer_trainer_artifacts(
+            training_rows_jsonl=dataset_text,
+            training_dataset_manifest_json=manifest_text,
+            training_config_json=canonical_json(config) + "\n",
+            trainer_git_sha="trainerabc",
+        )
+
+        files = {file.relative_path: file for file in result.files}
+        audit = json.loads(files[AUDIT_REPORT_FILENAME].content.decode("utf-8"))
+        manifest = json.loads(files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
+        metadata = safetensors_metadata(files[MODEL_FILENAME].content)
+        expected_hash = audit["dreamer_tensor_contract"]["pre_shot_action_spec_sha256"]
+        self.assertEqual(manifest["model_artifact"]["pre_shot_action_spec_sha256"], expected_hash)
+        self.assertEqual(metadata["pre_shot_action_spec_sha256"], expected_hash)
+
+    def test_rejects_training_config_without_pre_shot_contract(self) -> None:
+        dataset_text, manifest_text = dataset_export_text([training_row(1)])
+        config = default_training_config()
+        config.pop("dreamer_pre_shot_action_spec")
+
+        with self.assertRaisesRegex(TrainerArtifactError, "dreamer_pre_shot_action_spec is required"):
+            build_dreamer_trainer_artifacts(
+                training_rows_jsonl=dataset_text,
+                training_dataset_manifest_json=manifest_text,
+                training_config_json=canonical_json(config) + "\n",
+                trainer_git_sha="trainerabc",
+            )
 
     def test_world_model_smoke_stage_writes_deterministic_metrics_without_inference_ready(self) -> None:
         dataset_text, manifest_text = dataset_export_text([training_row(1)])

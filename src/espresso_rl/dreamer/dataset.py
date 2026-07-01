@@ -29,6 +29,20 @@ from espresso_rl.domain.dreamer_episodes import (
     DREAMER_EPISODE_SCHEMA_VERSION,
     validate_dreamer_episode,
 )
+from espresso_rl.domain.dreamer_pre_shot import (
+    DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
+    DREAMER_PRE_SHOT_ACTION_FIELDS,
+    DREAMER_PUMP_TARGET_MODE_FLOW,
+    DREAMER_PUMP_TARGET_MODE_PRESSURE,
+    DreamerPreShotActionSpec,
+    build_dreamer_pre_shot_action,
+    encode_dreamer_pre_shot_action,
+    validate_dreamer_pre_shot_action,
+)
+from espresso_rl.domain.dreamer_taste import (
+    DREAMER_TASTE_OBJECTIVE_ATTRIBUTES,
+    DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING,
+)
 from espresso_rl.domain.training import validate_training_transition
 
 from ..models import ShotRecord
@@ -64,14 +78,7 @@ DREAMER_STATIC_CONTEXT_FEATURES = (
     "step_direction_sign",
     "profile_phase_count",
     "taste_objective_auto",
-    "taste_objective_acidity",
-    "taste_objective_sweetness",
-    "taste_objective_clarity",
-    "taste_objective_body",
-    "taste_objective_bitterness",
-    "taste_objective_chocolatiness",
-    "taste_objective_fruitiness",
-    "taste_objective_roastiness",
+    *(f"taste_objective_{attribute}" for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES),
 )
 DREAMER_TERMINAL_FEATURES = (
     "beverage_out_g",
@@ -121,10 +128,7 @@ DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES = (
 )
 _TASTE_LEVEL_VALUES = {
     None: 0.0,
-    "none": 0.0,
-    "low": 1.0 / 3.0,
-    "medium": 2.0 / 3.0,
-    "high": 1.0,
+    **DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING,
 }
 
 
@@ -196,6 +200,7 @@ def load_dreamer_episodes_from_jsonl(
     training_rows_jsonl: str,
     *,
     require_profile: bool = True,
+    pre_shot_action_spec: DreamerPreShotActionSpec | dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line_number, line in enumerate(training_rows_jsonl.splitlines(), start=1):
@@ -208,14 +213,20 @@ def load_dreamer_episodes_from_jsonl(
         if not isinstance(row, dict):
             raise DreamerEpisodeDatasetError(f"training row {line_number} must be an object")
         rows.append(row)
-    return build_dreamer_episodes_from_training_rows(rows, require_profile=require_profile)
+    return build_dreamer_episodes_from_training_rows(
+        rows,
+        require_profile=require_profile,
+        pre_shot_action_spec=pre_shot_action_spec,
+    )
 
 
 def build_dreamer_episodes_from_training_rows(
     rows: Iterable[dict[str, Any]],
     *,
     require_profile: bool = True,
+    pre_shot_action_spec: DreamerPreShotActionSpec | dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    resolved_pre_shot_spec = _resolve_pre_shot_action_spec(pre_shot_action_spec)
     episodes: list[dict[str, Any]] = []
     for row in rows:
         row_id = row.get("training_row_id") if isinstance(row, dict) else "unknown"
@@ -233,12 +244,26 @@ def build_dreamer_episodes_from_training_rows(
         _require_dreamer_profile_inputs(row["observation"], row_id)
 
         episode = _episode_from_training_row(row)
-        episode_errors = validate_dreamer_episode(episode)
-        if episode_errors:
-            raise DreamerEpisodeDatasetError(f"training row {row_id} produced invalid Dreamer episode: {'; '.join(episode_errors[:10])}")
         episodes.append(episode)
 
-    return sorted(episodes, key=_episode_sort_key)
+    sorted_episodes = sorted(episodes, key=_episode_sort_key)
+    _attach_pre_shot_actions(sorted_episodes, spec=resolved_pre_shot_spec)
+    for episode in sorted_episodes:
+        episode_errors = validate_dreamer_episode(episode)
+        if episode_errors:
+            row_id = episode.get("source_training_row_id", "unknown")
+            raise DreamerEpisodeDatasetError(f"training row {row_id} produced invalid Dreamer episode: {'; '.join(episode_errors[:10])}")
+        pre_shot_errors = validate_dreamer_pre_shot_action(
+            episode["pre_shot_action"],
+            spec=resolved_pre_shot_spec,
+        )
+        if pre_shot_errors:
+            row_id = episode.get("source_training_row_id", "unknown")
+            raise DreamerEpisodeDatasetError(
+                f"training row {row_id} produced invalid Dreamer pre-shot action: {'; '.join(pre_shot_errors[:10])}"
+            )
+
+    return sorted_episodes
 
 
 def build_dreamer_episode_batch(
@@ -246,6 +271,7 @@ def build_dreamer_episode_batch(
     *,
     pad_to_step_count: int | None = None,
     control_spec: DreamerControlSpec | dict[str, Any] | None = None,
+    pre_shot_action_spec: DreamerPreShotActionSpec | dict[str, Any] | None = None,
     context_window_size: int = DREAMER_CONTEXT_WINDOW_SIZE,
     device: torch.device | str | None = None,
 ) -> dict[str, Any]:
@@ -253,6 +279,7 @@ def build_dreamer_episode_batch(
     if not sorted_episodes:
         raise DreamerEpisodeDatasetError("Dreamer episode batch must contain at least one episode")
     resolved_control_spec = _resolve_control_spec(control_spec)
+    resolved_pre_shot_spec = _resolve_pre_shot_action_spec(pre_shot_action_spec)
     context_window_size = _context_window_size(context_window_size)
     context_windows = _context_windows(sorted_episodes, context_window_size)
 
@@ -268,6 +295,10 @@ def build_dreamer_episode_batch(
     observed_target_mask = np.zeros_like(observed_targets)
     dynamic_actions = np.zeros((batch_size, max_steps, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=np.float32)
     dynamic_action_mask = np.zeros_like(dynamic_actions)
+    pre_shot_actions = np.zeros((batch_size, len(DREAMER_PRE_SHOT_ACTION_FIELDS)), dtype=np.float32)
+    pre_shot_action_indexes = np.zeros((batch_size, len(DREAMER_PRE_SHOT_ACTION_FIELDS)), dtype=np.int64)
+    pre_shot_action_mask = np.zeros_like(pre_shot_actions)
+    pre_shot_capability_mask = np.zeros_like(pre_shot_actions)
     control_action_mask = np.zeros_like(dynamic_actions)
     constraints = np.zeros((batch_size, max_steps, len(DREAMER_CONSTRAINT_FEATURES)), dtype=np.float32)
     decision_step_mask = np.zeros((batch_size, max_steps), dtype=np.float32)
@@ -295,6 +326,23 @@ def build_dreamer_episode_batch(
         steps = episode["steps"]
         valid_step_count = len(steps)
         held_dynamic_action: dict[str, Any] | None = None
+        try:
+            (
+                encoded_pre_shot_values,
+                encoded_pre_shot_indexes,
+                encoded_pre_shot_mask,
+                encoded_pre_shot_capabilities,
+            ) = encode_dreamer_pre_shot_action(
+                episode["pre_shot_action"],
+                spec=resolved_pre_shot_spec,
+            )
+        except ValueError as exc:
+            label = episode.get("episode_id", batch_index)
+            raise DreamerEpisodeDatasetError(f"Dreamer episode {label} pre-shot action is invalid: {exc}") from exc
+        pre_shot_actions[batch_index] = np.asarray(encoded_pre_shot_values, dtype=np.float32)
+        pre_shot_action_indexes[batch_index] = np.asarray(encoded_pre_shot_indexes, dtype=np.int64)
+        pre_shot_action_mask[batch_index] = np.asarray(encoded_pre_shot_mask, dtype=np.float32)
+        pre_shot_capability_mask[batch_index] = np.asarray(encoded_pre_shot_capabilities, dtype=np.float32)
         static_context[batch_index] = _encode_static_context(episode["static_context"])
         terminal[batch_index] = _encode_terminal(episode["terminal"])
         terminal_reward = _finite_or_zero(episode["terminal"].get("reward"))
@@ -363,6 +411,10 @@ def build_dreamer_episode_batch(
         "observed_profile_target_mask": torch.tensor(observed_target_mask, dtype=torch.float32, device=target_device),
         "dynamic_actions": torch.tensor(dynamic_actions, dtype=torch.float32, device=target_device),
         "dynamic_action_mask": torch.tensor(dynamic_action_mask, dtype=torch.float32, device=target_device),
+        "pre_shot_actions": torch.tensor(pre_shot_actions, dtype=torch.float32, device=target_device),
+        "pre_shot_action_indexes": torch.tensor(pre_shot_action_indexes, dtype=torch.long, device=target_device),
+        "pre_shot_action_mask": torch.tensor(pre_shot_action_mask, dtype=torch.float32, device=target_device),
+        "pre_shot_capability_mask": torch.tensor(pre_shot_capability_mask, dtype=torch.float32, device=target_device),
         "control_action_mask": torch.tensor(control_action_mask, dtype=torch.float32, device=target_device),
         "constraints": torch.tensor(constraints, dtype=torch.float32, device=target_device),
         "decision_step_mask": torch.tensor(decision_step_mask, dtype=torch.float32, device=target_device),
@@ -392,11 +444,16 @@ def build_dreamer_episode_batch(
         "episode_ids": tuple(episode_ids),
         "context_window_size": context_window_size,
         "control_spec": resolved_control_spec.to_dict(),
+        "pre_shot_action_spec": resolved_pre_shot_spec.to_dict(),
         "feature_names": {
             "observations": DREAMER_OBSERVATION_FEATURES,
             "observed_profile_targets": DREAMER_OBSERVED_TARGET_FEATURES,
             "observed_profile_target_mask": DREAMER_OBSERVED_TARGET_FEATURES,
             "dynamic_actions": DREAMER_DYNAMIC_ACTION_FEATURES,
+            "pre_shot_actions": DREAMER_PRE_SHOT_ACTION_FIELDS,
+            "pre_shot_action_indexes": DREAMER_PRE_SHOT_ACTION_FIELDS,
+            "pre_shot_action_mask": DREAMER_PRE_SHOT_ACTION_FIELDS,
+            "pre_shot_capability_mask": DREAMER_PRE_SHOT_ACTION_FIELDS,
             "control_action_mask": DREAMER_DYNAMIC_ACTION_FEATURES,
             "constraints": DREAMER_CONSTRAINT_FEATURES,
             "static_context": DREAMER_STATIC_CONTEXT_FEATURES,
@@ -428,6 +485,109 @@ def _resolve_control_spec(control_spec: DreamerControlSpec | dict[str, Any] | No
     if isinstance(control_spec, DreamerControlSpec):
         return control_spec
     return DreamerControlSpec.from_dict(control_spec)
+
+
+def _resolve_pre_shot_action_spec(
+    spec: DreamerPreShotActionSpec | dict[str, Any] | None,
+) -> DreamerPreShotActionSpec:
+    if isinstance(spec, DreamerPreShotActionSpec):
+        return spec
+    try:
+        return DreamerPreShotActionSpec.from_dict(spec)
+    except (TypeError, ValueError) as exc:
+        raise DreamerEpisodeDatasetError(f"Dreamer pre-shot action spec is invalid: {exc}") from exc
+
+
+def _attach_pre_shot_actions(
+    episodes: list[dict[str, Any]],
+    *,
+    spec: DreamerPreShotActionSpec,
+) -> None:
+    previous_by_context: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for episode in episodes:
+        group_key = _context_group_key(episode)
+        previous = previous_by_context.get(group_key)
+        try:
+            action = _pre_shot_action_from_episode(episode, previous=previous)
+            errors = validate_dreamer_pre_shot_action(action, spec=spec)
+            if errors:
+                raise ValueError("; ".join(errors))
+        except ValueError as exc:
+            row_id = episode.get("source_training_row_id", "unknown")
+            raise DreamerEpisodeDatasetError(
+                f"training row {row_id} produced invalid Dreamer pre-shot action: {exc}"
+            ) from exc
+        episode["pre_shot_action"] = action
+        previous_by_context[group_key] = episode
+
+
+def _pre_shot_action_from_episode(
+    episode: dict[str, Any],
+    *,
+    previous: dict[str, Any] | None,
+) -> dict[str, Any]:
+    static_context = episode["static_context"]
+    steps = episode["steps"]
+    first_target = steps[0]["observed_profile_target"]
+    values: dict[str, Any] = {}
+    observed_fields: set[str] = set()
+    capability_fields = {
+        "grind_delta_steps_from_current",
+        "dose_target_g",
+        "yield_target_g",
+        "valve_open",
+    }
+
+    if previous is not None:
+        previous_static = previous["static_context"]
+        if static_context.get("grind_observed") is True and previous_static.get("grind_observed") is True:
+            values["grind_delta_steps_from_current"] = float(
+                static_context["relative_grind_steps_from_reference"]
+            ) - float(previous_static["relative_grind_steps_from_reference"])
+            observed_fields.add("grind_delta_steps_from_current")
+
+    if static_context.get("dose_observed") is True:
+        values["dose_target_g"] = static_context["dose_g"]
+        observed_fields.add("dose_target_g")
+    if static_context.get("initial_target_yield_observed") is True:
+        values["yield_target_g"] = static_context["initial_target_yield_g"]
+        observed_fields.add("yield_target_g")
+
+    pressure_capable = any(step["observed_profile_target"].get("pressure_target_active") is True for step in steps)
+    flow_capable = any(step["observed_profile_target"].get("flow_target_active") is True for step in steps)
+    temperature_capable = any(
+        step["observed_profile_target"].get("temperature_target_active") is True for step in steps
+    )
+    if pressure_capable or flow_capable:
+        capability_fields.add("pump_target_mode")
+    if pressure_capable:
+        capability_fields.add("pressure_target_bar")
+    if flow_capable:
+        capability_fields.add("flow_target_ml_s")
+    if temperature_capable:
+        capability_fields.add("temperature_target_c")
+
+    if first_target.get("pressure_target_active") is True:
+        values["pump_target_mode"] = DREAMER_PUMP_TARGET_MODE_PRESSURE
+        values["pressure_target_bar"] = first_target["pressure_target_bar"]
+        observed_fields.update({"pump_target_mode", "pressure_target_bar"})
+    elif first_target.get("flow_target_active") is True:
+        values["pump_target_mode"] = DREAMER_PUMP_TARGET_MODE_FLOW
+        values["flow_target_ml_s"] = first_target["flow_target_ml_s"]
+        observed_fields.update({"pump_target_mode", "flow_target_ml_s"})
+
+    if first_target.get("temperature_target_active") is True:
+        values["temperature_target_c"] = first_target["temperature_target_c"]
+        observed_fields.add("temperature_target_c")
+    if isinstance(first_target.get("valve_open"), bool):
+        values["valve_open"] = 1.0 if first_target["valve_open"] else 0.0
+        observed_fields.add("valve_open")
+
+    return build_dreamer_pre_shot_action(
+        values=values,
+        observed_fields=observed_fields,
+        capability_fields=capability_fields,
+    )
 
 
 def _context_window_size(value: int) -> int:

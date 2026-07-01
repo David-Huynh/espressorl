@@ -18,12 +18,16 @@ class DreamerCheckpointCompatibility:
 
     feature_layout_sha256: str | None = None
     control_spec_sha256: str | None = None
+    pre_shot_action_spec_sha256: str | None = None
+    taste_objective_spec_sha256: str | None = None
     tensor_contract_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
             "feature_layout_sha256",
             "control_spec_sha256",
+            "pre_shot_action_spec_sha256",
+            "taste_objective_spec_sha256",
             "tensor_contract_sha256",
         ):
             value = getattr(self, field_name)
@@ -207,6 +211,8 @@ class VerifiedDreamerCheckpoint:
     tensor_contract_sha256: str
     feature_layout_sha256: str
     control_spec_sha256: str
+    pre_shot_action_spec_sha256: str
+    taste_objective_spec_sha256: str
     evaluation_report_sha256: str | None
     architecture_sha256: str
     inference_probe_sha256: str | None

@@ -18,6 +18,8 @@ from espresso_rl.domain.model_checkpoint import (
     VerifiedDreamerCheckpoint,
 )
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
+from espresso_rl.domain.dreamer_pre_shot import DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC_SHA256
+from espresso_rl.domain.dreamer_taste import DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC_SHA256
 from espresso_rl.domain.model_manifest import (
     CHECKPOINT_ARTIFACT_FORMAT,
     CHECKPOINT_ARTIFACT_SCHEMA_VERSION,
@@ -73,6 +75,8 @@ _ARTIFACT_FIELDS = frozenset(
         "dreamer_tensor_contract_sha256",
         "feature_layout_sha256",
         "control_spec_sha256",
+        "pre_shot_action_spec_sha256",
+        "taste_objective_spec_sha256",
         "architecture",
         "architecture_sha256",
         "inference_probe_sha256",
@@ -91,6 +95,8 @@ _METADATA_FIELDS = frozenset(
         "dreamer_tensor_contract_sha256",
         "feature_layout_sha256",
         "control_spec_sha256",
+        "pre_shot_action_spec_sha256",
+        "taste_objective_spec_sha256",
         "tensor_manifest_sha256",
         "architecture_sha256",
         "inference_probe_sha256",
@@ -216,7 +222,25 @@ def load_verified_dreamer_checkpoint(
     )
     if tensors and heldout_inference_sha256 is None:
         raise CheckpointLoadError("checkpoint heldout inference SHA-256 is missing")
-    _validate_compatibility(artifact, compatibility or DreamerCheckpointCompatibility())
+    resolved_compatibility = compatibility or DreamerCheckpointCompatibility()
+    if (
+        resolved_compatibility.pre_shot_action_spec_sha256 is None
+        or resolved_compatibility.taste_objective_spec_sha256 is None
+    ):
+        resolved_compatibility = DreamerCheckpointCompatibility(
+            feature_layout_sha256=resolved_compatibility.feature_layout_sha256,
+            control_spec_sha256=resolved_compatibility.control_spec_sha256,
+            pre_shot_action_spec_sha256=(
+                resolved_compatibility.pre_shot_action_spec_sha256
+                or DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC_SHA256
+            ),
+            taste_objective_spec_sha256=(
+                resolved_compatibility.taste_objective_spec_sha256
+                or DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC_SHA256
+            ),
+            tensor_contract_sha256=resolved_compatibility.tensor_contract_sha256,
+        )
+    _validate_compatibility(artifact, resolved_compatibility)
 
     return VerifiedDreamerCheckpoint(
         artifact_reference=artifact_reference,
@@ -243,6 +267,14 @@ def load_verified_dreamer_checkpoint(
         control_spec_sha256=_require_sha256(
             artifact.get("control_spec_sha256"),
             "checkpoint control spec SHA-256",
+        ),
+        pre_shot_action_spec_sha256=_require_sha256(
+            artifact.get("pre_shot_action_spec_sha256"),
+            "checkpoint pre-shot action spec SHA-256",
+        ),
+        taste_objective_spec_sha256=_require_sha256(
+            artifact.get("taste_objective_spec_sha256"),
+            "checkpoint taste-objective spec SHA-256",
         ),
         evaluation_report_sha256=_optional_sha256(
             artifact.get("evaluation_report_sha256"),
@@ -341,6 +373,8 @@ def _validate_metadata(
         "dreamer_tensor_contract_sha256": artifact["dreamer_tensor_contract_sha256"],
         "feature_layout_sha256": artifact["feature_layout_sha256"],
         "control_spec_sha256": artifact["control_spec_sha256"],
+        "pre_shot_action_spec_sha256": artifact["pre_shot_action_spec_sha256"],
+        "taste_objective_spec_sha256": artifact["taste_objective_spec_sha256"],
         "tensor_manifest_sha256": tensor_manifest_sha256,
         "architecture_sha256": artifact["architecture_sha256"],
         "inference_probe_sha256": artifact["inference_probe_sha256"],
@@ -474,6 +508,16 @@ def _validate_compatibility(artifact: dict[str, Any], compatibility: DreamerChec
     checks = (
         ("feature_layout_sha256", compatibility.feature_layout_sha256, "feature layout"),
         ("control_spec_sha256", compatibility.control_spec_sha256, "control spec"),
+        (
+            "pre_shot_action_spec_sha256",
+            compatibility.pre_shot_action_spec_sha256,
+            "pre-shot action spec",
+        ),
+        (
+            "taste_objective_spec_sha256",
+            compatibility.taste_objective_spec_sha256,
+            "taste-objective spec",
+        ),
         ("dreamer_tensor_contract_sha256", compatibility.tensor_contract_sha256, "tensor contract"),
     )
     for manifest_key, expected, label in checks:
