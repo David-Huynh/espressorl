@@ -384,6 +384,7 @@ def main() -> None:
             optimizer_mode=event.optimizer_mode,
             model_artifact_path=event.model_artifact_path,
             model_artifact_sha256=event.model_artifact_sha256,
+            taste_objective=event.taste_objective,
         )
         logger.info(
             "Optimizer settings accepted machine=%s configured=%s effective=%s prior_mode=%s rules=%d",

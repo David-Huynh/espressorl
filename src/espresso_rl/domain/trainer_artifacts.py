@@ -58,6 +58,7 @@ _TRAINING_CONFIG_FIELDS = frozenset(
         "world_model_preview_imagination_actor_hidden_dim",
         "world_model_preview_imagination_critic_hidden_dim",
         "world_model_preview_imagination_actor_entropy_scale",
+        "world_model_preview_pre_shot_behavior_loss_scale",
         "world_model_preview_imagination_lambda_return",
         "world_model_preview_imagination_discount",
         "world_model_preview_actor_critic_train_steps",
@@ -157,6 +158,7 @@ def default_training_config(
                 "world_model_preview_imagination_actor_hidden_dim": 32,
                 "world_model_preview_imagination_critic_hidden_dim": 32,
                 "world_model_preview_imagination_actor_entropy_scale": 0.0003,
+                "world_model_preview_pre_shot_behavior_loss_scale": 1.0,
                 "world_model_preview_imagination_lambda_return": 0.95,
                 "world_model_preview_imagination_discount": 0.997,
                 "world_model_preview_actor_critic_train_steps": 3,
@@ -193,6 +195,7 @@ def _validate_preview_config(config: dict[str, Any], artifact_stage: object, err
         "world_model_preview_imagination_actor_hidden_dim",
         "world_model_preview_imagination_critic_hidden_dim",
         "world_model_preview_imagination_actor_entropy_scale",
+        "world_model_preview_pre_shot_behavior_loss_scale",
         "world_model_preview_imagination_lambda_return",
         "world_model_preview_imagination_discount",
         "world_model_preview_actor_critic_train_steps",
@@ -268,6 +271,13 @@ def _validate_preview_config(config: dict[str, Any], artifact_stage: object, err
         "world_model_preview_imagination_actor_entropy_scale",
         0.0,
         1.0,
+        errors,
+    )
+    _require_float_range(
+        config.get("world_model_preview_pre_shot_behavior_loss_scale"),
+        "world_model_preview_pre_shot_behavior_loss_scale",
+        0.0,
+        100.0,
         errors,
     )
     _require_float_range(

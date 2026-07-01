@@ -515,7 +515,9 @@ summary for BO, profile scoring, and compatibility; it is not Dreamer's
 recurrent clock. Gaggimate MQTT `flow` is never compared directly with its
 `target_flow`.
 Relative grind, dose, the initial planned yield target, grinder calibration,
-and the default taste objective stay in `static_context`. Historical
+and the logged taste objective stay in `static_context`. A separate canonical
+`taste_objective` query tensor conditions the actor and critic without changing
+the context replay identity. Historical
 pressure/pump-flow/temperature setpoints are stored separately as observed profile
 targets with a matching active mask, while `dynamic_action` remains null unless
 a future capability-gated control path supplies safe per-step actions such as
@@ -595,9 +597,12 @@ splits episodes into train/validation sets, runs a bounded CPU-only
 fixed-cadence recurrent world-model training loop, and records train/validation
 loss curves, dyn/rep KL losses, best epoch, split hash, model-size fields, and
 hyperparameters in `audit_report.json`. It also runs an audit-only DreamerV3
-imagination preview from posterior RSSM starts through the prior, using masked
-actor heads for static recipe deltas and dynamic controls plus a symlog/two-hot
-critic and lambda-return targets. The preview stage now performs a bounded
+imagination preview from posterior RSSM starts through the prior. Its
+taste-conditioned pre-shot actor has one categorical head per authenticated
+pre-shot action field and a masked behavior-cloning loss. The selected plan is
+held in every imagined RSSM transition while the existing dynamic-control head
+acts at fixed cadence. A taste-conditioned symlog/two-hot critic supplies
+lambda-return targets. The preview stage now performs a bounded
 deterministic actor/critic training loop in latent imagination and records
 actor loss, critic loss, entropy, imagined return, and dynamic-control mask
 metrics in the audit report. After training, it writes a deterministic offline
@@ -649,8 +654,9 @@ bytes may be safe for shadow evaluation without being a release-approved active
 policy. `dreamer_v3_shadow` remains the default Dreamer-compatible mode while
 Bayesian Optimization serves recommendations.
 
-Checkpoint contract v2 also authenticates the exact world-model, actor, and
-critic reconstruction configuration. The trainer records a deterministic
+Checkpoint architecture v2 also authenticates the exact world-model,
+factorized pre-shot actor, taste-objective spec, and critic reconstruction
+configuration. The trainer records a deterministic
 inference-probe hash from the original modules, serializes the checkpoint,
 reloads it through the same strict runtime loader, and requires the reloaded
 modules to reproduce both that probe and the held-out validation inference
@@ -662,7 +668,7 @@ metadata and must be regenerated; they are rejected rather than inferred.
 
 Parity-verified checkpoints can run context-conditioned shadow evaluation after
 a rated local shot. Only canonical shots with fixed-cadence telemetry and exact
-bean/grinder context are accepted. Dreamer emits a static recipe proposal in
+bean/grinder context are accepted. Dreamer emits a pre-shot recipe proposal in
 relative grind steps plus dose and yield; the existing Dreamer safety validator
 checks it without clamping unsafe output. The proposal, its safety result, and
 the context-matched BO comparison are stored in `dreamer_shadow_evaluations`

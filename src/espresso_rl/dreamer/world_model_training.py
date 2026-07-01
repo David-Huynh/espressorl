@@ -10,6 +10,14 @@ import torch
 import torch.nn as nn
 
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
+from espresso_rl.domain.dreamer_pre_shot import (
+    DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
+    DreamerPreShotActionSpec,
+)
+from espresso_rl.domain.dreamer_taste import (
+    DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC,
+    DreamerTasteObjectiveSpec,
+)
 from espresso_rl.domain.model_checkpoint import DreamerCheckpointArchitecture
 from espresso_rl.dreamer.checkpoint_inference import (
     checkpoint_architecture_from_models,
@@ -76,10 +84,13 @@ class WorldModelTrainPreviewConfig:
     validation_split: float
     early_stop_patience: int
     control_spec: DreamerControlSpec
+    pre_shot_action_spec: DreamerPreShotActionSpec = DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC
+    taste_objective_spec: DreamerTasteObjectiveSpec = DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC
     imagination_horizon: int = 3
     imagination_actor_hidden_dim: int = 32
     imagination_critic_hidden_dim: int = 32
     imagination_actor_entropy_scale: float = 0.0003
+    pre_shot_behavior_loss_scale: float = 1.0
     imagination_lambda_return: float = 0.95
     imagination_discount: float = 0.997
     actor_critic_train_steps: int = 3
@@ -126,6 +137,7 @@ class WorldModelTrainPreviewResult:
             "imagination_actor_hidden_dim": self.config.imagination_actor_hidden_dim,
             "imagination_critic_hidden_dim": self.config.imagination_critic_hidden_dim,
             "imagination_actor_entropy_scale": self.config.imagination_actor_entropy_scale,
+            "pre_shot_behavior_loss_scale": self.config.pre_shot_behavior_loss_scale,
             "imagination_lambda_return": self.config.imagination_lambda_return,
             "imagination_discount": self.config.imagination_discount,
             "actor_critic_train_steps": self.config.actor_critic_train_steps,
@@ -263,14 +275,23 @@ def run_fixed_cadence_world_model_train_preview(
             discount=config.imagination_discount,
             lambda_return=config.imagination_lambda_return,
             actor_entropy_scale=config.imagination_actor_entropy_scale,
+            pre_shot_behavior_loss_scale=config.pre_shot_behavior_loss_scale,
         )
         torch.manual_seed((config.seed + 0x9E3779B9) % (2**32))
         actor = DreamerV3ImaginationActor(
             feature_dim=model.feature_dim,
             dynamic_action_dim=validation_tensors["dynamic_actions"].shape[-1],
+            taste_objective_dim=validation_tensors["taste_objective"].shape[-1],
             config=imagination_config,
+            pre_shot_action_spec=config.pre_shot_action_spec,
+            taste_objective_spec=config.taste_objective_spec,
         )
-        critic = DreamerV3ImaginationCritic(feature_dim=model.feature_dim, config=imagination_config)
+        critic = DreamerV3ImaginationCritic(
+            feature_dim=model.feature_dim,
+            taste_objective_dim=validation_tensors["taste_objective"].shape[-1],
+            config=imagination_config,
+            taste_objective_spec=config.taste_objective_spec,
+        )
         actor_critic_curve = _train_actor_critic(
             world_model=model,
             context_encoder=context_encoder,
@@ -354,6 +375,9 @@ def _cpu_float_batch(batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         "observed_profile_target_mask",
         "dynamic_actions",
         "dynamic_action_mask",
+        "pre_shot_actions",
+        "pre_shot_action_mask",
+        "pre_shot_capability_mask",
         "control_action_mask",
         "constraints",
         "decision_step_mask",
@@ -361,6 +385,7 @@ def _cpu_float_batch(batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         "continuations",
         "step_mask",
         "static_context",
+        "taste_objective",
     )
     converted: dict[str, torch.Tensor] = {}
     for key in required:
@@ -368,6 +393,12 @@ def _cpu_float_batch(batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         if not isinstance(value, torch.Tensor):
             raise FixedCadenceWorldModelTrainingError(f"world model training batch is missing tensor {key}")
         converted[key] = value.detach().to(device="cpu", dtype=torch.float32)
+    pre_shot_indexes = batch.get("pre_shot_action_indexes")
+    if not isinstance(pre_shot_indexes, torch.Tensor):
+        raise FixedCadenceWorldModelTrainingError(
+            "world model training batch is missing tensor pre_shot_action_indexes"
+        )
+    converted["pre_shot_action_indexes"] = pre_shot_indexes.detach().to(device="cpu", dtype=torch.long)
     for key in (
         "context_static",
         "context_terminal",
@@ -409,6 +440,20 @@ def _validate_batch_shapes(batch: dict[str, torch.Tensor]) -> None:
     static_context = batch["static_context"]
     if static_context.ndim != 2 or static_context.shape[0] != batch_size:
         raise FixedCadenceWorldModelTrainingError("world model training static_context shape is invalid")
+    taste_objective = batch["taste_objective"]
+    if taste_objective.ndim != 2 or taste_objective.shape[0] != batch_size:
+        raise FixedCadenceWorldModelTrainingError("world model training taste_objective shape is invalid")
+    pre_shot_actions = batch["pre_shot_actions"]
+    for key in (
+        "pre_shot_action_indexes",
+        "pre_shot_action_mask",
+        "pre_shot_capability_mask",
+    ):
+        tensor = batch[key]
+        if tensor.ndim != 2 or tensor.shape != pre_shot_actions.shape:
+            raise FixedCadenceWorldModelTrainingError(f"world model training {key} shape is invalid")
+    if pre_shot_actions.ndim != 2 or pre_shot_actions.shape[0] != batch_size:
+        raise FixedCadenceWorldModelTrainingError("world model training pre_shot_actions shape is invalid")
     if float(batch["step_mask"].sum().item()) < 2.0:
         raise FixedCadenceWorldModelTrainingError("world model training batch must contain at least two valid steps")
 
@@ -480,6 +525,7 @@ def _validate_preview_config(config: WorldModelTrainPreviewConfig) -> None:
 
 
 def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    step_count = batch["observed_profile_targets"].shape[1]
     return torch.cat(
         [
             batch["observed_profile_targets"],
@@ -489,6 +535,9 @@ def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
             batch["control_action_mask"],
             batch["constraints"],
             batch["decision_step_mask"].unsqueeze(-1),
+            batch["pre_shot_actions"].unsqueeze(1).expand(-1, step_count, -1),
+            batch["pre_shot_action_mask"].unsqueeze(1).expand(-1, step_count, -1),
+            batch["pre_shot_capability_mask"].unsqueeze(1).expand(-1, step_count, -1),
         ],
         dim=-1,
     )
@@ -699,7 +748,8 @@ def _offline_evaluation_report(
             "rmse": _rounded_scalar(critic_value_rmse),
         },
         "actor": {
-            "entropy_mean": _rounded_scalar(rollout["entropy"].mean()),
+            "entropy_mean": _rounded_scalar(rollout["pre_shot_entropy"].mean()),
+            "pre_shot_behavior_loss": _rounded_scalar(rollout["pre_shot_behavior_loss"]),
             "imagined_return_mean": _rounded_scalar(imagined_returns.mean()),
             "imagined_return_std": _rounded_scalar(imagined_returns.std(unbiased=False)),
             "supported_dynamic_action_count": _rounded_scalar(control_mask.sum()),
@@ -752,6 +802,7 @@ def _train_critic_step(
     step_mask = torch.ones_like(rollout["lambda_returns"])
     critic_loss = critic.loss(
         rollout["imagined_features"].detach(),
+        rollout["taste_objective"].detach(),
         rollout["lambda_returns"].detach(),
         step_mask,
     )
@@ -791,10 +842,16 @@ def _train_actor_step(
             critic=critic,
         )
         advantage = (rollout["lambda_returns"] - rollout["values"][:, :-1]).detach()
-        static_policy_loss = -(rollout["static_log_prob"] * advantage).mean()
+        pre_shot_policy_loss = -(rollout["pre_shot_log_prob"] * advantage[:, 0]).mean()
+        pre_shot_behavior_loss = rollout["pre_shot_behavior_loss"]
         imagined_return_loss = -rollout["lambda_returns"].mean()
-        entropy = rollout["entropy"].mean()
-        actor_loss = imagined_return_loss + static_policy_loss - imagination_config.actor_entropy_scale * entropy
+        entropy = rollout["pre_shot_entropy"].mean()
+        actor_loss = (
+            imagined_return_loss
+            + pre_shot_policy_loss
+            + imagination_config.pre_shot_behavior_loss_scale * pre_shot_behavior_loss
+            - imagination_config.actor_entropy_scale * entropy
+        )
         actor_loss.backward()
         grad_norm = nn.utils.clip_grad_norm_(actor.parameters(), gradient_clip_norm)
         optimizer.step()
@@ -807,7 +864,8 @@ def _train_actor_step(
     unsupported_dynamic = dynamic_actions * (1.0 - control_mask.unsqueeze(1))
     return {
         "actor_loss": _rounded_scalar(actor_loss),
-        "static_policy_loss": _rounded_scalar(static_policy_loss),
+        "pre_shot_policy_loss": _rounded_scalar(pre_shot_policy_loss),
+        "pre_shot_behavior_loss": _rounded_scalar(pre_shot_behavior_loss),
         "imagined_return_loss": _rounded_scalar(imagined_return_loss),
         "actor_entropy_mean": _rounded_scalar(entropy),
         "imagined_return_mean": _rounded_scalar(rollout["lambda_returns"].mean()),
@@ -848,7 +906,12 @@ def _checkpoint_tensors(
         for tensor_name, tensor in module.state_dict().items():
             tensors[f"{component_name}.{tensor_name}"] = tensor.detach().cpu().contiguous().to(dtype=torch.float32)
     tensors["world_model.reward_bins"] = world_model.reward_bins.detach().cpu().contiguous().to(dtype=torch.float32)
-    tensors["actor.static_action_bins"] = actor.static_action_bins.detach().cpu().contiguous().to(dtype=torch.float32)
+    tensors["actor.pre_shot_action_bins"] = (
+        actor.pre_shot_action_bins.detach().cpu().contiguous().to(dtype=torch.float32)
+    )
+    tensors["actor.pre_shot_action_bin_counts"] = (
+        actor.pre_shot_action_bin_counts.detach().cpu().contiguous().to(dtype=torch.float32)
+    )
     tensors["critic.value_bins"] = critic.value_bins.detach().cpu().contiguous().to(dtype=torch.float32)
     return tensors
 

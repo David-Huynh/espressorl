@@ -18,8 +18,14 @@ from espresso_rl.domain.model_checkpoint import (
     VerifiedDreamerCheckpoint,
 )
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
-from espresso_rl.domain.dreamer_pre_shot import DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC_SHA256
-from espresso_rl.domain.dreamer_taste import DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC_SHA256
+from espresso_rl.domain.dreamer_pre_shot import (
+    DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC_SHA256,
+    DreamerPreShotActionSpec,
+)
+from espresso_rl.domain.dreamer_taste import (
+    DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC_SHA256,
+    DreamerTasteObjectiveSpec,
+)
 from espresso_rl.domain.model_manifest import (
     CHECKPOINT_ARTIFACT_FORMAT,
     CHECKPOINT_ARTIFACT_SCHEMA_VERSION,
@@ -210,6 +216,14 @@ def load_verified_dreamer_checkpoint(
         "control_spec_sha256"
     ):
         raise CheckpointLoadError("checkpoint runtime control spec does not match control_spec_sha256")
+    if architecture is not None and _sha256_json(architecture.pre_shot_action_spec.to_dict()) != artifact.get(
+        "pre_shot_action_spec_sha256"
+    ):
+        raise CheckpointLoadError("checkpoint runtime pre-shot action spec does not match its SHA-256")
+    if architecture is not None and _sha256_json(architecture.taste_objective_spec.to_dict()) != artifact.get(
+        "taste_objective_spec_sha256"
+    ):
+        raise CheckpointLoadError("checkpoint runtime taste-objective spec does not match its SHA-256")
     inference_probe_sha256 = _optional_sha256(
         artifact.get("inference_probe_sha256"),
         "checkpoint inference probe SHA-256",
@@ -536,7 +550,10 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
                 "behavior_dim",
                 "static_dim",
                 "dynamic_action_dim",
+                "taste_objective_dim",
                 "control_spec",
+                "pre_shot_action_spec",
+                "taste_objective_spec",
                 "world_model",
                 "context_encoder",
                 "imagination",
@@ -583,6 +600,7 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
                 "discount",
                 "lambda_return",
                 "actor_entropy_scale",
+                "pre_shot_behavior_loss_scale",
             }
         ),
         "checkpoint imagination architecture",
@@ -610,7 +628,10 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
             behavior_dim=value["behavior_dim"],
             static_dim=value["static_dim"],
             dynamic_action_dim=value["dynamic_action_dim"],
+            taste_objective_dim=value["taste_objective_dim"],
             control_spec=DreamerControlSpec.from_dict(value.get("control_spec")),
+            pre_shot_action_spec=DreamerPreShotActionSpec.from_dict(value.get("pre_shot_action_spec")),
+            taste_objective_spec=DreamerTasteObjectiveSpec.from_dict(value.get("taste_objective_spec")),
             world_model=DreamerWorldModelArchitecture(**world_model),
             context_encoder=DreamerContextEncoderArchitecture(**context_encoder),
             imagination=DreamerImaginationArchitecture(**imagination),

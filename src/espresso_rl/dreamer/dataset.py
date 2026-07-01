@@ -80,6 +80,10 @@ DREAMER_STATIC_CONTEXT_FEATURES = (
     "taste_objective_auto",
     *(f"taste_objective_{attribute}" for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES),
 )
+DREAMER_TASTE_OBJECTIVE_FEATURES = (
+    "auto",
+    *DREAMER_TASTE_OBJECTIVE_ATTRIBUTES,
+)
 DREAMER_TERMINAL_FEATURES = (
     "beverage_out_g",
     "brew_ratio",
@@ -308,6 +312,7 @@ def build_dreamer_episode_batch(
     continuations = np.zeros((batch_size, max_steps), dtype=np.float32)
     rewards = np.zeros((batch_size, max_steps), dtype=np.float32)
     static_context = np.zeros((batch_size, len(DREAMER_STATIC_CONTEXT_FEATURES)), dtype=np.float32)
+    taste_objective = np.zeros((batch_size, len(DREAMER_TASTE_OBJECTIVE_FEATURES)), dtype=np.float32)
     terminal = np.zeros((batch_size, len(DREAMER_TERMINAL_FEATURES)), dtype=np.float32)
     context_static = np.zeros((batch_size, context_window_size, len(DREAMER_STATIC_CONTEXT_FEATURES)), dtype=np.float32)
     context_terminal = np.zeros((batch_size, context_window_size, len(DREAMER_TERMINAL_FEATURES)), dtype=np.float32)
@@ -344,6 +349,7 @@ def build_dreamer_episode_batch(
         pre_shot_action_mask[batch_index] = np.asarray(encoded_pre_shot_mask, dtype=np.float32)
         pre_shot_capability_mask[batch_index] = np.asarray(encoded_pre_shot_capabilities, dtype=np.float32)
         static_context[batch_index] = _encode_static_context(episode["static_context"])
+        taste_objective[batch_index] = _encode_taste_objective(episode["static_context"].get("taste_objective"))
         terminal[batch_index] = _encode_terminal(episode["terminal"])
         terminal_reward = _finite_or_zero(episode["terminal"].get("reward"))
         episode_weights[batch_index] = _episode_weight(episode)
@@ -424,6 +430,7 @@ def build_dreamer_episode_batch(
         "continuations": torch.tensor(continuations, dtype=torch.float32, device=target_device),
         "rewards": torch.tensor(rewards, dtype=torch.float32, device=target_device),
         "static_context": torch.tensor(static_context, dtype=torch.float32, device=target_device),
+        "taste_objective": torch.tensor(taste_objective, dtype=torch.float32, device=target_device),
         "terminal": torch.tensor(terminal, dtype=torch.float32, device=target_device),
         "context_static": torch.tensor(context_static, dtype=torch.float32, device=target_device),
         "context_terminal": torch.tensor(context_terminal, dtype=torch.float32, device=target_device),
@@ -457,6 +464,7 @@ def build_dreamer_episode_batch(
             "control_action_mask": DREAMER_DYNAMIC_ACTION_FEATURES,
             "constraints": DREAMER_CONSTRAINT_FEATURES,
             "static_context": DREAMER_STATIC_CONTEXT_FEATURES,
+            "taste_objective": DREAMER_TASTE_OBJECTIVE_FEATURES,
             "terminal": DREAMER_TERMINAL_FEATURES,
             "context_static": DREAMER_STATIC_CONTEXT_FEATURES,
             "context_terminal": DREAMER_TERMINAL_FEATURES,
@@ -666,6 +674,15 @@ def _encode_static_context(static_context: dict[str, Any]) -> np.ndarray:
         encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, f"taste_objective_{attribute}")] = _TASTE_LEVEL_VALUES[
             taste_objective.get(attribute)
         ]
+    return encoded
+
+
+def _encode_taste_objective(value: object) -> np.ndarray:
+    objective = value if isinstance(value, dict) else {"mode": "auto"}
+    encoded = np.zeros(len(DREAMER_TASTE_OBJECTIVE_FEATURES), dtype=np.float32)
+    encoded[0] = 1.0 if objective.get("mode") == "auto" else 0.0
+    for index, attribute in enumerate(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES, start=1):
+        encoded[index] = _TASTE_LEVEL_VALUES[objective.get(attribute)]
     return encoded
 
 

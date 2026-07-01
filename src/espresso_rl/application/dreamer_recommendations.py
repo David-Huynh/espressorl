@@ -9,6 +9,8 @@ import torch.nn.functional as F
 from espresso_rl.application.dreamer_shadow_inference import DreamerShadowInferenceSession
 from espresso_rl.application.training_export import local_training_transition_from_shot
 from espresso_rl.domain.dreamer_actions import DreamerActionCandidate, validate_dreamer_action
+from espresso_rl.domain.dreamer_pre_shot import DREAMER_PRE_SHOT_ACTION_FIELDS
+from espresso_rl.domain.dreamer_taste import encode_dreamer_taste_objective
 from espresso_rl.domain.models import (
     Recipe,
     Recommendation,
@@ -76,6 +78,7 @@ class DreamerRecommendationService:
             self._session,
             transition,
             context_transitions=context_transitions,
+            taste_objective=context.taste_objective,
         )
         proposal = dreamer_recipe_proposal(
             self._session,
@@ -129,6 +132,7 @@ def dreamer_episode_batch_from_training_rows(
     transition: dict[str, Any],
     *,
     context_transitions: list[dict[str, Any]] | None = None,
+    taste_objective: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], int]:
     architecture = session.checkpoint.architecture
     if architecture is None:
@@ -139,6 +143,7 @@ def dreamer_episode_batch_from_training_rows(
         batch = build_dreamer_episode_batch(
             episodes,
             control_spec=architecture.control_spec,
+            pre_shot_action_spec=architecture.pre_shot_action_spec,
             device="cpu",
         )
     except DreamerEpisodeDatasetError as exc:
@@ -157,7 +162,12 @@ def dreamer_episode_batch_from_training_rows(
     current_row_id = int(transition["training_row_id"])
     if current_row_id not in source_ids:
         raise DreamerRecommendationError("Dreamer context replay omitted the current transition")
-    return batch, source_ids.index(current_row_id)
+    current_episode_index = source_ids.index(current_row_id)
+    batch["taste_objective"][current_episode_index] = torch.tensor(
+        encode_dreamer_taste_objective(taste_objective or {"mode": "auto"}),
+        dtype=batch["taste_objective"].dtype,
+    )
+    return batch, current_episode_index
 
 
 @torch.no_grad()
@@ -177,15 +187,24 @@ def dreamer_recipe_proposal(
     if valid_index < 0:
         raise DreamerRecommendationError("Dreamer episode contains no valid observation steps")
     features = observed["features"][current_episode_index : current_episode_index + 1, valid_index]
-    control_mask = batch["control_action_mask"][current_episode_index : current_episode_index + 1, valid_index]
-    actor_output = models.actor(features, control_mask)
-    static_actions = actor_output["static_actions"][0].detach().cpu()
-    static_logits = actor_output["static_logits"][0].detach().cpu()
-    grind_delta_steps = int(round(float(static_actions[0].item())))
-    next_dose_g = float(current_recipe.dose_g + static_actions[1].item())
-    target_yield_g = float(current_recipe.target_yield_g + static_actions[2].item())
+    taste_objective = batch["taste_objective"][current_episode_index : current_episode_index + 1]
+    capability_mask = batch["pre_shot_capability_mask"][current_episode_index : current_episode_index + 1]
+    actor_output = models.actor.select_pre_shot(features, taste_objective, capability_mask)
+    pre_shot_actions = actor_output["pre_shot_actions"][0].detach().cpu()
+    pre_shot_logits = actor_output["pre_shot_logits"][0].detach().cpu()
+    grind_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("grind_delta_steps_from_current")
+    dose_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("dose_target_g")
+    yield_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("yield_target_g")
+    grind_delta_steps = int(round(float(pre_shot_actions[grind_index].item())))
+    next_dose_g = float(pre_shot_actions[dose_index].item())
+    target_yield_g = float(pre_shot_actions[yield_index].item())
     target_ratio = target_yield_g / next_dose_g
-    confidence = float(F.softmax(static_logits, dim=-1).amax(dim=-1).mean().item())
+    confidence = float(
+        F.softmax(pre_shot_logits[[grind_index, dose_index, yield_index]], dim=-1)
+        .amax(dim=-1)
+        .mean()
+        .item()
+    )
 
     safety_errors: tuple[str, ...] = ()
     try:

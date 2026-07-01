@@ -29,6 +29,7 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     ShotRecord,
 )
+from espresso_rl.domain.dreamer_pre_shot import DREAMER_PRE_SHOT_ACTION_FIELDS
 from espresso_rl.domain.shadow_contract import SHADOW_INFERENCE_CONTRACT_LEARNED_CONTEXT_ENCODER_V1
 from espresso_rl.domain.shadow_evaluation import ShadowEvaluationStatus, ShadowProposalMatch
 from espresso_rl.domain.trainer_artifacts import (
@@ -180,6 +181,7 @@ class DreamerShadowEvaluationTests(unittest.TestCase):
         cls.session = build_dreamer_shadow_inference_session(checkpoint)
 
     def setUp(self) -> None:
+        configure_recipe_heads(self.session.models.actor, grind=0.0, dose=18.0, target_yield=38.0)
         self.repository = MemoryShadowRepository()
         self.service = DreamerShadowEvaluationService(
             session=self.session,
@@ -340,15 +342,14 @@ class DreamerShadowEvaluationTests(unittest.TestCase):
 
     def test_unsafe_actor_output_is_recorded_and_not_clamped(self) -> None:
         actor = self.session.models.actor
-        original_weight = actor.static_head.weight.detach().clone()
-        original_bias = actor.static_head.bias.detach().clone()
+        dose_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("dose_target_g")
+        original_weight = actor.pre_shot_heads[dose_index].weight.detach().clone()
+        original_bias = actor.pre_shot_heads[dose_index].bias.detach().clone()
         try:
             with torch.no_grad():
-                actor.static_head.weight.zero_()
-                actor.static_head.bias.fill_(-100.0)
-                actor.static_head.bias[0] = 100.0
-                actor.static_head.bias[5] = 100.0
-                actor.static_head.bias[12] = 100.0
+                actor.pre_shot_heads[dose_index].weight.zero_()
+                actor.pre_shot_heads[dose_index].bias.fill_(-100.0)
+                actor.pre_shot_heads[dose_index].bias[0] = 100.0
             row = training_row(60)
             row["action"]["dose_g"] = 14.0
             row["action"]["target_ratio"] = row["action"]["target_yield_g"] / 14.0
@@ -356,11 +357,11 @@ class DreamerShadowEvaluationTests(unittest.TestCase):
             evaluation = self.service.evaluate_transition(row).evaluation
         finally:
             with torch.no_grad():
-                actor.static_head.weight.copy_(original_weight)
-                actor.static_head.bias.copy_(original_bias)
+                actor.pre_shot_heads[dose_index].weight.copy_(original_weight)
+                actor.pre_shot_heads[dose_index].bias.copy_(original_bias)
 
         self.assertFalse(evaluation.dreamer_proposal.safety_valid)
-        self.assertEqual(evaluation.dreamer_proposal.next_dose_g, 13.0)
+        self.assertEqual(evaluation.dreamer_proposal.next_dose_g, 5.0)
         self.assertIn("dose", evaluation.dreamer_proposal.safety_errors[0])
 
     def test_local_shot_conversion_is_validated_and_context_preserving(self) -> None:
@@ -433,6 +434,23 @@ class DreamerShadowEvaluationTests(unittest.TestCase):
         )
 
         self.assertEqual([row["observation"]["shot_id"] for row in rows], ["shot_first", "shot_second"])
+
+
+def configure_recipe_heads(actor, *, grind: float, dose: float, target_yield: float) -> None:
+    requested = {
+        "grind_delta_steps_from_current": grind,
+        "dose_target_g": dose,
+        "yield_target_g": target_yield,
+    }
+    with torch.no_grad():
+        for field_name, value in requested.items():
+            field_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index(field_name)
+            head = actor.pre_shot_heads[field_index]
+            bins = actor.pre_shot_action_bins[field_index, : actor.pre_shot_bin_counts_tuple[field_index]]
+            bin_index = int(torch.argmin(torch.abs(bins - value)).item())
+            head.weight.zero_()
+            head.bias.fill_(-100.0)
+            head.bias[bin_index] = 100.0
 
 
 def bo_recommendation(row: dict) -> Recommendation:

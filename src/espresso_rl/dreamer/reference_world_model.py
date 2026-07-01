@@ -402,6 +402,7 @@ def _mlp(input_dim: int, hidden_dim: int, output_dim: int) -> nn.Sequential:
 
 
 def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    step_count = batch["observations"].shape[1]
     return behavior_tensor_from_parts(
         observed_profile_targets=batch["observed_profile_targets"],
         observed_profile_target_mask=batch["observed_profile_target_mask"],
@@ -410,6 +411,9 @@ def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
         control_action_mask=batch["control_action_mask"],
         constraints=batch["constraints"],
         decision_step_mask=batch["decision_step_mask"],
+        pre_shot_actions=_repeat_episode_tensor(batch["pre_shot_actions"], step_count),
+        pre_shot_action_mask=_repeat_episode_tensor(batch["pre_shot_action_mask"], step_count),
+        pre_shot_capability_mask=_repeat_episode_tensor(batch["pre_shot_capability_mask"], step_count),
     )
 
 
@@ -422,6 +426,9 @@ def behavior_tensor_from_parts(
     control_action_mask: torch.Tensor,
     constraints: torch.Tensor,
     decision_step_mask: torch.Tensor,
+    pre_shot_actions: torch.Tensor,
+    pre_shot_action_mask: torch.Tensor,
+    pre_shot_capability_mask: torch.Tensor,
 ) -> torch.Tensor:
     return torch.cat(
         [
@@ -432,9 +439,18 @@ def behavior_tensor_from_parts(
             control_action_mask,
             constraints,
             decision_step_mask.unsqueeze(-1),
+            pre_shot_actions,
+            pre_shot_action_mask,
+            pre_shot_capability_mask,
         ],
         dim=-1,
     )
+
+
+def _repeat_episode_tensor(value: torch.Tensor, step_count: int) -> torch.Tensor:
+    if value.ndim != 2:
+        raise ValueError("episode behavior tensor must have shape (batch, features)")
+    return value.unsqueeze(1).expand(-1, step_count, -1)
 
 
 def _squash_action(value: torch.Tensor) -> torch.Tensor:

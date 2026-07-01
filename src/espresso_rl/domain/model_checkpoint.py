@@ -4,9 +4,14 @@ from dataclasses import dataclass
 import math
 
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
+from espresso_rl.domain.dreamer_pre_shot import DreamerPreShotActionSpec
+from espresso_rl.domain.dreamer_taste import (
+    DREAMER_TASTE_OBJECTIVE_ATTRIBUTES,
+    DreamerTasteObjectiveSpec,
+)
 
-DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT = "espresso_rl_dreamer_v3_checkpoint_architecture_v1"
-DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION = 1
+DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT = "espresso_rl_dreamer_v3_checkpoint_architecture_v2"
+DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION = 2
 DREAMER_INFERENCE_PROBE_FORMAT = "espresso_rl_dreamer_v3_inference_probe_v1"
 
 _HEX_CHARS = frozenset("0123456789abcdef")
@@ -102,6 +107,7 @@ class DreamerImaginationArchitecture:
     discount: float
     lambda_return: float
     actor_entropy_scale: float
+    pre_shot_behavior_loss_scale: float
 
     def __post_init__(self) -> None:
         _bounded_int(self.horizon, 1, 32, "horizon")
@@ -113,6 +119,12 @@ class DreamerImaginationArchitecture:
         _bounded_float(self.discount, 0.0, 1.0, "discount")
         _bounded_float(self.lambda_return, 0.0, 1.0, "lambda_return")
         _bounded_float(self.actor_entropy_scale, 0.0, 1.0, "actor_entropy_scale")
+        _bounded_float(
+            self.pre_shot_behavior_loss_scale,
+            0.0,
+            100.0,
+            "pre_shot_behavior_loss_scale",
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -151,7 +163,10 @@ class DreamerCheckpointArchitecture:
     behavior_dim: int
     static_dim: int
     dynamic_action_dim: int
+    taste_objective_dim: int
     control_spec: DreamerControlSpec
+    pre_shot_action_spec: DreamerPreShotActionSpec
+    taste_objective_spec: DreamerTasteObjectiveSpec
     world_model: DreamerWorldModelArchitecture
     context_encoder: DreamerContextEncoderArchitecture
     imagination: DreamerImaginationArchitecture
@@ -167,6 +182,7 @@ class DreamerCheckpointArchitecture:
         _bounded_int(self.behavior_dim, 1, 512, "behavior_dim")
         _bounded_int(self.static_dim, 1, 256, "static_dim")
         _bounded_int(self.dynamic_action_dim, 1, 64, "dynamic_action_dim")
+        _bounded_int(self.taste_objective_dim, 1, 64, "taste_objective_dim")
         if not isinstance(self.world_model, DreamerWorldModelArchitecture):
             raise ValueError("checkpoint world-model architecture is invalid")
         if not isinstance(self.context_encoder, DreamerContextEncoderArchitecture):
@@ -175,6 +191,12 @@ class DreamerCheckpointArchitecture:
             raise ValueError("checkpoint imagination architecture is invalid")
         if not isinstance(self.control_spec, DreamerControlSpec):
             raise ValueError("checkpoint control spec is invalid")
+        if not isinstance(self.pre_shot_action_spec, DreamerPreShotActionSpec):
+            raise ValueError("checkpoint pre-shot action spec is invalid")
+        if not isinstance(self.taste_objective_spec, DreamerTasteObjectiveSpec):
+            raise ValueError("checkpoint taste-objective spec is invalid")
+        if self.taste_objective_dim != 1 + len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES):
+            raise ValueError("checkpoint taste_objective_dim does not match taste-objective spec")
         if self.world_model.reward_bins != self.imagination.value_bins:
             raise ValueError("checkpoint reward and value bin counts must match")
         if self.context_encoder.static_dim != self.static_dim:
@@ -190,7 +212,10 @@ class DreamerCheckpointArchitecture:
             "behavior_dim": self.behavior_dim,
             "static_dim": self.static_dim,
             "dynamic_action_dim": self.dynamic_action_dim,
+            "taste_objective_dim": self.taste_objective_dim,
             "control_spec": self.control_spec.to_dict(),
+            "pre_shot_action_spec": self.pre_shot_action_spec.to_dict(),
+            "taste_objective_spec": self.taste_objective_spec.to_dict(),
             "world_model": self.world_model.to_dict(),
             "context_encoder": self.context_encoder.to_dict(),
             "imagination": self.imagination.to_dict(),

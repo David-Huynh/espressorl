@@ -142,11 +142,23 @@ class DreamerPreShotActionTests(unittest.TestCase):
         self.assertEqual(DreamerTasteObjectiveSpec.from_dict(payload).to_dict(), payload)
         self.assertEqual(validate_dreamer_taste_objective({"mode": "auto"}), [])
         self.assertEqual(
-            validate_dreamer_taste_objective({"mode": "explicit", "sweetness": "high"}),
+            validate_dreamer_taste_objective({"mode": "custom", "sweetness": "high"}),
             [],
         )
-        errors = validate_dreamer_taste_objective({"mode": "explicit", "sweetness": "maximum"})
+        errors = validate_dreamer_taste_objective({"mode": "custom", "sweetness": "maximum"})
         self.assertTrue(any("sweetness" in error for error in errors))
+        self.assertTrue(
+            any(
+                "requires at least one target" in error
+                for error in validate_dreamer_taste_objective({"mode": "custom"})
+            )
+        )
+        self.assertTrue(
+            any(
+                "must not include custom targets" in error
+                for error in validate_dreamer_taste_objective({"mode": "auto", "clarity": "high"})
+            )
+        )
 
 
 if __name__ == "__main__":

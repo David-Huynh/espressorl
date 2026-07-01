@@ -61,6 +61,15 @@ class DomainCoreTests(unittest.TestCase):
         )
 
         self.assertEqual(event.optimizer_mode, "bayesian_optimization")
+        self.assertEqual(event.taste_objective, {"mode": "auto"})
+
+        custom = OptimizerSettingsEvent(
+            install_id="install_1",
+            machine_id="machine_1",
+            timestamp=1,
+            taste_objective={"mode": "custom", "sweetness": "high", "clarity": "unspecified"},
+        )
+        self.assertEqual(custom.taste_objective, {"mode": "custom", "sweetness": "high"})
 
     def test_optimizer_settings_event_rejects_invalid_mode_and_digest(self) -> None:
         with self.assertRaises(ValueError):
@@ -77,6 +86,13 @@ class DomainCoreTests(unittest.TestCase):
                 timestamp=1,
                 optimizer_mode="bayesian_optimization",
                 model_artifact_sha256="not-a-digest",
+            )
+        with self.assertRaisesRegex(ValueError, "custom mode requires"):
+            OptimizerSettingsEvent(
+                install_id="install_1",
+                machine_id="machine_1",
+                timestamp=1,
+                taste_objective={"mode": "custom"},
             )
 
     def test_feedback_requires_rating_or_explicit_skip(self) -> None:

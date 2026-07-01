@@ -15,6 +15,7 @@ from .models import (
     VALID_TASTE_TAGS,
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
+from .dreamer_taste import normalize_dreamer_taste_objective
 from .prior_rules import PriorRule, PriorSelectionMode, parse_prior_rules
 
 VALID_CORRECTION_TAGS = {
@@ -615,6 +616,7 @@ class OptimizerSettingsEvent:
     prior_rules: tuple[PriorRule, ...] = ()
     model_artifact_path: str | None = None
     model_artifact_sha256: str | None = None
+    taste_objective: dict[str, str] = field(default_factory=lambda: {"mode": "auto"})
     source: str = "unknown"
 
     event_type: str = field(default="optimizer_settings", init=False)
@@ -636,6 +638,11 @@ class OptimizerSettingsEvent:
             self,
             "model_artifact_sha256",
             _optional_sha256(self.model_artifact_sha256),
+        )
+        object.__setattr__(
+            self,
+            "taste_objective",
+            normalize_dreamer_taste_objective(self.taste_objective),
         )
         object.__setattr__(self, "source", _optional_string(self.source, "source", 80) or "unknown")
 

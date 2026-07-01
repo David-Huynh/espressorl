@@ -422,6 +422,7 @@ class GaggimateMQTTClient:
             prior_rules=tuple(payload.get("prior_rules") or ()),
             model_artifact_path=_optional_string(payload.get("model_artifact_path")),
             model_artifact_sha256=_optional_string(payload.get("model_artifact_sha256")),
+            taste_objective=payload.get("taste_objective") or {"mode": "auto"},
             source=payload.get("source", "gaggimate_mqtt"),
         )
 

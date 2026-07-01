@@ -11,6 +11,7 @@ from espresso_rl.domain.dreamer_runtime_audit import (
     DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED,
     DreamerRuntimeAuditSummary,
 )
+from espresso_rl.domain.dreamer_taste import normalize_dreamer_taste_objective
 from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
 from espresso_rl.domain.model_manifest import ModelManifestValidation, validate_model_manifest
 from espresso_rl.domain.optimization import (
@@ -109,6 +110,7 @@ class RuntimeOptimizerStatus:
     dreamer_v3_bo_fallback_reason_counts: dict[str, int] | None = None
     dreamer_v3_last_runtime_event: str | None = None
     dreamer_v3_last_bo_fallback_reason: str | None = None
+    taste_objective: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -157,6 +159,7 @@ class RuntimeOptimizerStatus:
             ),
             "dreamer_v3_last_runtime_event": self.dreamer_v3_last_runtime_event,
             "dreamer_v3_last_bo_fallback_reason": self.dreamer_v3_last_bo_fallback_reason,
+            "taste_objective": dict(self.taste_objective or {"mode": "auto"}),
         }
 
 
@@ -177,6 +180,7 @@ class RuntimeOptimizer:
         checkpoint_inference_parity_reason: str | None = None,
         bo_optimizer: Optimizer | None = None,
         dreamer_optimizer: Optimizer | None = None,
+        taste_objective: dict[str, str] | None = None,
     ) -> None:
         if model_artifact_max_bytes <= 0:
             raise ValueError("model_artifact_max_bytes must be positive")
@@ -194,6 +198,7 @@ class RuntimeOptimizer:
             model_artifact_path=model_artifact_path,
             model_artifact_sha256=model_artifact_sha256,
             model_manifest_path=model_manifest_path,
+            taste_objective=taste_objective,
         )
 
     def configure(
@@ -204,6 +209,7 @@ class RuntimeOptimizer:
         model_artifact_sha256: str | None = None,
         model_manifest_path: str | None = None,
         model_artifact_max_bytes: int | None = None,
+        taste_objective: dict[str, str] | None = None,
     ) -> RuntimeOptimizerStatus:
         with self._lock:
             previous_status = getattr(self, "_status", None)
@@ -219,6 +225,11 @@ class RuntimeOptimizer:
             artifact_path = artifact_path or previous_status.model_artifact_path
             artifact_sha256 = artifact_sha256 or previous_status.model_artifact_sha256
             manifest_path = manifest_path or previous_status.model_manifest_path
+        resolved_taste_objective = normalize_dreamer_taste_objective(
+            taste_objective
+            if taste_objective is not None
+            else (previous_status.taste_objective if previous_status is not None else {"mode": "auto"})
+        )
 
         requested_mode = normalize_optimizer_mode(optimizer_mode)
         manifest_status = verify_model_manifest_file(
@@ -349,6 +360,7 @@ class RuntimeOptimizer:
             dreamer_v3_bo_fallback_reason_counts=audit.fallback_reason_counts_dict(),
             dreamer_v3_last_runtime_event=audit.last_runtime_event,
             dreamer_v3_last_bo_fallback_reason=audit.last_bo_fallback_reason,
+            taste_objective=resolved_taste_objective,
         )
         with self._lock:
             self._status = status
@@ -363,17 +375,23 @@ class RuntimeOptimizer:
             configured_mode = self._status.configured_mode
             effective_mode = self._status.effective_mode
             dreamer_optimizer = self._dreamer_optimizer
+            taste_objective = dict(self._status.taste_objective or {"mode": "auto"})
+        conditioned_context = (
+            replace(context, taste_objective=taste_objective)
+            if isinstance(context, OptimizationContext)
+            else context
+        )
         if effective_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE and dreamer_optimizer is not None:
             try:
-                recommendation = dreamer_optimizer.recommend(context)
+                recommendation = dreamer_optimizer.recommend(conditioned_context)
             except ValueError:
                 self._record_dreamer_bo_fallback(DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED)
-                return self._bo_optimizer.recommend(context)
+                return self._bo_optimizer.recommend(conditioned_context)
             self._record_dreamer_active_recommendation()
             return recommendation
         if configured_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE:
             self._record_dreamer_bo_fallback(DREAMER_FALLBACK_REASON_ACTIVE_UNAVAILABLE)
-        return self._bo_optimizer.recommend(context)
+        return self._bo_optimizer.recommend(conditioned_context)
 
     def _record_dreamer_active_recommendation(self) -> None:
         with self._lock:

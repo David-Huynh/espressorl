@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 from .models import Recipe, Recommendation, SafetyBounds, ShotRecord
+from .dreamer_taste import normalize_dreamer_taste_objective
 
 DEFAULT_OPTIMIZER_MODE = "bayesian_optimization"
 OPTIMIZER_MODE_DREAMER_V3_ACTIVE = "dreamer_v3"
@@ -129,3 +130,11 @@ class OptimizationContext:
     grinder_context_id: str | None = None
     prior_points: Sequence[PriorPoint] = ()
     prior_signals: Sequence[PriorSignal] = ()
+    taste_objective: dict[str, str] = field(default_factory=lambda: {"mode": "auto"})
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "taste_objective",
+            normalize_dreamer_taste_objective(self.taste_objective),
+        )

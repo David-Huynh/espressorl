@@ -62,13 +62,15 @@ class DreamerReferenceWorldModelTests(unittest.TestCase):
         config = default_world_model_config("espresso_debug")
         model = DreamerV3VectorWorldModel(
             observation_dim=5,
-            behavior_dim=39,
+            behavior_dim=66,
             static_dim=18,
             config=config,
         )
         batch = reference_batch(step_count=2)
         single = {key: value[:, 1:2].clone() for key, value in batch.items() if isinstance(value, torch.Tensor)}
         single["static_context"] = batch["static_context"].clone()
+        for key in ("pre_shot_actions", "pre_shot_action_mask", "pre_shot_capability_mask"):
+            single[key] = batch[key].clone()
 
         two_step = model.observe(
             batch,
@@ -87,7 +89,7 @@ class DreamerReferenceWorldModelTests(unittest.TestCase):
         torch.manual_seed(7)
         model = DreamerV3VectorWorldModel(
             observation_dim=5,
-            behavior_dim=39,
+            behavior_dim=66,
             static_dim=18,
             config=default_world_model_config("espresso_debug"),
         )
@@ -114,6 +116,9 @@ def reference_batch(step_count: int) -> dict[str, torch.Tensor]:
         "dynamic_action_mask": torch.zeros((1, step_count, 7), dtype=torch.float32),
         "control_action_mask": torch.zeros((1, step_count, 7), dtype=torch.float32),
         "constraints": torch.zeros((1, step_count, 7), dtype=torch.float32),
+        "pre_shot_actions": torch.zeros((1, 9), dtype=torch.float32),
+        "pre_shot_action_mask": torch.ones((1, 9), dtype=torch.float32),
+        "pre_shot_capability_mask": torch.ones((1, 9), dtype=torch.float32),
         "decision_step_mask": torch.tensor([[1.0] + [0.0] * (step_count - 1)], dtype=torch.float32),
         "rewards": torch.tensor([[0.0] * (step_count - 1) + [0.8]], dtype=torch.float32),
         "continuations": torch.tensor([[1.0] * (step_count - 1) + [0.0]], dtype=torch.float32),

@@ -7,7 +7,7 @@ from typing import Any
 
 DREAMER_TASTE_OBJECTIVE_SPEC_FORMAT = "espresso_rl_dreamer_taste_objective_spec_v1"
 DREAMER_TASTE_OBJECTIVE_SPEC_SCHEMA_VERSION = 1
-DREAMER_TASTE_OBJECTIVE_MODES = ("auto", "explicit")
+DREAMER_TASTE_OBJECTIVE_MODES = ("auto", "custom")
 DREAMER_TASTE_OBJECTIVE_ATTRIBUTES = (
     "acidity",
     "sweetness",
@@ -18,9 +18,9 @@ DREAMER_TASTE_OBJECTIVE_ATTRIBUTES = (
     "fruitiness",
     "roastiness",
 )
-DREAMER_TASTE_OBJECTIVE_LEVELS = ("none", "low", "medium", "high")
+DREAMER_TASTE_OBJECTIVE_LEVELS = ("unspecified", "low", "medium", "high")
 DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING = {
-    "none": 0.0,
+    "unspecified": 0.0,
     "low": 1.0 / 3.0,
     "medium": 2.0 / 3.0,
     "high": 1.0,
@@ -105,8 +105,43 @@ def validate_dreamer_taste_objective(value: object, *, path: str = "taste_object
     errors = [f"{path} contains unsupported fields: {', '.join(unknown[:5])}"] if unknown else []
     if value.get("mode") not in DREAMER_TASTE_OBJECTIVE_MODES:
         errors.append(f"{path}.mode is invalid")
+    selected_count = 0
     for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES:
         level = value.get(attribute)
         if level is not None and level not in DREAMER_TASTE_OBJECTIVE_LEVELS:
             errors.append(f"{path}.{attribute} is invalid")
+        elif level in {"low", "medium", "high"}:
+            selected_count += 1
+    if value.get("mode") == "auto" and selected_count:
+        errors.append(f"{path} auto mode must not include custom targets")
+    if value.get("mode") == "custom" and selected_count == 0:
+        errors.append(f"{path} custom mode requires at least one target")
     return errors
+
+
+def normalize_dreamer_taste_objective(value: object) -> dict[str, str]:
+    errors = validate_dreamer_taste_objective(value)
+    if errors:
+        raise ValueError("; ".join(errors[:10]))
+    assert isinstance(value, dict)
+    if value["mode"] == "auto":
+        return {"mode": "auto"}
+    return {
+        "mode": "custom",
+        **{
+            attribute: str(value[attribute])
+            for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES
+            if value.get(attribute) in {"low", "medium", "high"}
+        },
+    }
+
+
+def encode_dreamer_taste_objective(value: object) -> tuple[float, ...]:
+    objective = normalize_dreamer_taste_objective(value)
+    return (
+        1.0 if objective["mode"] == "auto" else 0.0,
+        *(
+            DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING.get(objective.get(attribute, "unspecified"), 0.0)
+            for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES
+        ),
+    )

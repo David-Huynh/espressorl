@@ -368,7 +368,8 @@ class TrainerArtifactTests(unittest.TestCase):
         )
         self.assertIn("world_model.reward_bins", model_header)
         self.assertIn("context_encoder.recurrent.weight_ih_l0", model_header)
-        self.assertIn("actor.static_action_bins", model_header)
+        self.assertIn("actor.pre_shot_action_bins", model_header)
+        self.assertIn("actor.pre_shot_action_bin_counts", model_header)
         self.assertIn("critic.value_bins", model_header)
         self.assertEqual(
             manifest["model_artifact"]["tensor_manifest_sha256"],
@@ -424,7 +425,8 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertIn("loss_rep", preview["validation_loss_curve"][0])
         self.assertFalse(preview["imagination_preview"]["inference_ready"])
         self.assertTrue(preview["imagination_preview"]["contract_only"])
-        self.assertEqual(preview["imagination_preview"]["static_logits_shape"], [1, 3, 3, 5])
+        self.assertEqual(preview["imagination_preview"]["pre_shot_logits_shape"][:2], [1, 9])
+        self.assertEqual(preview["imagination_preview"]["pre_shot_held_action_shape"], [1, 3, 9])
         self.assertEqual(preview["imagination_preview"]["lambda_return_shape"], [1, 3])
         self.assertEqual(preview["dataset_split"]["train_source_training_row_ids"], [1, 2, 3])
         self.assertEqual(preview["dataset_split"]["validation_source_training_row_ids"], [4])
@@ -477,7 +479,7 @@ class TrainerArtifactTests(unittest.TestCase):
         )
         files = {file.relative_path: file for file in result.files}
         manifest = json.loads(files[MODEL_MANIFEST_FILENAME].content.decode("utf-8"))
-        manifest["model_artifact"]["tensor_manifest"]["tensors"]["actor.static_action_bins"]["shape"] = [99]
+        manifest["model_artifact"]["tensor_manifest"]["tensors"]["actor.pre_shot_action_bins"]["shape"] = [99]
 
         with self.assertRaisesRegex(TrainerArtifactError, "hash"):
             validate_dreamer_checkpoint_safetensors(files[MODEL_FILENAME].content, manifest)

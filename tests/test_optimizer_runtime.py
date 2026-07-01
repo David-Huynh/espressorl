@@ -18,7 +18,9 @@ from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
     OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+    OptimizationContext,
 )
+from espresso_rl.domain.models import Recipe, SafetyBounds
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
 
 
@@ -143,6 +145,38 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
         self.assertTrue(status.model_manifest_verified)
         self.assertFalse(status.checkpoint_verified)
+
+    def test_taste_objective_conditions_optimizer_query_without_changing_context_identity(self) -> None:
+        bo = RecordingOptimizer("recommendation")
+        optimizer = RuntimeOptimizer(bo_optimizer=bo)
+        status = optimizer.configure(
+            optimizer_mode=DEFAULT_OPTIMIZER_MODE,
+            taste_objective={"mode": "custom", "sweetness": "high"},
+        )
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            grinder_context_id="grinder_1",
+            machine_adapter="gaggimate",
+            current_recipe=Recipe(
+                relative_grind_steps_from_reference=0.0,
+                microns_per_step=10.0,
+                dose_g=18.0,
+                target_yield_g=36.0,
+                target_ratio=2.0,
+            ),
+            shots=(),
+            safety_bounds=SafetyBounds(),
+            now=1,
+        )
+
+        optimizer.recommend(context)
+
+        self.assertEqual(status.taste_objective, {"mode": "custom", "sweetness": "high"})
+        self.assertEqual(bo.contexts[0].taste_objective, status.taste_objective)
+        self.assertEqual(bo.contexts[0].bean_context_id, context.bean_context_id)
+        self.assertEqual(bo.contexts[0].grinder_context_id, context.grinder_context_id)
 
     def test_verified_shadow_checkpoint_keeps_bo_effective_and_lists_shadow_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

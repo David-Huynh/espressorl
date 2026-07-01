@@ -24,6 +24,7 @@ from espresso_rl.domain.models import (
     SafetyBounds,
     ShotRecord,
 )
+from espresso_rl.domain.dreamer_pre_shot import DREAMER_PRE_SHOT_ACTION_FIELDS
 from espresso_rl.domain.optimization import OptimizationContext
 from espresso_rl.domain.trainer_artifacts import (
     TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW,
@@ -89,6 +90,7 @@ class DreamerRecommendationTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.service = DreamerRecommendationService(session=self.session)
+        configure_recipe_heads(self.session.models.actor, grind=0.0, dose=18.0, target_yield=36.0)
 
     def test_builds_safety_checked_candidate_recommendation_from_context_shots(self) -> None:
         first = local_shot("shot_first", timestamp=1_800_000_010, relative_steps=1.0)
@@ -157,15 +159,14 @@ class DreamerRecommendationTests(unittest.TestCase):
 
     def test_unsafe_actor_output_cannot_become_recommendation(self) -> None:
         actor = self.session.models.actor
-        original_weight = actor.static_head.weight.detach().clone()
-        original_bias = actor.static_head.bias.detach().clone()
+        dose_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("dose_target_g")
+        original_weight = actor.pre_shot_heads[dose_index].weight.detach().clone()
+        original_bias = actor.pre_shot_heads[dose_index].bias.detach().clone()
         try:
             with torch.no_grad():
-                actor.static_head.weight.zero_()
-                actor.static_head.bias.fill_(-100.0)
-                actor.static_head.bias[0] = 100.0
-                actor.static_head.bias[5] = 100.0
-                actor.static_head.bias[12] = 100.0
+                actor.pre_shot_heads[dose_index].weight.zero_()
+                actor.pre_shot_heads[dose_index].bias.fill_(-100.0)
+                actor.pre_shot_heads[dose_index].bias[0] = 100.0
             shot = local_shot("shot_low_dose", timestamp=1_800_000_020, relative_steps=2.0)
             context = optimization_context(
                 [shot],
@@ -183,8 +184,25 @@ class DreamerRecommendationTests(unittest.TestCase):
                 self.service.recommend(context)
         finally:
             with torch.no_grad():
-                actor.static_head.weight.copy_(original_weight)
-                actor.static_head.bias.copy_(original_bias)
+                actor.pre_shot_heads[dose_index].weight.copy_(original_weight)
+                actor.pre_shot_heads[dose_index].bias.copy_(original_bias)
+
+
+def configure_recipe_heads(actor, *, grind: float, dose: float, target_yield: float) -> None:
+    requested = {
+        "grind_delta_steps_from_current": grind,
+        "dose_target_g": dose,
+        "yield_target_g": target_yield,
+    }
+    with torch.no_grad():
+        for field_name, value in requested.items():
+            field_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index(field_name)
+            head = actor.pre_shot_heads[field_index]
+            bins = actor.pre_shot_action_bins[field_index, : actor.pre_shot_bin_counts_tuple[field_index]]
+            bin_index = int(torch.argmin(torch.abs(bins - value)).item())
+            head.weight.zero_()
+            head.bias.fill_(-100.0)
+            head.bias[bin_index] = 100.0
 
 
 def optimization_context(

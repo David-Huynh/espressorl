@@ -336,13 +336,16 @@ def checkpoint_bundle(
     pre_shot_action_spec_sha256 = sha256_json(DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.to_dict())
     taste_objective_spec_sha256 = sha256_json(DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict())
     architecture = {
-        "format": "espresso_rl_dreamer_v3_checkpoint_architecture_v1",
-        "schema_version": 1,
+        "format": "espresso_rl_dreamer_v3_checkpoint_architecture_v2",
+        "schema_version": 2,
         "observation_dim": 5,
-        "behavior_dim": 39,
+        "behavior_dim": 66,
         "static_dim": 18,
         "dynamic_action_dim": 7,
+        "taste_objective_dim": 9,
         "control_spec": control_spec,
+        "pre_shot_action_spec": DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.to_dict(),
+        "taste_objective_spec": DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict(),
         "world_model": {
             "model_preset": "espresso_debug",
             "deter_dim": 32,
@@ -375,6 +378,7 @@ def checkpoint_bundle(
             "discount": 0.997,
             "lambda_return": 0.95,
             "actor_entropy_scale": 0.0003,
+            "pre_shot_behavior_loss_scale": 1.0,
         },
     }
     architecture_sha256 = sha256_json(architecture)

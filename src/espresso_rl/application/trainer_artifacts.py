@@ -81,6 +81,7 @@ _DREAMER_TENSOR_KEYS = (
     "continuations",
     "rewards",
     "static_context",
+    "taste_objective",
     "terminal",
     "context_static",
     "context_terminal",
@@ -191,6 +192,7 @@ def build_dreamer_trainer_artifacts(
         dreamer_tensor_build["episodes"],
         control_spec=control_spec,
         pre_shot_action_spec=pre_shot_action_spec,
+        taste_objective_spec=taste_objective_spec,
         training_config=training_config,
     )
     world_model_train_preview = (
@@ -466,6 +468,7 @@ def _world_model_train_preview_metrics(
     *,
     control_spec: DreamerControlSpec,
     pre_shot_action_spec: DreamerPreShotActionSpec,
+    taste_objective_spec: DreamerTasteObjectiveSpec,
     training_config: dict[str, Any],
 ) -> dict[str, Any] | None:
     if training_config.get("artifact_stage") != TRAINER_ARTIFACT_STAGE_WORLD_MODEL_TRAIN_PREVIEW:
@@ -513,6 +516,8 @@ def _world_model_train_preview_metrics(
                 validation_split=float(training_config["world_model_preview_validation_split"]),
                 early_stop_patience=int(training_config["world_model_preview_early_stop_patience"]),
                 control_spec=control_spec,
+                pre_shot_action_spec=pre_shot_action_spec,
+                taste_objective_spec=taste_objective_spec,
                 imagination_horizon=int(training_config["world_model_preview_imagination_horizon"]),
                 imagination_actor_hidden_dim=int(
                     training_config["world_model_preview_imagination_actor_hidden_dim"]
@@ -522,6 +527,9 @@ def _world_model_train_preview_metrics(
                 ),
                 imagination_actor_entropy_scale=float(
                     training_config["world_model_preview_imagination_actor_entropy_scale"]
+                ),
+                pre_shot_behavior_loss_scale=float(
+                    training_config["world_model_preview_pre_shot_behavior_loss_scale"]
                 ),
                 imagination_lambda_return=float(training_config["world_model_preview_imagination_lambda_return"]),
                 imagination_discount=float(training_config["world_model_preview_imagination_discount"]),

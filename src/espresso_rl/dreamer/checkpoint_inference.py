@@ -34,9 +34,9 @@ from espresso_rl.dreamer.dataset import (
 )
 
 _COMPONENT_BUFFER_NAMES = {
-    "world_model": "reward_bins",
-    "actor": "static_action_bins",
-    "critic": "value_bins",
+    "world_model": ("reward_bins",),
+    "actor": ("pre_shot_action_bins", "pre_shot_action_bin_counts"),
+    "critic": ("value_bins",),
 }
 
 
@@ -68,6 +68,8 @@ def checkpoint_architecture_from_models(
 ) -> DreamerCheckpointArchitecture:
     if actor.config != critic.config:
         raise DreamerCheckpointMaterializationError("actor and critic imagination configs do not match")
+    if actor.taste_objective_spec != critic.taste_objective_spec:
+        raise DreamerCheckpointMaterializationError("actor and critic taste-objective specs do not match")
     model = world_model.config
     imagination = actor.config
     return DreamerCheckpointArchitecture(
@@ -75,7 +77,10 @@ def checkpoint_architecture_from_models(
         behavior_dim=behavior_dim,
         static_dim=static_dim,
         dynamic_action_dim=dynamic_action_dim,
+        taste_objective_dim=actor.taste_objective_dim,
         control_spec=control_spec,
+        pre_shot_action_spec=actor.pre_shot_action_spec,
+        taste_objective_spec=critic.taste_objective_spec,
         world_model=DreamerWorldModelArchitecture(
             model_preset=model.model_preset,
             deter_dim=model.deter_dim,
@@ -108,6 +113,7 @@ def checkpoint_architecture_from_models(
             discount=imagination.discount,
             lambda_return=imagination.lambda_return,
             actor_entropy_scale=imagination.actor_entropy_scale,
+            pre_shot_behavior_loss_scale=imagination.pre_shot_behavior_loss_scale,
         ),
     )
 
@@ -142,11 +148,16 @@ def materialize_verified_dreamer_checkpoint(
     actor = DreamerV3ImaginationActor(
         feature_dim=world_model.feature_dim,
         dynamic_action_dim=architecture.dynamic_action_dim,
+        taste_objective_dim=architecture.taste_objective_dim,
         config=imagination_config,
+        pre_shot_action_spec=architecture.pre_shot_action_spec,
+        taste_objective_spec=architecture.taste_objective_spec,
     )
     critic = DreamerV3ImaginationCritic(
         feature_dim=world_model.feature_dim,
+        taste_objective_dim=architecture.taste_objective_dim,
         config=imagination_config,
+        taste_objective_spec=architecture.taste_objective_spec,
     )
 
     modules = {
@@ -158,8 +169,8 @@ def materialize_verified_dreamer_checkpoint(
     expected_names: set[str] = set()
     for component_name, module in modules.items():
         expected_names.update(f"{component_name}.{name}" for name in module.state_dict())
-        if component_name in _COMPONENT_BUFFER_NAMES:
-            expected_names.add(f"{component_name}.{_COMPONENT_BUFFER_NAMES[component_name]}")
+        for buffer_name in _COMPONENT_BUFFER_NAMES.get(component_name, ()):
+            expected_names.add(f"{component_name}.{buffer_name}")
     actual_names = {tensor.name for tensor in checkpoint.tensors}
     missing = sorted(expected_names - actual_names)
     extra = sorted(actual_names - expected_names)
@@ -189,19 +200,13 @@ def materialize_verified_dreamer_checkpoint(
             raise DreamerCheckpointMaterializationError(
                 f"checkpoint {component_name} state dictionary is incompatible"
             ) from exc
-        if component_name not in _COMPONENT_BUFFER_NAMES:
-            module.requires_grad_(False)
-            module.eval()
-            continue
-        expected_buffer = getattr(module, _COMPONENT_BUFFER_NAMES[component_name])
-        stored_buffer = _decode_tensor(
-            checkpoint,
-            f"{component_name}.{_COMPONENT_BUFFER_NAMES[component_name]}",
-        )
-        if not torch.equal(stored_buffer, expected_buffer.detach().cpu()):
-            raise DreamerCheckpointMaterializationError(
-                f"checkpoint {component_name} fixed bins are incompatible"
-            )
+        for buffer_name in _COMPONENT_BUFFER_NAMES.get(component_name, ()):
+            expected_buffer = getattr(module, buffer_name)
+            stored_buffer = _decode_tensor(checkpoint, f"{component_name}.{buffer_name}")
+            if not torch.equal(stored_buffer, expected_buffer.detach().cpu()):
+                raise DreamerCheckpointMaterializationError(
+                    f"checkpoint {component_name} fixed buffer {buffer_name} is incompatible"
+                )
         module.requires_grad_(False)
         module.eval()
 
@@ -243,7 +248,13 @@ def dreamer_inference_probe_sha256(
         observed = world_model.observe(batch, context_state=context_state, sample=False)
         features = observed["features"][:, -1]
         control_mask = batch["control_action_mask"][:, -1]
-        actor_output = actor(features, control_mask)
+        taste_objective = batch["taste_objective"]
+        actor_output = actor(
+            features,
+            taste_objective,
+            batch["pre_shot_capability_mask"],
+            control_mask,
+        )
         behavior = behavior_tensor_from_parts(
             observed_profile_targets=batch["observed_profile_targets"][:, -1],
             observed_profile_target_mask=batch["observed_profile_target_mask"][:, -1],
@@ -252,6 +263,9 @@ def dreamer_inference_probe_sha256(
             control_action_mask=control_mask,
             constraints=batch["constraints"][:, -1],
             decision_step_mask=batch["decision_step_mask"][:, -1],
+            pre_shot_actions=actor_output["pre_shot_actions"],
+            pre_shot_action_mask=actor_output["pre_shot_action_mask"],
+            pre_shot_capability_mask=batch["pre_shot_capability_mask"],
         )
         imagined = world_model.imagine_step(
             observed["deter"][:, -1],
@@ -261,8 +275,8 @@ def dreamer_inference_probe_sha256(
         )
         outputs = {
             "actor.dynamic_actions": actor_output["dynamic_actions"],
-            "actor.static_actions": actor_output["static_actions"],
-            "actor.static_logits": actor_output["static_logits"],
+            "actor.pre_shot_actions": actor_output["pre_shot_actions"],
+            "actor.pre_shot_logits": actor_output["pre_shot_logits"],
             "context.mask": batch["context_mask"],
             "context.source_training_row_ids": batch["context_source_training_row_ids"].to(dtype=torch.float32),
             "context.static": batch["context_static"],
@@ -270,8 +284,8 @@ def dreamer_inference_probe_sha256(
             "context.time": batch["context_time"],
             "context.trajectory_embedding": batch["context_trajectory_embedding"],
             "context.encoded_state": context_state,
-            "critic.logits": critic(features),
-            "critic.value": critic.value(features),
+            "critic.logits": critic(features, taste_objective),
+            "critic.value": critic.value(features, taste_objective),
             "probe.imagine_features": imagined["features"],
             "probe.imagine_prior_logits": imagined["prior_logits"],
             "world.continuation": world_model.continuation_probability(features),
@@ -300,13 +314,27 @@ def dreamer_batch_inference_sha256(
         context_state = context_encoder(batch)
         observed = world_model.observe(batch, context_state=context_state, sample=False)
         features = observed["features"]
-        actor_output = actor(features, batch["control_action_mask"])
+        taste_objective = batch["taste_objective"].unsqueeze(1).expand(
+            -1,
+            features.shape[1],
+            -1,
+        )
+        dynamic_output = actor.select_dynamic(
+            features,
+            taste_objective,
+            batch["control_action_mask"],
+        )
+        pre_shot_output = actor.select_pre_shot(
+            features[:, -1],
+            batch["taste_objective"],
+            batch["pre_shot_capability_mask"],
+        )
         outputs = {
-            "actor.dynamic_actions": actor_output["dynamic_actions"],
-            "actor.static_actions": actor_output["static_actions"],
-            "actor.static_logits": actor_output["static_logits"],
-            "critic.logits": critic(features),
-            "critic.value": critic.value(features),
+            "actor.dynamic_actions": dynamic_output["dynamic_actions"],
+            "actor.pre_shot_actions": pre_shot_output["pre_shot_actions"],
+            "actor.pre_shot_logits": pre_shot_output["pre_shot_logits"],
+            "critic.logits": critic(features, taste_objective),
+            "critic.value": critic.value(features, taste_objective),
             "context.encoded_state": context_state,
             "world.continuation": world_model.continuation_probability(features),
             "world.features": features,
@@ -362,7 +390,8 @@ def _probe_batch(architecture: DreamerCheckpointArchitecture) -> dict[str, torch
     step_count = 3
     observation_dim = architecture.observation_dim
     dynamic_dim = architecture.dynamic_action_dim
-    expected_behavior_dim = observation_dim * 2 + dynamic_dim * 4 + 1
+    pre_shot_dim = len(architecture.pre_shot_action_spec.bins)
+    expected_behavior_dim = observation_dim * 2 + dynamic_dim * 4 + 1 + pre_shot_dim * 3
     if expected_behavior_dim != architecture.behavior_dim:
         raise DreamerCheckpointMaterializationError(
             "checkpoint behavior dimension is incompatible with the probe feature layout"
@@ -375,6 +404,10 @@ def _probe_batch(architecture: DreamerCheckpointArchitecture) -> dict[str, torch
     control_mask[:, 1, 1::2] = 0.0
     dynamic_action_mask = control_mask.clone()
     constraints = torch.ones((batch_size, step_count, dynamic_dim), dtype=torch.float32)
+    pre_shot_actions = _sequence_tensor(batch_size, 1, pre_shot_dim, scale=0.00390625)[:, 0]
+    pre_shot_capability_mask = torch.ones_like(pre_shot_actions)
+    taste_objective = torch.zeros((batch_size, architecture.taste_objective_dim), dtype=torch.float32)
+    taste_objective[:, 0] = 1.0
     return {
         "observations": observations,
         "observed_profile_targets": observed_targets,
@@ -383,6 +416,11 @@ def _probe_batch(architecture: DreamerCheckpointArchitecture) -> dict[str, torch
         "dynamic_action_mask": dynamic_action_mask,
         "control_action_mask": control_mask,
         "constraints": constraints,
+        "pre_shot_actions": pre_shot_actions,
+        "pre_shot_action_indexes": torch.zeros((batch_size, pre_shot_dim), dtype=torch.long),
+        "pre_shot_action_mask": pre_shot_capability_mask.clone(),
+        "pre_shot_capability_mask": pre_shot_capability_mask,
+        "taste_objective": taste_objective,
         "decision_step_mask": torch.tensor([[1.0, 0.0, 1.0], [1.0, 0.0, 1.0]], dtype=torch.float32),
         "rewards": torch.zeros((batch_size, step_count), dtype=torch.float32),
         "continuations": torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 0.0]], dtype=torch.float32),
@@ -484,4 +522,5 @@ def _imagination_config(value: DreamerImaginationArchitecture) -> DreamerV3Imagi
         discount=value.discount,
         lambda_return=value.lambda_return,
         actor_entropy_scale=value.actor_entropy_scale,
+        pre_shot_behavior_loss_scale=value.pre_shot_behavior_loss_scale,
     )
