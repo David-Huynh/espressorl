@@ -725,6 +725,12 @@ acknowledgement is intentionally not required by the core contract. Gaggimate
 firmware validates the command envelope, exact machine/profile identity, and
 bounded target fields before mutating the active Dreamer auto profile phase; it
 publishes accepted/rejected ESP32-received acknowledgements on the ack topic.
+The runtime correlates those acknowledgements against a bounded in-memory
+publication history. Unknown, mismatched, rejected, timed-out, late, and QoS1
+duplicate acknowledgements are tracked separately. Public status exposes only
+aggregate counts and allowlisted reason categories under
+`dreamer_live_control_ack`; publication IDs, raw reasons, and target bodies are
+not included.
 
 ## Warm-Started BO Priors
 

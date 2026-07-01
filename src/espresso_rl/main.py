@@ -49,6 +49,9 @@ from espresso_rl.application.dreamer_shadow_inference import (
     build_dreamer_shadow_inference_session,
 )
 from espresso_rl.application.dreamer_recommendations import DreamerRecommendationService
+from espresso_rl.application.dreamer_live_acknowledgements import (
+    DreamerLiveControlAcknowledgementService,
+)
 from espresso_rl.application.dreamer_shadow_evaluation import (
     DreamerShadowEvaluationError,
     DreamerShadowEvaluationService,
@@ -74,7 +77,10 @@ from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityUploadCredentials
-from espresso_rl.domain.dreamer_control import DreamerLiveControlPublication
+from espresso_rl.domain.dreamer_control import (
+    DreamerLiveControlAcknowledgement,
+    DreamerLiveControlPublication,
+)
 from espresso_rl.domain.events import (
     LocalResetEvent,
     OptimizerSettingsEvent,
@@ -200,6 +206,9 @@ def main() -> None:
         machine_id=config.machine_id,
         clock=config.now,
     )
+    dreamer_live_acknowledgements = DreamerLiveControlAcknowledgementService(
+        clock_ms=lambda: int(config.now() * 1000),
+    )
 
     stop_event = threading.Event()
     admin_pipeline = maybe_build_admin_pipeline_service(config)
@@ -265,6 +274,7 @@ def main() -> None:
             optimizer_status=runtime_optimizer.status().to_dict(),
             shadow_evaluation_service=shadow_evaluation_service,
             shadow_quality_service=shadow_quality_service,
+            dreamer_live_ack_summary=dreamer_live_acknowledgements.status_summary(machine_id),
         )
         mqtt_client.publish_status(machine_id, status)
 
@@ -273,6 +283,7 @@ def main() -> None:
             mqtt_client.publish_recommendation(recommendation)
 
         def publish_dreamer_live_control(self, publication: DreamerLiveControlPublication) -> None:
+            dreamer_live_acknowledgements.record_publication(publication)
             mqtt_client.publish_dreamer_live_control(publication)
 
         def publish_status(
@@ -416,8 +427,23 @@ def main() -> None:
             result.counts,
         )
         if not event.dry_run:
+            dreamer_live_acknowledgements.reset(event.machine_id)
             mqtt_client.clear_recommendation(event.machine_id)
         publish_status(event.machine_id, None, None)
+
+    def on_dreamer_live_ack(event: DreamerLiveControlAcknowledgement) -> None:
+        if not _same_machine_id(event.machine_id, config.machine_id):
+            logger.warning("Ignoring Dreamer live acknowledgement for unexpected machine=%s", event.machine_id)
+            return
+        result = dreamer_live_acknowledgements.record_acknowledgement(event)
+        logger.info(
+            "Dreamer live acknowledgement outcome=%s accepted=%s reason_category=%s sequence=%d step=%d",
+            result.outcome,
+            result.accepted,
+            result.reason_category,
+            result.sequence,
+            result.step_index,
+        )
 
     mqtt_client = GaggimateMQTTClient(
         config=config,
@@ -430,6 +456,7 @@ def main() -> None:
         on_machine_state=runtime_coordinator.handle_machine_state,
         on_optimizer_settings=on_optimizer_settings,
         on_local_reset=on_local_reset,
+        on_dreamer_live_ack=on_dreamer_live_ack,
     )
 
     def shutdown(sig: int, frame: object) -> None:
@@ -460,6 +487,7 @@ def main() -> None:
         optimizer_status=runtime_optimizer.status().to_dict(),
         shadow_evaluation_service=shadow_evaluation_service,
         shadow_quality_service=shadow_quality_service,
+        dreamer_live_ack_summary=dreamer_live_acknowledgements.status_summary(config.machine_id),
     )
     logger.info("Listening for canonical events via Gaggimate MQTT adapter")
     signal.pause()
@@ -507,6 +535,7 @@ def maybe_publish_startup_recommendation(
     optimizer_status: dict[str, object] | None = None,
     shadow_evaluation_service: DreamerShadowEvaluationService | None = None,
     shadow_quality_service: DreamerShadowQualityReportService | None = None,
+    dreamer_live_ack_summary: dict[str, object] | None = None,
 ) -> None:
     if config.machine_id == "gaggimate:local":
         return
@@ -526,6 +555,7 @@ def maybe_publish_startup_recommendation(
                 optimizer_status=optimizer_status,
                 shadow_evaluation_service=shadow_evaluation_service,
                 shadow_quality_service=shadow_quality_service,
+                dreamer_live_ack_summary=dreamer_live_ack_summary,
             ),
         )
         return
@@ -554,6 +584,7 @@ def maybe_publish_startup_recommendation(
                 optimizer_status=optimizer_status,
                 shadow_evaluation_service=shadow_evaluation_service,
                 shadow_quality_service=shadow_quality_service,
+                dreamer_live_ack_summary=dreamer_live_ack_summary,
             ),
         )
         return
@@ -572,6 +603,7 @@ def maybe_publish_startup_recommendation(
             optimizer_status=optimizer_status,
             shadow_evaluation_service=shadow_evaluation_service,
             shadow_quality_service=shadow_quality_service,
+            dreamer_live_ack_summary=dreamer_live_ack_summary,
         ),
     )
 
@@ -588,6 +620,65 @@ def _profile_ids_match(left: str | None, right: str | None) -> bool:
     if left is None or right is None:
         return left is right
     return left.strip().casefold() == right.strip().casefold()
+
+
+def _dreamer_live_ack_status_payload(summary: dict[str, object] | None) -> dict[str, object]:
+    summary = summary or {}
+    health = summary.get("health")
+    if health not in {"idle", "waiting", "healthy", "attention"}:
+        health = "idle"
+    last_result = summary.get("last_result")
+    if last_result not in {
+        None,
+        "accepted",
+        "rejected",
+        "duplicate",
+        "duplicate_publication",
+        "late",
+        "mismatch",
+        "unknown",
+        "timed_out",
+    }:
+        last_result = "unknown"
+    last_reason_category = summary.get("last_reason_category")
+    if last_reason_category not in {
+        None,
+        "none",
+        "accepted",
+        "machine_not_brewing",
+        "capability_mismatch",
+        "machine_mismatch",
+        "profile_mismatch",
+        "protocol_invalid",
+        "out_of_bounds",
+        "invalid_command",
+        "timeout",
+        "unknown",
+    }:
+        last_reason_category = "unknown"
+    last_event_at_ms = summary.get("last_event_at_ms")
+    if isinstance(last_event_at_ms, bool) or not isinstance(last_event_at_ms, int) or last_event_at_ms < 0:
+        last_event_at_ms = None
+
+    def count(field: str) -> int:
+        value = summary.get(field)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    return {
+        "health": health,
+        "published_count": count("published_count"),
+        "pending_count": count("pending_count"),
+        "accepted_count": count("accepted_count"),
+        "rejected_count": count("rejected_count"),
+        "duplicate_ack_count": count("duplicate_ack_count"),
+        "late_ack_count": count("late_ack_count"),
+        "mismatched_ack_count": count("mismatched_ack_count"),
+        "unknown_ack_count": count("unknown_ack_count"),
+        "timed_out_count": count("timed_out_count"),
+        "last_result": last_result,
+        "last_reason_category": last_reason_category,
+        "last_event_at_ms": last_event_at_ms,
+    }
 
 
 def build_status_payload(
@@ -610,6 +701,7 @@ def build_status_payload(
     optimizer_status: dict[str, object] | None = None,
     shadow_evaluation_service: DreamerShadowEvaluationService | None = None,
     shadow_quality_service: DreamerShadowQualityReportService | None = None,
+    dreamer_live_ack_summary: dict[str, object] | None = None,
 ) -> dict:
     now = config.now()
     all_recent = (
@@ -949,6 +1041,7 @@ def build_status_payload(
         "optimizer_dreamer_v3_last_bo_fallback_reason": optimizer_status.get(
             "dreamer_v3_last_bo_fallback_reason"
         ),
+        "dreamer_live_control_ack": _dreamer_live_ack_status_payload(dreamer_live_ack_summary),
         "dreamer_shadow_evaluation": shadow_summary,
         "dreamer_shadow_quality_report": shadow_quality_summary,
         "local_shot_count": len(optimizer_shots),

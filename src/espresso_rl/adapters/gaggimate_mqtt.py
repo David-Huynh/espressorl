@@ -19,7 +19,11 @@ from espresso_rl.domain.events import (
     ShotProfileEvent,
     UploadQueueMaintenanceEvent,
 )
-from espresso_rl.domain.dreamer_control import DreamerLiveControlPublication
+from espresso_rl.domain.dreamer_control import (
+    DREAMER_LIVE_ACK_SCOPE_ESP32_RECEIVED,
+    DreamerLiveControlAcknowledgement,
+    DreamerLiveControlPublication,
+)
 from espresso_rl.domain.models import Recommendation
 from espresso_rl.domain.models import new_id
 
@@ -34,6 +38,24 @@ APPLY_TOPIC = "gaggimate/+/rl/recommendation/apply"
 MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
 OPTIMIZER_SETTINGS_TOPIC = "gaggimate/+/rl/settings"
 LOCAL_RESET_TOPIC = "gaggimate/+/rl/local/reset"
+DREAMER_ACK_TOPIC = "gaggimate/+/rl/dreamer/ack"
+
+_DREAMER_ACK_FIELDS = frozenset(
+    {
+        "event_type",
+        "schema_version",
+        "machine_id",
+        "publication_id",
+        "sequence",
+        "step_index",
+        "ack_scope",
+        "accepted",
+        "status",
+        "reason",
+        "source",
+        "timestamp",
+    }
+)
 
 
 class GaggimateMQTTClient:
@@ -51,6 +73,7 @@ class GaggimateMQTTClient:
         on_machine_state: Callable[[MachineStateEvent], None],
         on_optimizer_settings: Callable[[OptimizerSettingsEvent], None] | None = None,
         on_local_reset: Callable[[LocalResetEvent], None] | None = None,
+        on_dreamer_live_ack: Callable[[DreamerLiveControlAcknowledgement], None] | None = None,
     ) -> None:
         self._config = config
         self._on_shot = on_shot
@@ -62,6 +85,7 @@ class GaggimateMQTTClient:
         self._on_machine_state = on_machine_state
         self._on_optimizer_settings = on_optimizer_settings or (lambda event: None)
         self._on_local_reset = on_local_reset or (lambda event: None)
+        self._on_dreamer_live_ack = on_dreamer_live_ack or (lambda event: None)
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.mqtt_user:
             self._client.username_pw_set(config.mqtt_user, config.mqtt_password)
@@ -184,8 +208,9 @@ class GaggimateMQTTClient:
             client.subscribe(MACHINE_STATE_TOPIC)
             client.subscribe(OPTIMIZER_SETTINGS_TOPIC)
             client.subscribe(LOCAL_RESET_TOPIC)
+            client.subscribe(DREAMER_ACK_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
                 FEEDBACK_TOPIC,
                 CORRECTION_TOPIC,
@@ -195,6 +220,7 @@ class GaggimateMQTTClient:
                 MACHINE_STATE_TOPIC,
                 OPTIMIZER_SETTINGS_TOPIC,
                 LOCAL_RESET_TOPIC,
+                DREAMER_ACK_TOPIC,
             )
         else:
             logger.error("MQTT connection refused: %s", reason_code)
@@ -227,8 +253,59 @@ class GaggimateMQTTClient:
                 self._on_optimizer_settings(self.translate_optimizer_settings_payload(payload, mac))
             elif msg.topic.endswith("/rl/local/reset"):
                 self._on_local_reset(self.translate_local_reset_payload(payload, mac))
+            elif msg.topic.endswith("/rl/dreamer/ack"):
+                self._on_dreamer_live_ack(self.translate_dreamer_live_ack_payload(payload, mac))
         except Exception:
             logger.exception("Error handling message on %s", msg.topic)
+
+    def translate_dreamer_live_ack_payload(
+        self,
+        payload: dict[str, Any],
+        mac: str,
+    ) -> DreamerLiveControlAcknowledgement:
+        if not isinstance(payload, dict):
+            raise ValueError("Dreamer live acknowledgement payload must be an object")
+        unknown = sorted(str(key) for key in payload if key not in _DREAMER_ACK_FIELDS)
+        if unknown:
+            raise ValueError(f"Dreamer live acknowledgement contains unsupported fields: {', '.join(unknown[:5])}")
+        if payload.get("event_type") != "dreamer_live_ack":
+            raise ValueError("Dreamer live acknowledgement event_type is invalid")
+        if _strict_non_negative_int(payload.get("schema_version"), "schema_version") != 1:
+            raise ValueError("Dreamer live acknowledgement schema_version is unsupported")
+
+        topic_machine_id = f"gaggimate:{mac}"
+        payload_machine_id = _required_bounded_string(payload.get("machine_id"), "machine_id", maximum=160)
+        if not _same_gaggimate_machine_id(topic_machine_id, payload_machine_id):
+            raise ValueError("Dreamer live acknowledgement machine_id does not match topic")
+
+        sequence = _strict_non_negative_int(payload.get("sequence"), "sequence")
+        step_index = _strict_non_negative_int(payload.get("step_index"), "step_index")
+        publication_id = _required_bounded_string(payload.get("publication_id"), "publication_id", maximum=200)
+        if publication_id != f"{payload_machine_id}:{sequence}":
+            raise ValueError("Dreamer live acknowledgement publication_id is invalid")
+        if payload.get("ack_scope") != DREAMER_LIVE_ACK_SCOPE_ESP32_RECEIVED:
+            raise ValueError("Dreamer live acknowledgement ack_scope is unsupported")
+        if not isinstance(payload.get("accepted"), bool):
+            raise ValueError("Dreamer live acknowledgement accepted must be boolean")
+        status = _required_bounded_string(payload.get("status"), "status", maximum=40)
+        reason = _optional_bounded_string(payload.get("reason"), "reason", maximum=120)
+        if payload.get("source") != "gaggimate_mqtt":
+            raise ValueError("Dreamer live acknowledgement source is invalid")
+        reported_at = (
+            _strict_non_negative_int(payload.get("timestamp"), "timestamp")
+            if payload.get("timestamp") is not None
+            else None
+        )
+        return DreamerLiveControlAcknowledgement(
+            machine_id=payload_machine_id,
+            publication_id=publication_id,
+            sequence=sequence,
+            step_index=step_index,
+            accepted=payload["accepted"],
+            status=status,
+            reason=reason,
+            reported_at=reported_at,
+        )
 
     def translate_shot_payload(self, payload: dict[str, Any], mac: str) -> ShotProfileEvent:
         install_id = str(payload.get("install_id") or self._config.install_id)
@@ -613,6 +690,31 @@ def _optional_string(value: Any) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _required_bounded_string(value: Any, field_name: str, *, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"Dreamer live acknowledgement {field_name} must be a string")
+    normalized = value.strip()
+    if not normalized or len(normalized) > maximum:
+        raise ValueError(f"Dreamer live acknowledgement {field_name} is invalid")
+    return normalized
+
+
+def _optional_bounded_string(value: Any, field_name: str, *, maximum: int) -> str | None:
+    if value is None:
+        return None
+    return _required_bounded_string(value, field_name, maximum=maximum)
+
+
+def _strict_non_negative_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"Dreamer live acknowledgement {field_name} must be a non-negative integer")
+    return value
+
+
+def _same_gaggimate_machine_id(left: str, right: str) -> bool:
+    return _machine_topic_id(left).casefold() == _machine_topic_id(right).casefold()
 
 
 def _machine_topic_id(machine_id: str) -> str:

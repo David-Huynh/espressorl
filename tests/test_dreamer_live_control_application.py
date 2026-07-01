@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import unittest
 
+from espresso_rl.application.dreamer_live_acknowledgements import (
+    ACK_OUTCOME_DUPLICATE,
+    ACK_OUTCOME_LATE,
+    ACK_OUTCOME_MISMATCH,
+    ACK_OUTCOME_UNKNOWN,
+    DreamerLiveControlAcknowledgementService,
+)
 from espresso_rl.application.dreamer_live_control import DreamerLiveControlApplication
 from espresso_rl.domain.dreamer_control import (
     DREAMER_DYNAMIC_CONTROL_ACCEPT,
     DREAMER_DYNAMIC_CONTROL_FAIL_SAFE,
     DREAMER_DYNAMIC_CONTROL_REPLAY_LAST,
     DreamerControlSpec,
+    DreamerLiveControlAcknowledgement,
+    DreamerLiveControlDecision,
+    DreamerLiveControlPublication,
 )
 
 
@@ -23,6 +33,14 @@ class RecordingPublisher:
 
     def publish_status(self, *args, **kwargs) -> None:
         raise AssertionError("not used")
+
+
+class ManualClock:
+    def __init__(self, now_ms: int = 1_000) -> None:
+        self.now_ms = now_ms
+
+    def __call__(self) -> int:
+        return self.now_ms
 
 
 class DreamerLiveControlApplicationTests(unittest.TestCase):
@@ -155,6 +173,112 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
         self.assertIsNone(result.publication.action)
         self.assertTrue(result.publication.fail_safe_required)
         self.assertTrue(any("pressure and flow" in error for error in result.publication.decision.errors))
+
+    def test_correlates_acknowledgement_and_treats_qos_duplicate_idempotently(self) -> None:
+        clock = ManualClock()
+        acknowledgements = DreamerLiveControlAcknowledgementService(clock_ms=clock)
+        publication = _publication(sequence=1, step_index=4)
+        ack = _ack(sequence=1, step_index=4, accepted=True, status="accepted", reason="accepted")
+
+        self.assertTrue(acknowledgements.record_publication(publication))
+        self.assertEqual(acknowledgements.status_summary(publication.machine_id)["health"], "waiting")
+
+        result = acknowledgements.record_acknowledgement(ack)
+        duplicate = acknowledgements.record_acknowledgement(ack)
+        summary = acknowledgements.status_summary(publication.machine_id)
+
+        self.assertEqual(result.outcome, "accepted")
+        self.assertEqual(duplicate.outcome, ACK_OUTCOME_DUPLICATE)
+        self.assertEqual(summary["health"], "healthy")
+        self.assertEqual(summary["accepted_count"], 1)
+        self.assertEqual(summary["duplicate_ack_count"], 1)
+        self.assertEqual(summary["pending_count"], 0)
+        self.assertNotIn("publication_id", summary)
+        self.assertNotIn("reason", summary)
+
+    def test_rejected_acknowledgement_exposes_only_reason_category(self) -> None:
+        clock = ManualClock()
+        acknowledgements = DreamerLiveControlAcknowledgementService(clock_ms=clock)
+        publication = _publication(sequence=2, step_index=8)
+        acknowledgements.record_publication(publication)
+
+        result = acknowledgements.record_acknowledgement(
+            _ack(
+                sequence=2,
+                step_index=8,
+                accepted=False,
+                status="rejected",
+                reason="pressure_target_bar_out_of_bounds",
+            )
+        )
+        summary = acknowledgements.status_summary(publication.machine_id)
+
+        self.assertEqual(result.outcome, "rejected")
+        self.assertEqual(result.reason_category, "out_of_bounds")
+        self.assertEqual(summary["health"], "attention")
+        self.assertEqual(summary["rejected_count"], 1)
+        self.assertEqual(summary["last_reason_category"], "out_of_bounds")
+        self.assertNotIn("pressure_target_bar_out_of_bounds", str(summary))
+
+    def test_mismatched_unknown_timed_out_and_late_acknowledgements_are_distinct(self) -> None:
+        clock = ManualClock()
+        acknowledgements = DreamerLiveControlAcknowledgementService(clock_ms=clock, ack_timeout_ms=5_000)
+        publication = _publication(sequence=3, step_index=12)
+        acknowledgements.record_publication(publication)
+
+        mismatch = acknowledgements.record_acknowledgement(
+            _ack(sequence=3, step_index=13, accepted=True, status="accepted", reason="accepted")
+        )
+        unknown = acknowledgements.record_acknowledgement(
+            _ack(sequence=99, step_index=0, accepted=True, status="accepted", reason="accepted")
+        )
+        clock.now_ms = 6_001
+        timed_out = acknowledgements.status_summary(publication.machine_id)
+        late = acknowledgements.record_acknowledgement(
+            _ack(sequence=3, step_index=12, accepted=True, status="accepted", reason="accepted")
+        )
+        summary = acknowledgements.status_summary(publication.machine_id)
+
+        self.assertEqual(mismatch.outcome, ACK_OUTCOME_MISMATCH)
+        self.assertEqual(unknown.outcome, ACK_OUTCOME_UNKNOWN)
+        self.assertEqual(timed_out["timed_out_count"], 1)
+        self.assertEqual(late.outcome, ACK_OUTCOME_LATE)
+        self.assertEqual(summary["mismatched_ack_count"], 1)
+        self.assertEqual(summary["late_ack_count"], 1)
+        self.assertEqual(summary["health"], "attention")
+
+def _publication(*, sequence: int, step_index: int) -> DreamerLiveControlPublication:
+    return DreamerLiveControlPublication(
+        machine_id="gaggimate:AA_BB",
+        profile_id="dreamer_auto",
+        sequence=sequence,
+        step_index=step_index,
+        issued_at_ms=1_000,
+        decision=DreamerLiveControlDecision(
+            status=DREAMER_DYNAMIC_CONTROL_ACCEPT,
+            action={"pressure_target_bar": 8.0},
+        ),
+    )
+
+
+def _ack(
+    *,
+    sequence: int,
+    step_index: int,
+    accepted: bool,
+    status: str,
+    reason: str,
+) -> DreamerLiveControlAcknowledgement:
+    return DreamerLiveControlAcknowledgement(
+        machine_id="gaggimate:AA_BB",
+        publication_id=f"gaggimate:AA_BB:{sequence}",
+        sequence=sequence,
+        step_index=step_index,
+        accepted=accepted,
+        status=status,
+        reason=reason,
+        reported_at=10,
+    )
 
 
 if __name__ == "__main__":

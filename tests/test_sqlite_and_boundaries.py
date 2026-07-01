@@ -555,6 +555,54 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 "dreamer_candidate_rejected",
             )
 
+    def test_status_payload_exposes_only_sanitized_live_ack_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(mqtt_host="localhost", data_dir=Path(tmp), install_id="install_1")
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                    clock=lambda: 10,
+                )
+
+                status = build_status_payload(
+                    config=config,
+                    service=service,
+                    shot_repo=None,
+                    upload_maintenance=None,
+                    upload_queue_repo=None,
+                    machine_id="machine_1",
+                    bean_context_id=None,
+                    dreamer_live_ack_summary={
+                        "health": "attention",
+                        "published_count": 4,
+                        "pending_count": 1,
+                        "accepted_count": 2,
+                        "rejected_count": 1,
+                        "duplicate_ack_count": 1,
+                        "late_ack_count": 0,
+                        "mismatched_ack_count": 1,
+                        "unknown_ack_count": 0,
+                        "timed_out_count": 1,
+                        "last_result": "rejected",
+                        "last_reason_category": "out_of_bounds",
+                        "last_event_at_ms": 12_000,
+                        "publication_id": "must-not-leak",
+                        "reason": "pressure_target_bar_out_of_bounds",
+                        "target_update": {"pressure_target_bar": 99},
+                    },
+                )
+
+        summary = status["dreamer_live_control_ack"]
+        self.assertEqual(summary["health"], "attention")
+        self.assertEqual(summary["published_count"], 4)
+        self.assertEqual(summary["last_reason_category"], "out_of_bounds")
+        self.assertNotIn("publication_id", summary)
+        self.assertNotIn("reason", summary)
+        self.assertNotIn("target_update", summary)
+        self.assertNotIn("pressure_target_bar_out_of_bounds", str(summary))
+
     def test_status_payload_exposes_only_aggregate_shadow_quality_results(self) -> None:
         class AggregateReport:
             def status_summary(self):

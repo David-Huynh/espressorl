@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
+from espresso_rl.adapters.gaggimate_mqtt import DREAMER_ACK_TOPIC, GaggimateMQTTClient
 from espresso_rl.adapters.sqlite_repositories import (
     SQLiteRecommendationRepository,
     SQLiteShotRepository,
@@ -37,6 +37,14 @@ class FakeMQTT:
 
     def publish(self, topic: str, payload: str, qos: int, retain: bool) -> None:
         self.published.append((topic, payload, qos, retain))
+
+
+class FakeSubscriber:
+    def __init__(self) -> None:
+        self.subscriptions: list[str] = []
+
+    def subscribe(self, topic: str) -> None:
+        self.subscriptions.append(topic)
 
 
 class FakeStartupMQTT:
@@ -771,6 +779,107 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertTrue(decoded["fallback_required"])
         self.assertTrue(decoded["fail_safe_required"])
         self.assertIsNone(decoded["target_update"])
+
+    def test_dreamer_live_ack_translates_to_canonical_event_and_dispatches(self) -> None:
+        received = []
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+            on_dreamer_live_ack=received.append,
+        )
+        payload = {
+            "event_type": "dreamer_live_ack",
+            "schema_version": 1,
+            "machine_id": "gaggimate:AA_BB",
+            "publication_id": "gaggimate:AA_BB:3",
+            "sequence": 3,
+            "step_index": 12,
+            "ack_scope": "esp32_received",
+            "accepted": True,
+            "status": "accepted",
+            "reason": "accepted",
+            "source": "gaggimate_mqtt",
+            "timestamp": 20,
+        }
+        message = type(
+            "Message",
+            (),
+            {
+                "topic": "gaggimate/AA_BB/rl/dreamer/ack",
+                "payload": json.dumps(payload).encode(),
+            },
+        )()
+
+        client._on_message(client._client, None, message)
+
+        self.assertEqual(len(received), 1)
+        event = received[0]
+        self.assertEqual(event.publication_id, "gaggimate:AA_BB:3")
+        self.assertEqual(event.sequence, 3)
+        self.assertEqual(event.step_index, 12)
+        self.assertTrue(event.accepted)
+        self.assertEqual(event.reason_category, "accepted")
+
+    def test_dreamer_live_ack_rejects_hostile_or_inconsistent_payloads(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+        valid = {
+            "event_type": "dreamer_live_ack",
+            "schema_version": 1,
+            "machine_id": "gaggimate:AA_BB",
+            "publication_id": "gaggimate:AA_BB:3",
+            "sequence": 3,
+            "step_index": 12,
+            "ack_scope": "esp32_received",
+            "accepted": True,
+            "status": "accepted",
+            "reason": "accepted",
+            "source": "gaggimate_mqtt",
+            "timestamp": 20,
+        }
+        invalid_payloads = [
+            {**valid, "machine_id": "gaggimate:CC_DD"},
+            {**valid, "publication_id": "gaggimate:AA_BB:4"},
+            {**valid, "accepted": True, "status": "rejected"},
+            {**valid, "unexpected": "raw-command"},
+            {**valid, "sequence": True},
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    client.translate_dreamer_live_ack_payload(payload, "AA_BB")
+
+    def test_mqtt_connect_subscribes_to_dreamer_ack_topic(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+        subscriber = FakeSubscriber()
+
+        client._on_connect(subscriber, None, None, 0, None)  # type: ignore[arg-type]
+
+        self.assertIn(DREAMER_ACK_TOPIC, subscriber.subscriptions)
 
     def test_clear_recommendation_publishes_retained_empty_payload(self) -> None:
         client = GaggimateMQTTClient(

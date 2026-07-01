@@ -29,6 +29,17 @@ DREAMER_DYNAMIC_CONTROL_WAIT_FOR_FIRST_COMMAND = "wait_for_first_command"
 DREAMER_DYNAMIC_CONTROL_FAIL_SAFE = "fail_safe"
 DREAMER_LIVE_CONTROL_PUBLICATION_FORMAT = "espresso_rl_dreamer_live_control_publication_v1"
 DREAMER_LIVE_CONTROL_PUBLICATION_SCHEMA_VERSION = 1
+DREAMER_LIVE_ACK_SCOPE_ESP32_RECEIVED = "esp32_received"
+DREAMER_LIVE_ACK_STATUS_ACCEPTED = "accepted"
+DREAMER_LIVE_ACK_STATUS_REJECTED = "rejected"
+DREAMER_LIVE_ACK_STATUS_FAIL_SAFE_RECEIVED = "fail_safe_received"
+DREAMER_LIVE_ACK_STATUSES = frozenset(
+    {
+        DREAMER_LIVE_ACK_STATUS_ACCEPTED,
+        DREAMER_LIVE_ACK_STATUS_REJECTED,
+        DREAMER_LIVE_ACK_STATUS_FAIL_SAFE_RECEIVED,
+    }
+)
 
 DREAMER_DYNAMIC_ACTION_FIELDS = (
     "pressure_target_bar",
@@ -259,6 +270,79 @@ class DreamerLiveControlPublication:
             "clamped_fields": list(self.decision.clamped_fields),
             "errors": list(self.decision.errors),
         }
+
+
+@dataclass(frozen=True)
+class DreamerLiveControlAcknowledgement:
+    machine_id: str
+    publication_id: str
+    sequence: int
+    step_index: int
+    accepted: bool
+    status: str
+    reason: str | None = None
+    reported_at: int | None = None
+    ack_scope: str = DREAMER_LIVE_ACK_SCOPE_ESP32_RECEIVED
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _bounded_string(self.machine_id, "acknowledgement machine_id", maximum=160)
+        _bounded_string(self.publication_id, "acknowledgement publication_id", maximum=200)
+        _bounded_non_negative_int(self.sequence, "acknowledgement sequence")
+        _bounded_non_negative_int(self.step_index, "acknowledgement step_index")
+        if not isinstance(self.accepted, bool):
+            raise ValueError("Dreamer live control acknowledgement accepted must be boolean")
+        if self.status not in DREAMER_LIVE_ACK_STATUSES:
+            raise ValueError("Dreamer live control acknowledgement status is unsupported")
+        if self.accepted != (self.status != DREAMER_LIVE_ACK_STATUS_REJECTED):
+            raise ValueError("Dreamer live control acknowledgement status conflicts with accepted")
+        if self.ack_scope != DREAMER_LIVE_ACK_SCOPE_ESP32_RECEIVED:
+            raise ValueError("Dreamer live control acknowledgement scope is unsupported")
+        if self.schema_version != 1:
+            raise ValueError("Dreamer live control acknowledgement schema_version is unsupported")
+        if self.reason is not None:
+            _bounded_string(self.reason, "acknowledgement reason", maximum=120)
+        if self.reported_at is not None:
+            _bounded_non_negative_int(self.reported_at, "acknowledgement reported_at")
+
+    @property
+    def reason_category(self) -> str:
+        return dreamer_live_ack_reason_category(self.reason)
+
+
+def dreamer_live_ack_reason_category(reason: str | None) -> str:
+    normalized = (reason or "").strip().casefold()
+    if not normalized:
+        return "none"
+    if normalized in {"accepted", "no_op", "fail_safe_applied"}:
+        return "accepted"
+    if normalized == "not_active_brew":
+        return "machine_not_brewing"
+    if normalized == "yield_requires_volumetric_brew":
+        return "capability_mismatch"
+    if normalized == "machine_mismatch":
+        return "machine_mismatch"
+    if normalized in {"profile_mismatch", "not_dreamer_auto_profile"}:
+        return "profile_mismatch"
+    if normalized in {
+        "event_type_mismatch",
+        "schema_version_unsupported",
+        "publication_id_invalid",
+        "sequence_invalid",
+        "step_index_invalid",
+        "ack_contract_invalid",
+    }:
+        return "protocol_invalid"
+    if normalized.endswith("_out_of_bounds"):
+        return "out_of_bounds"
+    if normalized.endswith("_invalid") or normalized in {
+        "invalid_json",
+        "target_update_invalid",
+        "unsupported_target_field",
+        "ambiguous_pump_target",
+    }:
+        return "invalid_command"
+    return "unknown"
 
 
 @dataclass(frozen=True)
@@ -600,6 +684,12 @@ def _integer_ms(value: object, field_name: str) -> int:
 def _bounded_non_negative_int(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"Dreamer live control publication {field_name} must be a non-negative integer")
+    return value
+
+
+def _bounded_string(value: object, field_name: str, *, maximum: int) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+        raise ValueError(f"Dreamer live control {field_name} is invalid")
     return value
 
 
