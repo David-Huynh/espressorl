@@ -32,9 +32,12 @@ The core packages are:
 - `espresso_rl.adapters`: Postgres/SQLite persistence, signed upload,
   Supabase queue access, and Gaggimate MQTT translation.
 
-DreamerV3 modules remain present but are not wired into the active
-recommendation path until they can pass through the same safety,
-recommendation-memory, and follow-through gates.
+DreamerV3 remains unavailable unless a release-approved, parity-verified
+checkpoint declares runtime inference readiness. A qualifying checkpoint can
+serve shot-level recommendations through the normal safety, recommendation
+memory, and follow-through gates. Live recurrent control is additionally
+restricted to the explicit `dreamer_auto` profile and the authenticated
+machine capability contract.
 
 ## Quick Start
 
@@ -91,10 +94,10 @@ contexts.
 Gaggimate can override `optimizer_mode` at runtime by publishing a retained
 `gaggimate/<machine>/rl/settings` payload. `bayesian_optimization` is always
 available. DreamerV3 is only advertised to the Gaggimate UI when model artifact
-metadata is configured, the local artifact file matches its SHA-256, and a
-plain JSON model manifest verifies the dataset/trainer/schema provenance; until
-active Dreamer inference is safety-gated, BO remains the effective
-recommendation path.
+metadata is configured, the local artifact file matches its SHA-256, a plain
+JSON model manifest verifies the dataset/trainer/schema provenance, and the
+checkpoint passes tensor and inference parity checks. BO remains the effective
+path whenever those requirements are not met.
 
 Official Docker builds can embed a release-default model SHA with the
 `ESPRESSORL_RELEASE_MODEL_ARTIFACT_SHA256` build arg, normally supplied by the
@@ -504,7 +507,7 @@ should group rows by `install_id`, `machine_id`, `bean_context_id`, and
 `grinder_context_id`.
 
 The Dreamer helper `espresso_rl.dreamer.dataset.load_dreamer_episodes_from_jsonl`
-converts those canonical rows into `espresso_rl_dreamer_episode_v3` shot
+converts those canonical rows into `espresso_rl_dreamer_episode_v4` shot
 episodes for recurrent training. Dreamer uses the additional named
 `fixed_cadence_sequence`, resampled onto exact 250 ms intervals from the first
 real telemetry sample. Shots remain variable length and are padded only during
@@ -543,7 +546,7 @@ cadence. Decision steps are fixed and equally spaced; the batcher forward-fills
 the latest decision as the held action between decision ticks. BO and other
 shot-level optimizers do not emit adaptive in-shot profile controls.
 
-Episode v3 also contains a versioned `pre_shot_action`. It deterministically
+Episode v4 also contains a versioned `pre_shot_action`. It deterministically
 encodes factorized categorical behavior targets for the observed dose, yield,
 initial temperature, pressure-or-flow mode and target, and valve state. A grind
 delta is included only when both the current shot and the immediately previous
@@ -583,7 +586,7 @@ uv run espresso-rl-build-dreamer-artifacts \
 ```
 
 It validates the dataset hash, revalidates every JSONL transition, rejects
-absolute grinder fields, builds `espresso_rl_dreamer_episode_v3` episodes,
+absolute grinder fields, builds `espresso_rl_dreamer_episode_v4` episodes,
 constructs deterministic Dreamer tensors under the configured control,
 pre-shot action, and live-action specs, writes tensor feature/cadence hashes
 into the audit report, and binds the pre-shot action, live-action, and
@@ -602,9 +605,13 @@ imagination preview from posterior RSSM starts through the prior. Its
 taste-conditioned pre-shot actor has one categorical head per authenticated
 pre-shot action field and a masked behavior-cloning loss. The selected plan is
 held in every imagined RSSM transition while the live actor emits
-authenticated categorical target deltas at fixed cadence. Those deltas are
-applied to the current target state and clamped to the control-spec safety
-envelope before the world model receives the dynamic target tensor. A
+authenticated categorical pump-mode choices and target deltas at fixed
+cadence. At each decision the actor selects pressure mode or flow mode, and
+only the matching target head is active. Same-mode deltas apply to the active
+target; mode-switch deltas apply to the current measured or imagined physical
+pressure/flow so an inactive stale target cannot cause a jump. Resulting
+targets are clamped to the control-spec safety envelope before the world model
+receives the dynamic target tensor. A
 taste-conditioned symlog/two-hot critic supplies lambda-return targets. The
 preview stage now performs a bounded
 deterministic actor/critic training loop in latent imagination and records
@@ -744,9 +751,14 @@ aggregate counts and allowlisted reason categories under
 not included.
 
 No model is authorized for live machine control merely because telemetry is
-available. Without a release-ready checkpoint-backed implementation of the
-`DreamerLiveInference` port, samples report `inactive_model`, no target command
-is emitted, and the static `dreamer_auto` fallback profile continues normally.
+available. The checkpoint-backed `DreamerLiveInference` adapter maintains one
+recurrent RSSM state per active shot, conditions it with up to 16 same-bean and
+same-grinder local episodes (including previous bags), observes telemetry at
+250 ms, and invokes the actor only on authenticated decision ticks. It is wired
+only when the checkpoint is release-ready, parity-verified, selected as active
+Dreamer, and the machine is running `dreamer_auto`. Otherwise samples report an
+inactive outcome, no target command is emitted, and the static fallback
+continues normally.
 
 ## Warm-Started BO Priors
 

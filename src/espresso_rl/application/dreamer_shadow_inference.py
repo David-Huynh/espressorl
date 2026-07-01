@@ -46,6 +46,12 @@ def build_dreamer_shadow_inference_session(
         models = materialize_verified_dreamer_checkpoint(checkpoint)
     except DreamerCheckpointMaterializationError as exc:
         raise DreamerShadowInferenceError(str(exc)) from exc
+    architecture = checkpoint.architecture
+    machine_control_enabled = bool(
+        checkpoint.inference_ready
+        and architecture is not None
+        and architecture.control_spec.dynamic_control_enabled
+    )
     return DreamerShadowInferenceSession(
         models=models,
         status=DreamerShadowInferenceStatus(
@@ -58,6 +64,7 @@ def build_dreamer_shadow_inference_session(
             component_names=checkpoint.component_names,
             inference_ready=checkpoint.inference_ready,
             recommendation_enabled=checkpoint.inference_ready,
+            machine_control_enabled=machine_control_enabled,
         ),
         checkpoint=checkpoint,
     )

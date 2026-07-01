@@ -45,6 +45,8 @@ OPTIMIZER_SETTINGS_TOPIC = "gaggimate/+/rl/settings"
 LOCAL_RESET_TOPIC = "gaggimate/+/rl/local/reset"
 DREAMER_ACK_TOPIC = "gaggimate/+/rl/dreamer/ack"
 DREAMER_TELEMETRY_TOPIC = "gaggimate/+/rl/dreamer/telemetry"
+_SHOT_FINISH_SETTLE_SAMPLES = 2
+_SHOT_FINISH_SETTLE_MAX_DELTA_G = 1.0
 
 _DREAMER_ACK_FIELDS = frozenset(
     {
@@ -101,7 +103,7 @@ _DREAMER_TELEMETRY_CAPABILITY_FIELDS = frozenset(
     {
         "pressure_control_allowed",
         "flow_control_allowed",
-        "pump_control_allowed",
+        "pump_mode_control_allowed",
         "valve_control_allowed",
         "temperature_control_allowed",
         "stop_control_allowed",
@@ -198,6 +200,14 @@ class GaggimateMQTTClient:
         )
         topic_suffix = "fail_safe" if publication.fail_safe_required else "live_target"
         topic = f"gaggimate/{machine_topic_id}/rl/dreamer/{topic_suffix}"
+        target_update = publication.action if not publication.fail_safe_required else None
+        if target_update is not None:
+            target_update = dict(target_update)
+            pump_target_mode = target_update.pop("pump_target_mode", None)
+            if pump_target_mode == 1:
+                target_update.pop("flow_target_ml_s", None)
+            elif pump_target_mode == 2:
+                target_update.pop("pressure_target_bar", None)
         payload = {
             "event_type": event_type,
             "schema_version": 1,
@@ -212,7 +222,7 @@ class GaggimateMQTTClient:
             "fail_safe_required": publication.fail_safe_required,
             "ack_required": True,
             "ack_scope": "esp32_received",
-            "target_update": publication.action if not publication.fail_safe_required else None,
+            "target_update": target_update,
             "clamped_fields": list(publication.decision.clamped_fields),
         }
         if publication.fail_safe_required:
@@ -469,7 +479,7 @@ class GaggimateMQTTClient:
         if (beverage_out_g is None or trimmed_to_shot_time) and weight:
             beverage_out_g = float(weight[-1])
         beverage_out_g = _positive_optional_float(beverage_out_g)
-        if shot_time_s is None and time_ms:
+        if time_ms and (shot_time_s is None or trimmed_to_shot_time):
             shot_time_s = float(time_ms[-1]) / 1000.0
         return ShotProfileEvent(
             shot_id=str(payload.get("shot_id") or payload.get("id") or new_id("shot")),
@@ -761,8 +771,35 @@ def _inactive_control_tail_keep_count(payload: dict[str, Any], n: int) -> int | 
         if valve_available:
             valve_inactive = _optional_bool(valve_open[index]) is False
         if mode_inactive and valve_inactive:
-            return max(2, index)
+            return _settled_inactive_tail_keep_count(payload, index, n)
     return None
+
+
+def _settled_inactive_tail_keep_count(payload: dict[str, Any], index: int, n: int) -> int:
+    keep = max(2, index)
+    weights = payload.get("weight")
+    if not isinstance(weights, (list, tuple)) or len(weights) != n:
+        weights = payload.get("weight_g")
+    if not isinstance(weights, (list, tuple)) or len(weights) != n or index <= 0:
+        return keep
+
+    previous_weight = _optional_float(weights[index - 1])
+    if previous_weight is None:
+        return keep
+
+    settled_keep = keep
+    settle_end = min(n, index + _SHOT_FINISH_SETTLE_SAMPLES)
+    for cursor in range(index, settle_end):
+        current_weight = _optional_float(weights[cursor])
+        if current_weight is None:
+            break
+        if not math.isfinite(previous_weight) or not math.isfinite(current_weight):
+            break
+        if abs(current_weight - previous_weight) > _SHOT_FINISH_SETTLE_MAX_DELTA_G:
+            break
+        settled_keep = cursor + 1
+        previous_weight = current_weight
+    return max(keep, settled_keep)
 
 
 def _profile_target_active(value: Any) -> bool:

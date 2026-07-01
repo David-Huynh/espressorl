@@ -21,6 +21,7 @@ from espresso_rl.domain.dreamer_control import (
     DreamerLiveControlPublication,
 )
 from espresso_rl.domain.dreamer_telemetry import (
+    DreamerLiveEpisodeContext,
     DreamerLiveTelemetry,
     DreamerLiveTelemetryCapabilities,
 )
@@ -58,17 +59,46 @@ class RecordingInference:
         self.observed = []
         self.ended = []
 
-    def start_episode(self, telemetry) -> None:
+    def start_episode(self, telemetry, context) -> None:
         self.started.append(telemetry.episode_key)
 
     def infer_action(self, telemetry):
         self.observed.append(telemetry.step_index)
         if self.control_spec.is_decision_step(telemetry.step_index):
-            return {"pressure_target_bar": 8.0}
+            return {"pump_target_mode": 1, "pressure_target_bar": 8.0}
         return None
 
     def end_episode(self, *, machine_id: str, shot_id: str) -> None:
         self.ended.append((machine_id, shot_id))
+
+
+class StaticContextProvider:
+    def context_for(self, telemetry) -> DreamerLiveEpisodeContext:
+        return DreamerLiveEpisodeContext(
+            install_id="install_1",
+            machine_id=telemetry.machine_id,
+            timestamp=10,
+            bean_context_id="bean_1",
+            bean_context_name="Test bean",
+            grinder_context_id="grinder_1",
+            relative_grind_steps_from_reference=0.0,
+            relative_grind_um_from_reference=0.0,
+            grind_observed=True,
+            dose_g=18.0,
+            dose_observed=False,
+            initial_target_yield_g=36.0,
+            microns_per_step=12.5,
+            step_direction="higher_is_finer",
+            profile_id="dreamer_auto",
+            profile_type="pro",
+            profile_phase_count=1,
+            taste_objective={"mode": "auto"},
+        )
+
+
+class FailingInference(RecordingInference):
+    def infer_action(self, telemetry):
+        raise RuntimeError("synthetic inference failure")
 
 
 class DreamerLiveControlApplicationTests(unittest.TestCase):
@@ -86,6 +116,8 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
         app = DreamerLiveTelemetryApplication(
             inference=inference,
             live_control=DreamerLiveControlApplication(publisher),
+            context_provider=StaticContextProvider(),
+            enabled=True,
         )
 
         results = [app.handle_telemetry(_telemetry(step_index=index)) for index in range(5)]
@@ -107,6 +139,8 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
         app = DreamerLiveTelemetryApplication(
             inference=inference,
             live_control=DreamerLiveControlApplication(publisher),
+            context_provider=StaticContextProvider(),
+            enabled=True,
         )
 
         late = app.handle_telemetry(_telemetry(step_index=3))
@@ -123,14 +157,16 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
         inference = RecordingInference()
         inference.control_spec = DreamerControlSpec(
             dynamic_control_enabled=True,
-            pump_control_allowed=True,
+            pressure_control_allowed=True,
         )
         app = DreamerLiveTelemetryApplication(
             inference=inference,
             live_control=DreamerLiveControlApplication(publisher),
+            context_provider=StaticContextProvider(),
+            enabled=True,
         )
 
-        result = app.handle_telemetry(_telemetry(step_index=0))
+        result = app.handle_telemetry(_telemetry(step_index=0, pump_mode_control_allowed=False))
 
         self.assertEqual(result.outcome, "incompatible_capabilities")
         self.assertEqual(inference.started, [])
@@ -142,6 +178,8 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
         app = DreamerLiveTelemetryApplication(
             inference=inference,
             live_control=DreamerLiveControlApplication(publisher),
+            context_provider=StaticContextProvider(),
+            enabled=True,
         )
 
         app.handle_telemetry(_telemetry(step_index=0, shot_id="shot_1"))
@@ -150,6 +188,23 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
 
         self.assertEqual(inference.ended, [("gaggimate:AA_BB", "shot_1")])
         self.assertEqual([item.sequence for item in publisher.live_control], [1, 2])
+
+    def test_inference_failure_replays_then_fails_safe_without_crashing_runtime(self) -> None:
+        publisher = RecordingPublisher()
+        app = DreamerLiveTelemetryApplication(
+            inference=FailingInference(),
+            live_control=DreamerLiveControlApplication(publisher),
+            context_provider=StaticContextProvider(),
+            enabled=True,
+        )
+
+        first = app.handle_telemetry(_telemetry(step_index=0))
+        timed_out = app.handle_telemetry(_telemetry(step_index=24))
+
+        self.assertEqual(first.outcome, "inference_failed")
+        self.assertIsNone(first.control_result.publication)  # type: ignore[union-attr]
+        self.assertEqual(timed_out.outcome, "inference_failed")
+        self.assertTrue(timed_out.control_result.publication.fail_safe_required)  # type: ignore[union-attr]
 
     def test_accepts_bounded_live_target_update_and_publishes_canonical_command(self) -> None:
         publisher = RecordingPublisher()
@@ -165,6 +220,7 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
             machine_id="gaggimate:AA_BB",
             profile_id="dreamer_auto",
             action={
+                "pump_target_mode": 1,
                 "pressure_target_bar": 13.0,
                 "temperature_target_c": 10.0,
                 "yield_stop_target_g": 95.0,
@@ -182,6 +238,7 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
         self.assertEqual(
             publication.action,
             {
+                "pump_target_mode": 1,
                 "pressure_target_bar": 12.0,
                 "temperature_target_c": 20.0,
                 "yield_stop_target_g": 90.0,
@@ -227,7 +284,7 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
         accepted = app.handle_live_action(
             machine_id="gaggimate:AA_BB",
             profile_id="dreamer_auto",
-            action={"pressure_target_bar": 8.0},
+            action={"pump_target_mode": 1, "pressure_target_bar": 8.0},
             control_spec=spec,
             step_index=0,
             now_ms=1_000,
@@ -251,7 +308,7 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
 
         self.assertEqual(accepted.last_command_at_ms, 1_000)
         self.assertEqual(replay.publication.decision.status, DREAMER_DYNAMIC_CONTROL_REPLAY_LAST)  # type: ignore[union-attr]
-        self.assertEqual(replay.publication.action, {"pressure_target_bar": 8.0})  # type: ignore[union-attr]
+        self.assertEqual(replay.publication.action, {"pump_target_mode": 1, "pressure_target_bar": 8.0})  # type: ignore[union-attr]
         self.assertEqual(replay.last_command_at_ms, 1_000)
         self.assertEqual(stale.publication.decision.status, DREAMER_DYNAMIC_CONTROL_FAIL_SAFE)  # type: ignore[union-attr]
         self.assertEqual(stale.publication.decision.reason, "command_timeout")  # type: ignore[union-attr]
@@ -264,12 +321,13 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
             dynamic_control_enabled=True,
             pressure_control_allowed=True,
             flow_control_allowed=True,
+            pump_mode_control_allowed=True,
         )
 
         result = app.handle_live_action(
             machine_id="gaggimate:AA_BB",
             profile_id="dreamer_auto",
-            action={"pressure_target_bar": 8.0, "flow_target_ml_s": 2.0},
+            action={"pump_target_mode": 1, "pressure_target_bar": 8.0, "flow_target_ml_s": 2.0},
             control_spec=spec,
             step_index=0,
             now_ms=1_000,
@@ -280,6 +338,32 @@ class DreamerLiveControlApplicationTests(unittest.TestCase):
         self.assertIsNone(result.publication.action)
         self.assertTrue(result.publication.fail_safe_required)
         self.assertTrue(any("pressure and flow" in error for error in result.publication.decision.errors))
+
+    def test_actor_selected_flow_mode_is_accepted_without_pressure_target(self) -> None:
+        publisher = RecordingPublisher()
+        app = DreamerLiveControlApplication(publisher)
+        spec = DreamerControlSpec(
+            dynamic_control_enabled=True,
+            pressure_control_allowed=True,
+            flow_control_allowed=True,
+            pump_mode_control_allowed=True,
+        )
+
+        result = app.handle_live_action(
+            machine_id="gaggimate:AA_BB",
+            profile_id="dreamer_auto",
+            action={"pump_target_mode": 2, "flow_target_ml_s": 2.25},
+            control_spec=spec,
+            step_index=0,
+            now_ms=1_000,
+        )
+
+        self.assertEqual(result.publication.decision.status, DREAMER_DYNAMIC_CONTROL_ACCEPT)  # type: ignore[union-attr]
+        self.assertEqual(
+            result.publication.action,  # type: ignore[union-attr]
+            {"pump_target_mode": 2, "flow_target_ml_s": 2.25},
+        )
+        self.assertFalse(result.publication.fail_safe_required)  # type: ignore[union-attr]
 
     def test_correlates_acknowledgement_and_treats_qos_duplicate_idempotently(self) -> None:
         clock = ManualClock()
@@ -363,7 +447,7 @@ def _publication(*, sequence: int, step_index: int) -> DreamerLiveControlPublica
         issued_at_ms=1_000,
         decision=DreamerLiveControlDecision(
             status=DREAMER_DYNAMIC_CONTROL_ACCEPT,
-            action={"pressure_target_bar": 8.0},
+            action={"pump_target_mode": 1, "pressure_target_bar": 8.0},
         ),
     )
 
@@ -388,7 +472,12 @@ def _ack(
     )
 
 
-def _telemetry(*, step_index: int, shot_id: str = "shot_1") -> DreamerLiveTelemetry:
+def _telemetry(
+    *,
+    step_index: int,
+    shot_id: str = "shot_1",
+    pump_mode_control_allowed: bool = True,
+) -> DreamerLiveTelemetry:
     return DreamerLiveTelemetry(
         machine_id="gaggimate:AA_BB",
         shot_id=shot_id,
@@ -409,7 +498,7 @@ def _telemetry(*, step_index: int, shot_id: str = "shot_1") -> DreamerLiveTeleme
         capabilities=DreamerLiveTelemetryCapabilities(
             pressure_control_allowed=True,
             flow_control_allowed=True,
-            pump_control_allowed=False,
+            pump_mode_control_allowed=pump_mode_control_allowed,
             valve_control_allowed=True,
             temperature_control_allowed=True,
             stop_control_allowed=True,

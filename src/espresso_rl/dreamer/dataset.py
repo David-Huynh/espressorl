@@ -33,6 +33,7 @@ from espresso_rl.domain.dreamer_live_action import (
     DEFAULT_DREAMER_LIVE_ACTION_SPEC,
     DreamerLiveActionSpec,
 )
+from espresso_rl.domain.dreamer_telemetry import DREAMER_LIVE_CONTEXT_WINDOW_SIZE
 from espresso_rl.domain.dreamer_pre_shot import (
     DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
     DREAMER_PRE_SHOT_ACTION_FIELDS,
@@ -108,7 +109,7 @@ DREAMER_TERMINAL_FEATURES = (
     "profile_temperature_c",
     "final_phase_temperature_c",
 )
-DREAMER_CONTEXT_WINDOW_SIZE = 16
+DREAMER_CONTEXT_WINDOW_SIZE = DREAMER_LIVE_CONTEXT_WINDOW_SIZE
 DREAMER_CONTEXT_TIME_FEATURES = ("seconds_since_context_shot",)
 DREAMER_CONTEXT_TRAJECTORY_STATISTICS = (
     "mean",
@@ -479,6 +480,58 @@ def build_dreamer_episode_batch(
             "context_trajectory_embedding": DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
         },
     }
+
+
+def build_dreamer_context_encoder_batch(
+    episodes: Iterable[dict[str, Any]],
+    *,
+    target_timestamp: int,
+    context_window_size: int = DREAMER_CONTEXT_WINDOW_SIZE,
+    device: str | torch.device | None = None,
+) -> dict[str, torch.Tensor]:
+    if isinstance(target_timestamp, bool) or not isinstance(target_timestamp, int) or target_timestamp < 0:
+        raise DreamerEpisodeDatasetError("Dreamer context target_timestamp is invalid")
+    if (
+        isinstance(context_window_size, bool)
+        or not isinstance(context_window_size, int)
+        or not 1 <= context_window_size <= DREAMER_CONTEXT_WINDOW_SIZE
+    ):
+        raise DreamerEpisodeDatasetError("Dreamer context window size is invalid")
+    validated = _validated_episodes(episodes)
+    for episode in validated:
+        if int(episode["terminal"]["timestamp"]) >= target_timestamp:
+            raise DreamerEpisodeDatasetError("Dreamer context episode must precede the live episode")
+    selected = sorted(validated, key=_episode_sort_key)[-context_window_size:]
+    static = np.zeros((1, context_window_size, len(DREAMER_STATIC_CONTEXT_FEATURES)), dtype=np.float32)
+    terminal = np.zeros((1, context_window_size, len(DREAMER_TERMINAL_FEATURES)), dtype=np.float32)
+    time = np.zeros((1, context_window_size, len(DREAMER_CONTEXT_TIME_FEATURES)), dtype=np.float32)
+    trajectory = np.zeros(
+        (1, context_window_size, len(DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES)),
+        dtype=np.float32,
+    )
+    mask = np.zeros((1, context_window_size), dtype=np.float32)
+    for index, episode in enumerate(selected):
+        static[0, index] = _encode_static_context(episode["static_context"])
+        terminal[0, index] = _encode_terminal(episode["terminal"])
+        time[0, index, 0] = max(0.0, float(target_timestamp - int(episode["terminal"]["timestamp"])))
+        trajectory[0, index] = _encode_trajectory_embedding(episode)
+        mask[0, index] = 1.0
+    target_device = torch.device(device) if device is not None else None
+    return {
+        "context_static": torch.tensor(static, dtype=torch.float32, device=target_device),
+        "context_terminal": torch.tensor(terminal, dtype=torch.float32, device=target_device),
+        "context_time": torch.tensor(time, dtype=torch.float32, device=target_device),
+        "context_trajectory_embedding": torch.tensor(trajectory, dtype=torch.float32, device=target_device),
+        "context_mask": torch.tensor(mask, dtype=torch.float32, device=target_device),
+    }
+
+
+def encode_dreamer_static_context(value: dict[str, Any]) -> tuple[float, ...]:
+    return tuple(float(item) for item in _encode_static_context(value))
+
+
+def encode_dreamer_taste_objective(value: object) -> tuple[float, ...]:
+    return tuple(float(item) for item in _encode_taste_objective(value))
 
 
 def _validated_episodes(episodes: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

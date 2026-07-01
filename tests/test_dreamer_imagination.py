@@ -46,7 +46,7 @@ class DreamerImaginationTests(unittest.TestCase):
         self.assertTrue(torch.equal(output["dynamic_action_mask"], control_mask))
         self.assertTrue(torch.equal(output["live_action_mask"], control_mask))
         self.assertEqual(float((output["dynamic_actions"] * (1.0 - control_mask)).abs().max().item()), 0.0)
-        self.assertEqual(float((output["live_action_deltas"] * (1.0 - control_mask)).abs().max().item()), 0.0)
+        self.assertEqual(float((output["live_action_choices"] * (1.0 - output["live_action_mask"])).abs().max().item()), 0.0)
 
     def test_actor_forward_applies_categorical_live_deltas_and_clamps_target_state(self) -> None:
         actor = DreamerV3ImaginationActor(
@@ -55,14 +55,19 @@ class DreamerImaginationTests(unittest.TestCase):
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         with torch.no_grad():
-            for head, bin_count in zip(actor.live_heads, actor.live_bin_counts_tuple, strict=True):
+            for field_name, head, bin_count in zip(
+                DREAMER_LIVE_ACTION_FIELDS,
+                actor.live_heads,
+                actor.live_bin_counts_tuple,
+                strict=True,
+            ):
                 head.weight.zero_()
                 head.bias.fill_(-100.0)
-                head.bias[bin_count - 1] = 100.0
+                head.bias[0 if field_name == "pump_target_mode" else bin_count - 1] = 100.0
 
         features = torch.ones((1, 6), dtype=torch.float32)
         control_mask = torch.ones((1, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=torch.float32)
-        target_state = torch.tensor([[10.0, 18.0, 0.8, 1.0, 98.0, 88.0, 0.0]], dtype=torch.float32)
+        target_state = torch.tensor([[1.0, 10.0, 18.0, 1.0, 98.0, 88.0, 0.0]], dtype=torch.float32)
 
         output = actor(features, _auto_taste(1), torch.ones((1, 9)), control_mask, target_state)
         actions = output["dynamic_actions"][0]
@@ -72,7 +77,7 @@ class DreamerImaginationTests(unittest.TestCase):
         self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("yield_stop_target_g")].item(), 90.0)
         self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("stop")].item(), 1.0)
         self.assertGreater(
-            output["live_action_deltas"][0, DREAMER_LIVE_ACTION_FIELDS.index("pressure_delta_bar")].item(),
+            output["live_action_choices"][0, DREAMER_LIVE_ACTION_FIELDS.index("pressure_delta_bar")].item(),
             0.0,
         )
 
@@ -96,6 +101,58 @@ class DreamerImaginationTests(unittest.TestCase):
         actions = output["dynamic_actions"][0]
 
         self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("temperature_target_c")].item(), 20.0)
+
+    def test_actor_mode_switch_anchors_delta_to_current_pump_measurement(self) -> None:
+        actor = DreamerV3ImaginationActor(
+            feature_dim=6,
+            taste_objective_dim=9,
+            config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
+        )
+        with torch.no_grad():
+            for field_name, head in zip(DREAMER_LIVE_ACTION_FIELDS, actor.live_heads, strict=True):
+                head.weight.zero_()
+                head.bias.fill_(-100.0)
+                selected = {
+                    "pump_target_mode": 0,
+                    "pressure_delta_bar": 8,
+                    "flow_delta_ml_s": 8,
+                    "valve_position_delta": 1,
+                    "temperature_delta_c": 5,
+                    "yield_stop_delta_g": 5,
+                    "stop": 0,
+                }[field_name]
+                head.bias[selected] = 100.0
+
+        control_mask = torch.tensor([[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]])
+        flow_target_state = torch.tensor([[2.0, 9.0, 3.0, 1.0, 92.0, 36.0, 0.0]])
+        pressure = actor.select_dynamic(
+            torch.ones((1, 6)),
+            _auto_taste(1),
+            control_mask,
+            flow_target_state,
+            torch.tensor([[4.0, 2.5]]),
+        )
+
+        self.assertEqual(pressure["dynamic_actions"][0, 0].item(), 1.0)
+        self.assertEqual(pressure["dynamic_actions"][0, 1].item(), 4.5)
+        self.assertEqual(pressure["dynamic_action_mask"][0, 2].item(), 0.0)
+
+        with torch.no_grad():
+            mode_head = actor.live_heads[DREAMER_LIVE_ACTION_FIELDS.index("pump_target_mode")]
+            mode_head.bias.fill_(-100.0)
+            mode_head.bias[1] = 100.0
+        pressure_target_state = torch.tensor([[1.0, 8.0, 7.0, 1.0, 92.0, 36.0, 0.0]])
+        flow = actor.select_dynamic(
+            torch.ones((1, 6)),
+            _auto_taste(1),
+            control_mask,
+            pressure_target_state,
+            torch.tensor([[6.0, 1.5]]),
+        )
+
+        self.assertEqual(flow["dynamic_actions"][0, 0].item(), 2.0)
+        self.assertEqual(flow["dynamic_actions"][0, 2].item(), 2.0)
+        self.assertEqual(flow["dynamic_action_mask"][0, 1].item(), 0.0)
 
     def test_lambda_returns_are_deterministic(self) -> None:
         rewards = torch.tensor([[1.0, 2.0]], dtype=torch.float32)

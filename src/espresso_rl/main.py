@@ -7,6 +7,7 @@ import threading
 from urllib.parse import urlsplit, urlunsplit
 
 from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
+from espresso_rl.adapters.dreamer_history import CanonicalDreamerHistoryEncoder
 from espresso_rl.adapters.postgres_repositories import (
     PostgresCommunityWarehouse,
     PostgresLocalDataRepository,
@@ -52,6 +53,8 @@ from espresso_rl.application.dreamer_recommendations import DreamerRecommendatio
 from espresso_rl.application.dreamer_live_acknowledgements import (
     DreamerLiveControlAcknowledgementService,
 )
+from espresso_rl.application.dreamer_live_context import DreamerLiveContextService
+from espresso_rl.application.dreamer_live_control import DreamerLiveControlApplication
 from espresso_rl.application.dreamer_live_telemetry import DreamerLiveTelemetryApplication
 from espresso_rl.application.dreamer_shadow_evaluation import (
     DreamerShadowEvaluationError,
@@ -100,6 +103,7 @@ from espresso_rl.domain.optimization import (
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
 )
 from espresso_rl.dreamer.dataset import DREAMER_CONTEXT_WINDOW_SIZE
+from espresso_rl.dreamer.live_inference import CheckpointDreamerLiveInference
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import LocalDataRepository, RecommendationRepository, ShotRepository, UploadQueueRepository
@@ -212,9 +216,14 @@ def main() -> None:
     dreamer_live_acknowledgements = DreamerLiveControlAcknowledgementService(
         clock_ms=lambda: int(config.now() * 1000),
     )
-    dreamer_live_telemetry = DreamerLiveTelemetryApplication(
-        inference=None,
-        live_control=None,
+    dreamer_live_context = DreamerLiveContextService(
+        shots=shot_repo,
+        history_encoder=CanonicalDreamerHistoryEncoder(),
+        install_id=config.install_id,
+        machine_id=config.machine_id,
+        fallback_microns_per_step=config.microns_per_step,
+        fallback_dose_g=config.initial_dose_g,
+        clock=config.now,
     )
 
     stop_event = threading.Event()
@@ -302,9 +311,29 @@ def main() -> None:
         ) -> None:
             publish_status(machine_id, bean_context_id, grinder_context_id, **kwargs)
 
+    runtime_publisher = RuntimePublisher()
+    dreamer_live_inference = None
+    if (
+        dreamer_shadow_session is not None
+        and dreamer_shadow_session.status.machine_control_enabled
+        and dreamer_shadow_session.checkpoint.architecture is not None
+    ):
+        try:
+            dreamer_live_inference = CheckpointDreamerLiveInference(
+                models=dreamer_shadow_session.models,
+                architecture=dreamer_shadow_session.checkpoint.architecture,
+            )
+        except ValueError as exc:
+            logger.warning("Dreamer live inference is unavailable: %s", exc)
+    dreamer_live_telemetry = DreamerLiveTelemetryApplication(
+        inference=dreamer_live_inference,
+        live_control=(DreamerLiveControlApplication(runtime_publisher) if dreamer_live_inference is not None else None),
+        context_provider=(dreamer_live_context if dreamer_live_inference is not None else None),
+        enabled=runtime_optimizer.status().effective_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+    )
     runtime_coordinator = AutoTuningRuntimeCoordinator(
         service=service,
-        publisher=RuntimePublisher(),
+        publisher=runtime_publisher,
         outcome_observer=record_shadow_evaluation,
     )
 
@@ -408,6 +437,10 @@ def main() -> None:
             model_artifact_sha256=event.model_artifact_sha256,
             taste_objective=event.taste_objective,
         )
+        dreamer_live_context.update_optimizer_settings(event)
+        dreamer_live_telemetry.set_enabled(
+            status.effective_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE
+        )
         logger.info(
             "Optimizer settings accepted machine=%s configured=%s effective=%s prior_mode=%s rules=%d",
             event.machine_id,
@@ -466,6 +499,7 @@ def main() -> None:
             )
 
     def on_machine_state(event: MachineStateEvent) -> None:
+        dreamer_live_context.update_machine_state(event)
         if event.state.value != "brewing":
             dreamer_live_telemetry.end_episode(machine_id=event.machine_id)
         runtime_coordinator.handle_machine_state(event)

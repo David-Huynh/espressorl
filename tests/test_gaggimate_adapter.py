@@ -435,6 +435,50 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.beverage_out_g, 36.0)
         self.assertEqual(event.shot_time_s, 0.5)
 
+    def test_shot_profile_payload_keeps_short_settle_before_opv_spike(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+
+        event = client.translate_shot_payload(
+            {
+                "shot_id": "shot_1",
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 100,
+                "time_ms": [0, 250, 500, 750, 1000, 1250, 1500],
+                "pressure": [0, 4, 9, 8, 7, 0, 0],
+                "target_pressure": [0, 2, 3, 3, 0, 0, 0],
+                "flow": [0, 0.5, 1.4, 1.9, 1.8, 0, 0],
+                "pump_flow": [0, 0.5, 1.4, 1.9, 0, 0, 0],
+                "target_flow": [0, 0, 0, 1.8, 0, 0, 0],
+                "temperature": [86.0, 86.1, 86.2, 86.3, 86.3, 86.3, 86.3],
+                "target_temperature": [86.5, 86.5, 86.5, 86.5, 86.5, 86.5, 86.5],
+                "pump_target_mode": [0, 1, 1, 2, 0, 0, 0],
+                "valve_open": [False, True, True, True, False, False, False],
+                "weight": [0, 8, 24, 32.9, 33.0, 33.2, 44.1],
+                "target_yield_g": 32.0,
+                "beverage_out_g": 44.1,
+                "shot_time_s": 40.958,
+            },
+            mac="AA_BB",
+        )
+
+        self.assertEqual(event.time_ms, [0, 250, 500, 750, 1000, 1250])
+        self.assertEqual(event.target_pressure, [0, 2, 3, 3, 0, 0])
+        self.assertEqual(event.target_flow, [0, 0, 0, 1.8, 0, 0])
+        self.assertEqual(event.pump_target_mode, [0, 1, 1, 2, 0, 0])
+        self.assertEqual(event.valve_open, [False, True, True, True, False, False])
+        self.assertEqual(event.weight, [0, 8, 24, 32.9, 33.0, 33.2])
+        self.assertEqual(event.beverage_out_g, 33.2)
+        self.assertEqual(event.shot_time_s, 1.25)
+
     def test_shot_profile_payload_does_not_trim_targetless_valve_open_phase(self) -> None:
         client = GaggimateMQTTClient(
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
@@ -724,7 +768,7 @@ class GaggimateAdapterTests(unittest.TestCase):
             issued_at_ms=22_000,
             decision=DreamerLiveControlDecision(
                 status=DREAMER_DYNAMIC_CONTROL_ACCEPT,
-                action={"pressure_target_bar": 8.5, "temperature_target_c": 92.0},
+                action={"pump_target_mode": 1, "pressure_target_bar": 8.5, "temperature_target_c": 92.0},
                 clamped_fields=("pressure_target_bar",),
             ),
         )
@@ -742,6 +786,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertTrue(decoded["ack_required"])
         self.assertFalse(decoded["fail_safe_required"])
         self.assertEqual(decoded["target_update"]["pressure_target_bar"], 8.5)
+        self.assertNotIn("pump_target_mode", decoded["target_update"])
         self.assertEqual(decoded["target_update"]["temperature_target_c"], 92.0)
         self.assertEqual(decoded["clamped_fields"], ["pressure_target_bar"])
 
@@ -900,7 +945,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.elapsed_ms, 1000)
         self.assertEqual(event.observation(), (2.0, 2.5, 1.5, 4.0, 92.0))
         self.assertTrue(event.capabilities.temperature_control_allowed)
-        self.assertFalse(event.capabilities.pump_control_allowed)
+        self.assertTrue(event.capabilities.pump_mode_control_allowed)
 
     def test_dreamer_live_telemetry_rejects_hostile_or_inconsistent_payloads(self) -> None:
         client = GaggimateMQTTClient(
@@ -915,6 +960,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         )
         valid = _dreamer_telemetry_payload()
         invalid_payloads = [
+            {**valid, "schema_version": 1},
             {**valid, "machine_id": "gaggimate:CC_DD"},
             {**valid, "elapsed_ms": 1250},
             {**valid, "unexpected": "raw-command"},
@@ -1318,7 +1364,7 @@ class GaggimateAdapterTests(unittest.TestCase):
 def _dreamer_telemetry_payload() -> dict:
     return {
         "event_type": "dreamer_live_telemetry",
-        "schema_version": 1,
+        "schema_version": 2,
         "machine_id": "gaggimate:AA_BB",
         "shot_id": "shot_1",
         "profile_id": "dreamer_auto",
@@ -1343,7 +1389,7 @@ def _dreamer_telemetry_payload() -> dict:
         "capabilities": {
             "pressure_control_allowed": True,
             "flow_control_allowed": True,
-            "pump_control_allowed": False,
+            "pump_mode_control_allowed": True,
             "valve_control_allowed": True,
             "temperature_control_allowed": True,
             "stop_control_allowed": True,

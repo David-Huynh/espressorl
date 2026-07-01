@@ -289,7 +289,7 @@ def dreamer_inference_probe_sha256(
         )
         outputs = {
             "actor.dynamic_actions": actor_output["dynamic_actions"],
-            "actor.live_action_deltas": actor_output["live_action_deltas"],
+            "actor.live_action_choices": actor_output["live_action_choices"],
             "actor.live_action_logits": actor_output["live_action_logits"],
             "actor.pre_shot_actions": actor_output["pre_shot_actions"],
             "actor.pre_shot_logits": actor_output["pre_shot_logits"],
@@ -348,7 +348,7 @@ def dreamer_batch_inference_sha256(
         )
         outputs = {
             "actor.dynamic_actions": dynamic_output["dynamic_actions"],
-            "actor.live_action_deltas": dynamic_output["live_action_deltas"],
+            "actor.live_action_choices": dynamic_output["live_action_choices"],
             "actor.live_action_logits": dynamic_output["live_action_logits"],
             "actor.pre_shot_actions": pre_shot_output["pre_shot_actions"],
             "actor.pre_shot_logits": pre_shot_output["pre_shot_logits"],

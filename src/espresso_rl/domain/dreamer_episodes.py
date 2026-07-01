@@ -20,8 +20,8 @@ from espresso_rl.domain.models import (
 )
 from espresso_rl.domain.training import FORBIDDEN_TRAINING_FIELD_NAMES, TRAINING_SOURCE_KINDS
 
-DREAMER_EPISODE_FORMAT = "espresso_rl_dreamer_episode_v3"
-DREAMER_EPISODE_SCHEMA_VERSION = 3
+DREAMER_EPISODE_FORMAT = "espresso_rl_dreamer_episode_v4"
+DREAMER_EPISODE_SCHEMA_VERSION = 4
 
 DREAMER_PROFILE_CHANNELS = (
     "pressure_bar",
@@ -405,6 +405,16 @@ def _validate_dynamic_action(dynamic_action: dict[str, Any], step_index: int, er
     if forbidden:
         errors.append(f"episode.steps[{step_index}].dynamic_action contains static recipe fields: {', '.join(forbidden[:10])}")
     _reject_unknown_fields(dynamic_action, _DYNAMIC_ACTION_FIELDS, errors, path=f"episode.steps[{step_index}].dynamic_action")
+    pump_mode = dynamic_action.get("pump_target_mode")
+    _optional_number_range(
+        pump_mode,
+        f"episode.steps[{step_index}].dynamic_action.pump_target_mode",
+        1.0,
+        2.0,
+        errors,
+    )
+    if pump_mode is not None and (isinstance(pump_mode, bool) or not isinstance(pump_mode, int)):
+        errors.append(f"episode.steps[{step_index}].dynamic_action.pump_target_mode must be an integer")
     _optional_number_range(
         dynamic_action.get("pressure_target_bar"),
         f"episode.steps[{step_index}].dynamic_action.pressure_target_bar",
@@ -413,7 +423,6 @@ def _validate_dynamic_action(dynamic_action: dict[str, Any], step_index: int, er
         errors,
     )
     _optional_number_range(dynamic_action.get("flow_target_ml_s"), f"episode.steps[{step_index}].dynamic_action.flow_target_ml_s", 0.0, 20.0, errors)
-    _optional_number_range(dynamic_action.get("pump_duty"), f"episode.steps[{step_index}].dynamic_action.pump_duty", 0.0, 1.0, errors)
     _optional_number_range(dynamic_action.get("valve_position"), f"episode.steps[{step_index}].dynamic_action.valve_position", 0.0, 1.0, errors)
     _optional_number_range(
         dynamic_action.get("temperature_target_c"),
@@ -430,6 +439,14 @@ def _validate_dynamic_action(dynamic_action: dict[str, Any], step_index: int, er
         errors,
     )
     _optional_bool(dynamic_action.get("stop"), f"episode.steps[{step_index}].dynamic_action.stop", errors)
+    has_pressure = dynamic_action.get("pressure_target_bar") is not None
+    has_flow = dynamic_action.get("flow_target_ml_s") is not None
+    if (has_pressure or has_flow) and pump_mode is None:
+        errors.append(f"episode.steps[{step_index}].dynamic_action.pump_target_mode is required")
+    if pump_mode == 1 and has_flow:
+        errors.append(f"episode.steps[{step_index}].dynamic_action pressure mode cannot include flow")
+    if pump_mode == 2 and has_pressure:
+        errors.append(f"episode.steps[{step_index}].dynamic_action flow mode cannot include pressure")
 
 
 def _validate_constraints(constraints: dict[str, Any], step_index: int, errors: list[str]) -> None:

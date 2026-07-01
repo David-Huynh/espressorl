@@ -138,6 +138,7 @@ class DreamerV3ImaginationActor(nn.Module):
         pre_shot_capability_mask: torch.Tensor,
         control_action_mask: torch.Tensor,
         target_state: torch.Tensor | None = None,
+        pump_measurements: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         hidden = self._hidden(features, taste_objective)
         if target_state is None:
@@ -148,7 +149,7 @@ class DreamerV3ImaginationActor(nn.Module):
             )
         return {
             **self._pre_shot_output(hidden, pre_shot_capability_mask),
-            **self._dynamic_output(hidden, control_action_mask, target_state),
+            **self._dynamic_output(hidden, control_action_mask, target_state, pump_measurements),
         }
 
     def select_pre_shot(
@@ -165,8 +166,14 @@ class DreamerV3ImaginationActor(nn.Module):
         taste_objective: torch.Tensor,
         control_action_mask: torch.Tensor,
         target_state: torch.Tensor,
+        pump_measurements: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        return self._dynamic_output(self._hidden(features, taste_objective), control_action_mask, target_state)
+        return self._dynamic_output(
+            self._hidden(features, taste_objective),
+            control_action_mask,
+            target_state,
+            pump_measurements,
+        )
 
     def _hidden(self, features: torch.Tensor, taste_objective: torch.Tensor) -> torch.Tensor:
         if features.ndim < 2 or taste_objective.shape != (*features.shape[:-1], self.taste_objective_dim):
@@ -226,12 +233,19 @@ class DreamerV3ImaginationActor(nn.Module):
         hidden: torch.Tensor,
         control_action_mask: torch.Tensor,
         target_state: torch.Tensor,
+        pump_measurements: torch.Tensor | None,
     ) -> dict[str, torch.Tensor]:
         if control_action_mask.shape != (*hidden.shape[:-1], self.dynamic_target_dim):
             raise ValueError("Dreamer dynamic action capability mask shape is invalid")
         if target_state.shape != (*hidden.shape[:-1], self.dynamic_target_dim):
             raise ValueError("Dreamer dynamic target state shape is invalid")
-        dynamic_action_mask = (control_action_mask > 0.5).to(dtype=hidden.dtype)
+        if pump_measurements is None:
+            pressure_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")
+            flow_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("flow_target_ml_s")
+            pump_measurements = target_state[..., [pressure_index, flow_index]]
+        if pump_measurements.shape != (*hidden.shape[:-1], 2):
+            raise ValueError("Dreamer pump measurement shape is invalid")
+        capability_mask = (control_action_mask > 0.5).to(dtype=hidden.dtype)
         dynamic_low = self.dynamic_action_low.to(dtype=hidden.dtype, device=hidden.device)
         dynamic_high = self.dynamic_action_high.to(dtype=hidden.dtype, device=hidden.device)
         padded_logits = torch.full(
@@ -241,31 +255,52 @@ class DreamerV3ImaginationActor(nn.Module):
             device=hidden.device,
         )
         indexes: list[torch.Tensor] = []
-        deltas: list[torch.Tensor] = []
+        choices: list[torch.Tensor] = []
         selected_log_probs: list[torch.Tensor] = []
         entropies: list[torch.Tensor] = []
         for head_index, (head, bin_count) in enumerate(
             zip(self.live_heads, self.live_bin_counts_tuple, strict=True)
         ):
             logits = head(hidden)
-            padded_logits[..., head_index, :bin_count] = logits
-            index = torch.argmax(logits, dim=-1)
             bins = self.live_action_bins[head_index, :bin_count].to(
                 dtype=hidden.dtype,
                 device=hidden.device,
             )
+            if DREAMER_LIVE_ACTION_FIELDS[head_index] == "pump_target_mode":
+                pressure_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")
+                flow_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("flow_target_ml_s")
+                pressure_allowed = control_action_mask[..., pressure_index] > 0.5
+                flow_allowed = control_action_mask[..., flow_index] > 0.5
+                allowed = torch.stack([pressure_allowed, flow_allowed], dim=-1)
+                any_allowed = allowed.any(dim=-1, keepdim=True)
+                logits = torch.where(
+                    allowed | ~any_allowed,
+                    logits,
+                    torch.full_like(logits, torch.finfo(logits.dtype).min),
+                )
+            padded_logits[..., head_index, :bin_count] = logits
+            index = torch.argmax(logits, dim=-1)
             indexes.append(index)
-            deltas.append(bins[index])
+            choices.append(bins[index])
             log_probs = F.log_softmax(logits, dim=-1)
             selected_log_probs.append(log_probs.gather(-1, index.unsqueeze(-1)).squeeze(-1))
             entropies.append(-(F.softmax(logits, dim=-1) * log_probs).sum(dim=-1))
         index_tensor = torch.stack(indexes, dim=-1)
-        delta_tensor = torch.stack(deltas, dim=-1) * dynamic_action_mask
+        choice_tensor = torch.stack(choices, dim=-1)
+        mode_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pump_target_mode")
+        pressure_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")
+        flow_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("flow_target_ml_s")
+        selected_mode = choice_tensor[..., mode_index]
+        dynamic_action_mask = capability_mask.clone()
+        dynamic_action_mask[..., pressure_index] *= (selected_mode == 1.0).to(dtype=hidden.dtype)
+        dynamic_action_mask[..., flow_index] *= (selected_mode == 2.0).to(dtype=hidden.dtype)
+        choice_tensor = choice_tensor * dynamic_action_mask
         next_target_state = _apply_live_action_delta(
             target_state.to(dtype=hidden.dtype),
-            delta_tensor,
+            choice_tensor,
             dynamic_low,
             dynamic_high,
+            pump_measurements.to(dtype=hidden.dtype),
         )
         dynamic_actions = next_target_state * dynamic_action_mask
         log_prob_tensor = torch.stack(selected_log_probs, dim=-1) * dynamic_action_mask
@@ -274,7 +309,7 @@ class DreamerV3ImaginationActor(nn.Module):
         return {
             "live_action_logits": padded_logits,
             "live_action_indexes": index_tensor,
-            "live_action_deltas": delta_tensor,
+            "live_action_choices": choice_tensor,
             "live_action_mask": dynamic_action_mask,
             "live_log_prob": log_prob_tensor.sum(dim=-1),
             "live_entropy": entropy_tensor.sum(dim=-1) / capability_count,
@@ -430,7 +465,7 @@ def run_dreamer_v3_imagination_preview(
         "pre_shot_action_shape": _shape(rollout["pre_shot_actions"]),
         "pre_shot_held_action_shape": _shape(rollout["pre_shot_actions_held"]),
         "live_action_logits_shape": _shape(rollout["live_action_logits"]),
-        "live_action_delta_shape": _shape(rollout["live_action_deltas"]),
+        "live_action_choice_shape": _shape(rollout["live_action_choices"]),
         "dynamic_action_shape": _shape(dynamic_action_tensor),
         "control_action_mask_shape": _shape(control_mask),
         "supported_dynamic_action_count": int(control_mask.sum().item()),
@@ -494,7 +529,7 @@ def dreamer_v3_imagination_rollout(
     dynamic_actions: list[torch.Tensor] = []
     live_action_logits: list[torch.Tensor] = []
     live_action_indexes: list[torch.Tensor] = []
-    live_action_deltas: list[torch.Tensor] = []
+    live_action_choices: list[torch.Tensor] = []
     live_log_probs: list[torch.Tensor] = []
     live_entropies: list[torch.Tensor] = []
     rewards: list[torch.Tensor] = []
@@ -504,12 +539,19 @@ def dreamer_v3_imagination_rollout(
 
     for _ in range(config.horizon):
         imagined_features.append(features)
-        dynamic_output = actor.select_dynamic(features, taste_objective, control_mask, target_state)
+        predicted_observation = world_model.observation_prediction(features)
+        dynamic_output = actor.select_dynamic(
+            features,
+            taste_objective,
+            control_mask,
+            target_state,
+            predicted_observation[..., :2],
+        )
         target_state = dynamic_output["dynamic_target_state"]
         dynamic_actions.append(dynamic_output["dynamic_actions"])
         live_action_logits.append(dynamic_output["live_action_logits"])
         live_action_indexes.append(dynamic_output["live_action_indexes"])
-        live_action_deltas.append(dynamic_output["live_action_deltas"])
+        live_action_choices.append(dynamic_output["live_action_choices"])
         live_log_probs.append(dynamic_output["live_log_prob"])
         live_entropies.append(dynamic_output["live_entropy"])
         behavior = behavior_tensor_from_parts(
@@ -590,7 +632,7 @@ def dreamer_v3_imagination_rollout(
         "pre_shot_behavior_loss": pre_shot_behavior_loss,
         "live_action_logits": torch.stack(live_action_logits, dim=1),
         "live_action_indexes": torch.stack(live_action_indexes, dim=1),
-        "live_action_deltas": torch.stack(live_action_deltas, dim=1),
+        "live_action_choices": torch.stack(live_action_choices, dim=1),
         "live_log_prob": live_log_prob_tensor,
         "live_entropy": live_entropy_tensor,
         "live_policy_loss": live_policy_loss,
@@ -683,9 +725,9 @@ def _live_action_bin_tensor(spec: DreamerLiveActionSpec) -> torch.Tensor:
 def _dynamic_action_bound_tensors(control_spec: DreamerControlSpec) -> tuple[torch.Tensor, torch.Tensor]:
     limits = control_spec.safety_limits
     ranges = {
+        "pump_target_mode": (1.0, 2.0),
         "pressure_target_bar": (limits.min_pressure_bar, limits.max_pressure_bar),
         "flow_target_ml_s": (limits.min_flow_ml_s, limits.max_flow_ml_s),
-        "pump_duty": (limits.min_pump_duty, limits.max_pump_duty),
         "valve_position": (limits.min_valve_position, limits.max_valve_position),
         "temperature_target_c": (limits.min_temperature_c, limits.max_temperature_c),
         "yield_stop_target_g": (limits.min_yield_stop_target_g, limits.max_yield_stop_target_g),
@@ -698,14 +740,38 @@ def _dynamic_action_bound_tensors(control_spec: DreamerControlSpec) -> tuple[tor
 
 def _apply_live_action_delta(
     target_state: torch.Tensor,
-    live_action_deltas: torch.Tensor,
+    live_action_choices: torch.Tensor,
     dynamic_low: torch.Tensor,
     dynamic_high: torch.Tensor,
+    pump_measurements: torch.Tensor,
 ) -> torch.Tensor:
-    next_target = target_state + live_action_deltas
+    mode_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pump_target_mode")
+    pressure_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")
+    flow_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("flow_target_ml_s")
+    selected_mode = live_action_choices[..., mode_index]
+    previous_mode = target_state[..., mode_index]
+    base_target = target_state.clone()
+    base_target[..., pressure_index] = torch.where(
+        (selected_mode == 1.0) & (previous_mode != 1.0),
+        pump_measurements[..., 0],
+        target_state[..., pressure_index],
+    )
+    base_target[..., flow_index] = torch.where(
+        (selected_mode == 2.0) & (previous_mode != 2.0),
+        pump_measurements[..., 1],
+        target_state[..., flow_index],
+    )
+    delta_mask = torch.ones_like(live_action_choices)
+    delta_mask[..., mode_index] = 0.0
+    next_target = base_target + live_action_choices * delta_mask
+    next_target[..., mode_index] = torch.where(
+        live_action_choices[..., mode_index] > 0.0,
+        live_action_choices[..., mode_index],
+        target_state[..., mode_index],
+    )
     stop_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("stop")
     next_target = torch.maximum(torch.minimum(next_target, dynamic_high), dynamic_low)
-    requested_stop = (live_action_deltas[..., stop_index] > 0.5).to(dtype=next_target.dtype)
+    requested_stop = (live_action_choices[..., stop_index] > 0.5).to(dtype=next_target.dtype)
     next_target[..., stop_index] = torch.maximum(target_state[..., stop_index], requested_stop)
     return next_target
 
@@ -735,9 +801,9 @@ def _initial_dynamic_target_state(
         observed_index = DREAMER_OBSERVED_TARGET_FEATURES.index(observed_name)
         dynamic_index = DREAMER_DYNAMIC_ACTION_FEATURES.index(dynamic_name)
         target_state[:, dynamic_index] = observed_targets[:, observed_index] * observed_mask[:, observed_index]
-    pump_mode_index = DREAMER_OBSERVED_TARGET_FEATURES.index("pump_target_mode")
-    pump_duty_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pump_duty")
-    target_state[:, pump_duty_index] = (observed_targets[:, pump_mode_index] > 0.5).to(dtype=pre_shot_actions.dtype)
+    observed_pump_mode_index = DREAMER_OBSERVED_TARGET_FEATURES.index("pump_target_mode")
+    dynamic_pump_mode_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pump_target_mode")
+    target_state[:, dynamic_pump_mode_index] = observed_targets[:, observed_pump_mode_index]
     yield_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("yield_stop_target_g")
     pre_shot_yield_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("yield_target_g")
     target_state[:, yield_index] = pre_shot_actions[:, pre_shot_yield_index]

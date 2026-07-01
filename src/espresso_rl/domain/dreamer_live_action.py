@@ -14,13 +14,13 @@ from espresso_rl.domain.dreamer_control import (
     DREAMER_MIN_TEMPERATURE_TARGET_C,
 )
 
-DREAMER_LIVE_ACTION_SPEC_FORMAT = "espresso_rl_dreamer_live_action_spec_v1"
-DREAMER_LIVE_ACTION_SPEC_SCHEMA_VERSION = 1
+DREAMER_LIVE_ACTION_SPEC_FORMAT = "espresso_rl_dreamer_live_action_spec_v2"
+DREAMER_LIVE_ACTION_SPEC_SCHEMA_VERSION = 2
 
 DREAMER_LIVE_ACTION_FIELDS = (
+    "pump_target_mode",
     "pressure_delta_bar",
     "flow_delta_ml_s",
-    "pump_duty_delta",
     "valve_position_delta",
     "temperature_delta_c",
     "yield_stop_delta_g",
@@ -39,18 +39,18 @@ _SPEC_FIELDS = frozenset(
     }
 )
 _UNITS = {
+    "pump_target_mode": "enum_pressure_or_flow",
     "pressure_delta_bar": "bar_delta",
     "flow_delta_ml_s": "ml_per_s_delta",
-    "pump_duty_delta": "unit_interval_delta",
     "valve_position_delta": "unit_interval_delta",
     "temperature_delta_c": "celsius_delta",
     "yield_stop_delta_g": "g_delta",
     "stop": "boolean",
 }
 _HARD_RANGES = {
+    "pump_target_mode": (1.0, 2.0),
     "pressure_delta_bar": (-DREAMER_MAX_PRESSURE_TARGET_BAR, DREAMER_MAX_PRESSURE_TARGET_BAR),
     "flow_delta_ml_s": (-20.0, 20.0),
-    "pump_duty_delta": (-1.0, 1.0),
     "valve_position_delta": (-1.0, 1.0),
     "temperature_delta_c": (
         DREAMER_MIN_TEMPERATURE_TARGET_C - DREAMER_MAX_TEMPERATURE_TARGET_C,
@@ -67,9 +67,9 @@ def _uniform_bins(start: float, stop: float, step: float) -> tuple[float, ...]:
 
 
 DEFAULT_DREAMER_LIVE_ACTION_BINS: dict[str, tuple[float, ...]] = {
+    "pump_target_mode": (1.0, 2.0),
     "pressure_delta_bar": (-4.0, -3.0, -2.0, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0),
     "flow_delta_ml_s": (-4.0, -3.0, -2.0, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0),
-    "pump_duty_delta": (-0.5, -0.25, -0.1, -0.05, 0.0, 0.05, 0.1, 0.25, 0.5),
     "valve_position_delta": (-1.0, 0.0, 1.0),
     "temperature_delta_c": (
         -8.0,
@@ -111,8 +111,8 @@ class DreamerLiveActionSpec:
             raise ValueError("Dreamer live pressure delta bins must include zero")
         if 0.0 not in normalized["flow_delta_ml_s"]:
             raise ValueError("Dreamer live flow delta bins must include zero")
-        if 0.0 not in normalized["pump_duty_delta"]:
-            raise ValueError("Dreamer live pump duty delta bins must include zero")
+        if normalized["pump_target_mode"] != (1.0, 2.0):
+            raise ValueError("Dreamer live pump target mode bins are fixed to pressure and flow")
         if normalized["valve_position_delta"] != (-1.0, 0.0, 1.0):
             raise ValueError("Dreamer live valve delta bins are fixed")
         if 0.0 not in normalized["temperature_delta_c"]:

@@ -78,7 +78,7 @@ class DreamerControlContractTests(unittest.TestCase):
 
         self.assertEqual(
             validate_dynamic_action_for_control_spec(
-                {"pressure_target_bar": 8.5, "stop": False},
+                {"pump_target_mode": 1, "pressure_target_bar": 8.5, "stop": False},
                 control_spec=spec,
                 step_index=0,
             ),
@@ -88,7 +88,7 @@ class DreamerControlContractTests(unittest.TestCase):
             any(
                 "decision steps" in error
                 for error in validate_dynamic_action_for_control_spec(
-                    {"pressure_target_bar": 8.5},
+                    {"pump_target_mode": 1, "pressure_target_bar": 8.5},
                     control_spec=spec,
                     step_index=1,
                 )
@@ -98,7 +98,7 @@ class DreamerControlContractTests(unittest.TestCase):
             any(
                 "flow_target_ml_s" in error
                 for error in validate_dynamic_action_for_control_spec(
-                    {"flow_target_ml_s": 2.0},
+                    {"pump_target_mode": 2, "flow_target_ml_s": 2.0},
                     control_spec=spec,
                     step_index=0,
                 )
@@ -108,7 +108,7 @@ class DreamerControlContractTests(unittest.TestCase):
             any(
                 "outside safety limits" in error
                 for error in validate_dynamic_action_for_control_spec(
-                    {"pressure_target_bar": 20.0},
+                    {"pump_target_mode": 1, "pressure_target_bar": 20.0},
                     control_spec=spec,
                     step_index=0,
                 )
@@ -130,10 +130,11 @@ class DreamerControlContractTests(unittest.TestCase):
             dynamic_control_enabled=True,
             pressure_control_allowed=True,
             flow_control_allowed=True,
+            pump_mode_control_allowed=True,
         )
 
         errors = validate_dynamic_action_for_control_spec(
-            {"pressure_target_bar": 8.5, "flow_target_ml_s": 2.0},
+            {"pump_target_mode": 1, "pressure_target_bar": 8.5, "flow_target_ml_s": 2.0},
             control_spec=spec,
             step_index=0,
         )
@@ -162,6 +163,7 @@ class DreamerControlContractTests(unittest.TestCase):
 
         sanitized = sanitize_dynamic_action_for_control_spec(
             {
+                "pump_target_mode": 1,
                 "pressure_target_bar": 13.5,
                 "temperature_target_c": 10.0,
                 "yield_stop_target_g": 120.0,
@@ -177,6 +179,7 @@ class DreamerControlContractTests(unittest.TestCase):
         self.assertEqual(
             sanitized.sanitized_action,
             {
+                "pump_target_mode": 1,
                 "pressure_target_bar": 12.0,
                 "temperature_target_c": 20.0,
                 "yield_stop_target_g": 90.0,
@@ -189,11 +192,12 @@ class DreamerControlContractTests(unittest.TestCase):
             dynamic_control_enabled=True,
             pressure_control_allowed=True,
             flow_control_allowed=True,
+            pump_mode_control_allowed=True,
             stop_control_allowed=True,
         )
 
         conflict = sanitize_dynamic_action_for_control_spec(
-            {"pressure_target_bar": 8.0, "flow_target_ml_s": 2.0},
+            {"pump_target_mode": 1, "pressure_target_bar": 8.0, "flow_target_ml_s": 2.0},
             control_spec=spec,
             step_index=0,
         )
@@ -220,6 +224,7 @@ class DreamerControlContractTests(unittest.TestCase):
 
         decision = resolve_live_dynamic_control_action(
             {
+                "pump_target_mode": 1,
                 "pressure_target_bar": 13.5,
                 "temperature_target_c": 10.0,
                 "yield_stop_target_g": 95.0,
@@ -235,6 +240,7 @@ class DreamerControlContractTests(unittest.TestCase):
         self.assertEqual(
             decision.action,
             {
+                "pump_target_mode": 1,
                 "pressure_target_bar": 12.0,
                 "temperature_target_c": 20.0,
                 "yield_stop_target_g": 90.0,
@@ -250,7 +256,7 @@ class DreamerControlContractTests(unittest.TestCase):
             dynamic_control_enabled=True,
             pressure_control_allowed=True,
         )
-        last_action = {"pressure_target_bar": 8.0}
+        last_action = {"pump_target_mode": 1, "pressure_target_bar": 8.0}
 
         replay = resolve_live_dynamic_control_action(
             None,
@@ -305,11 +311,12 @@ class DreamerControlContractTests(unittest.TestCase):
             dynamic_control_enabled=True,
             pressure_control_allowed=True,
             flow_control_allowed=True,
+            pump_mode_control_allowed=True,
         )
 
         decision = resolve_live_dynamic_control_action(
-            {"pressure_target_bar": 8.0, "flow_target_ml_s": 2.0},
-            last_sanitized_action={"pressure_target_bar": 7.0},
+            {"pump_target_mode": 1, "pressure_target_bar": 8.0, "flow_target_ml_s": 2.0},
+            last_sanitized_action={"pump_target_mode": 1, "pressure_target_bar": 7.0},
             control_spec=spec,
             step_index=0,
             milliseconds_since_last_command=250,
@@ -329,7 +336,11 @@ class DreamerControlContractTests(unittest.TestCase):
         )
 
         expanded = expand_decision_actions_to_observation_steps(
-            [{"pressure_target_bar": 2.0}, {"pressure_target_bar": 8.0}, {"stop": True}],
+            [
+                {"pump_target_mode": 1, "pressure_target_bar": 2.0},
+                {"pump_target_mode": 1, "pressure_target_bar": 8.0},
+                {"stop": True},
+            ],
             step_count=5,
             control_spec=spec,
         )
@@ -337,10 +348,10 @@ class DreamerControlContractTests(unittest.TestCase):
         self.assertEqual(
             expanded,
             [
-                {"pressure_target_bar": 2.0},
-                {"pressure_target_bar": 2.0},
-                {"pressure_target_bar": 8.0},
-                {"pressure_target_bar": 8.0},
+                {"pump_target_mode": 1, "pressure_target_bar": 2.0},
+                {"pump_target_mode": 1, "pressure_target_bar": 2.0},
+                {"pump_target_mode": 1, "pressure_target_bar": 8.0},
+                {"pump_target_mode": 1, "pressure_target_bar": 8.0},
                 {"stop": True},
             ],
         )

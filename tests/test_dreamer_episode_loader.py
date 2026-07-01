@@ -586,8 +586,8 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         episode = build_dreamer_episodes_from_training_rows(
             [training_row(1, observation_overrides={"fixed_cadence_sequence": fixed_cadence_sequence(5)})]
         )[0]
-        episode["steps"][0]["dynamic_action"] = {"pressure_target_bar": 2.0}
-        episode["steps"][2]["dynamic_action"] = {"pressure_target_bar": 8.0}
+        episode["steps"][0]["dynamic_action"] = {"pump_target_mode": 1, "pressure_target_bar": 2.0}
+        episode["steps"][2]["dynamic_action"] = {"pump_target_mode": 1, "pressure_target_bar": 8.0}
 
         batch = build_dreamer_episode_batch(
             [episode],

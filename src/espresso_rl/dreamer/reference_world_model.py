@@ -240,6 +240,51 @@ class DreamerV3VectorWorldModel(nn.Module):
         stoch = torch.zeros(batch_size, self.config.stoch_size, self.config.class_size, device=device)
         return deter, stoch
 
+    def observe_step(
+        self,
+        *,
+        observation: torch.Tensor,
+        behavior: torch.Tensor,
+        static_context: torch.Tensor,
+        deter: torch.Tensor,
+        stoch: torch.Tensor,
+        context_state: torch.Tensor,
+        is_first: torch.Tensor,
+        valid: torch.Tensor,
+        sample: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        reset = is_first.to(dtype=observation.dtype).unsqueeze(-1)
+        reset_mask = 1.0 - reset
+        valid_mask = valid.to(dtype=observation.dtype).unsqueeze(-1)
+        deter = deter * reset_mask + context_state.to(dtype=observation.dtype) * reset
+        stoch = stoch * reset_mask.unsqueeze(-1)
+        action = _squash_action(behavior) * valid_mask
+        action_embed = self.behavior_encoder(action)
+        deter = self.gru(torch.cat([stoch.flatten(start_dim=-2), action_embed], dim=-1), deter)
+        prior = self.prior(deter).reshape(
+            observation.shape[0],
+            self.config.stoch_size,
+            self.config.class_size,
+        )
+        obs_embed = self.observation_encoder(
+            torch.cat([symlog(observation), symlog(static_context)], dim=-1)
+        )
+        posterior = self.posterior(torch.cat([deter, obs_embed], dim=-1)).reshape(
+            observation.shape[0],
+            self.config.stoch_size,
+            self.config.class_size,
+        )
+        stoch = straight_through_onehot(posterior, unimix=self.config.unimix, sample=sample)
+        deter = deter * valid_mask
+        stoch = stoch * valid_mask.unsqueeze(-1)
+        return {
+            "deter": deter,
+            "stoch": stoch,
+            "features": torch.cat([deter, stoch.flatten(start_dim=-2)], dim=-1),
+            "prior_logits": prior,
+            "posterior_logits": posterior,
+        }
+
     def observe(
         self,
         batch: dict[str, torch.Tensor],
@@ -272,31 +317,23 @@ class DreamerV3VectorWorldModel(nn.Module):
         posterior_logits: list[torch.Tensor] = []
 
         for step_index in range(step_count):
-            reset = is_first[:, step_index].to(dtype=observations.dtype).unsqueeze(-1)
-            reset_mask = 1.0 - reset
-            valid_mask = step_mask[:, step_index].to(dtype=observations.dtype).unsqueeze(-1)
-            deter = deter * reset_mask + context_state * reset
-            stoch = stoch * reset_mask.unsqueeze(-1)
-            action = _squash_action(behavior[:, step_index])
-            action = action * valid_mask
-            action_embed = self.behavior_encoder(action)
-            deter = self.gru(torch.cat([stoch.flatten(start_dim=-2), action_embed], dim=-1), deter)
-            prior = self.prior(deter).reshape(batch_size, self.config.stoch_size, self.config.class_size)
-            obs_embed = self.observation_encoder(
-                torch.cat([symlog(observations[:, step_index]), symlog(static_context)], dim=-1)
+            observed_step = self.observe_step(
+                observation=observations[:, step_index],
+                behavior=behavior[:, step_index],
+                static_context=static_context,
+                deter=deter,
+                stoch=stoch,
+                context_state=context_state,
+                is_first=is_first[:, step_index],
+                valid=step_mask[:, step_index],
+                sample=sample,
             )
-            post = self.posterior(torch.cat([deter, obs_embed], dim=-1)).reshape(
-                batch_size,
-                self.config.stoch_size,
-                self.config.class_size,
-            )
-            stoch = straight_through_onehot(post, unimix=self.config.unimix, sample=sample)
-            deter = deter * valid_mask
-            stoch = stoch * valid_mask.unsqueeze(-1)
+            deter = observed_step["deter"]
+            stoch = observed_step["stoch"]
             deter_states.append(deter)
             stoch_states.append(stoch)
-            prior_logits.append(prior)
-            posterior_logits.append(post)
+            prior_logits.append(observed_step["prior_logits"])
+            posterior_logits.append(observed_step["posterior_logits"])
 
         deter_tensor = torch.stack(deter_states, dim=1)
         stoch_tensor = torch.stack(stoch_states, dim=1)
@@ -336,6 +373,9 @@ class DreamerV3VectorWorldModel(nn.Module):
 
     def reward_prediction(self, features: torch.Tensor) -> torch.Tensor:
         return twohot_prediction(self.reward_decoder(features), self.reward_bins)
+
+    def observation_prediction(self, features: torch.Tensor) -> torch.Tensor:
+        return symexp(self.observation_decoder(features))
 
     def continuation_probability(self, features: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(self.continuation_decoder(features).squeeze(-1))

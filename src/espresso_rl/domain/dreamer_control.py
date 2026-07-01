@@ -10,8 +10,8 @@ from espresso_rl.domain.optimization import (
     optimizer_family_allows_adaptive_profile_control,
 )
 
-DREAMER_CONTROL_SPEC_FORMAT = "espresso_rl_dreamer_control_spec_v1"
-DREAMER_CONTROL_SPEC_SCHEMA_VERSION = 1
+DREAMER_CONTROL_SPEC_FORMAT = "espresso_rl_dreamer_control_spec_v2"
+DREAMER_CONTROL_SPEC_SCHEMA_VERSION = 2
 DREAMER_MIN_OBSERVATION_INTERVAL_MS = FIXED_CADENCE_SAMPLE_INTERVAL_MS
 DREAMER_MIN_DECISION_INTERVAL_MS = 500
 DREAMER_DEFAULT_DECISION_INTERVAL_MS = 1000
@@ -42,9 +42,9 @@ DREAMER_LIVE_ACK_STATUSES = frozenset(
 )
 
 DREAMER_DYNAMIC_ACTION_FIELDS = (
+    "pump_target_mode",
     "pressure_target_bar",
     "flow_target_ml_s",
-    "pump_duty",
     "valve_position",
     "temperature_target_c",
     "yield_stop_target_g",
@@ -54,7 +54,7 @@ DREAMER_CONTROL_CONSTRAINT_FIELDS = (
     "dynamic_control_enabled",
     "pressure_control_allowed",
     "flow_control_allowed",
-    "pump_control_allowed",
+    "pump_mode_control_allowed",
     "valve_control_allowed",
     "temperature_control_allowed",
     "stop_control_allowed",
@@ -70,7 +70,7 @@ _CONTROL_SPEC_FIELDS = frozenset(
         "dynamic_control_enabled",
         "pressure_control_allowed",
         "flow_control_allowed",
-        "pump_control_allowed",
+        "pump_mode_control_allowed",
         "valve_control_allowed",
         "temperature_control_allowed",
         "stop_control_allowed",
@@ -88,8 +88,6 @@ _SAFETY_LIMIT_FIELDS = frozenset(
         "min_yield_stop_target_g",
         "max_yield_stop_target_g",
         "max_shot_duration_s",
-        "min_pump_duty",
-        "max_pump_duty",
         "min_valve_position",
         "max_valve_position",
     }
@@ -107,8 +105,6 @@ class DreamerControlSafetyLimits:
     min_yield_stop_target_g: float = 5.0
     max_yield_stop_target_g: float = DREAMER_MAX_YIELD_STOP_TARGET_G
     max_shot_duration_s: float = DREAMER_MAX_SHOT_DURATION_S
-    min_pump_duty: float = 0.0
-    max_pump_duty: float = 1.0
     min_valve_position: float = 0.0
     max_valve_position: float = 1.0
 
@@ -117,7 +113,6 @@ class DreamerControlSafetyLimits:
         _validate_range(self.min_flow_ml_s, self.max_flow_ml_s, "flow")
         _validate_range(self.min_temperature_c, self.max_temperature_c, "temperature")
         _validate_range(self.min_yield_stop_target_g, self.max_yield_stop_target_g, "yield stop target")
-        _validate_range(self.min_pump_duty, self.max_pump_duty, "pump duty")
         _validate_range(self.min_valve_position, self.max_valve_position, "valve position")
         if not _is_finite_number(self.max_shot_duration_s) or self.max_shot_duration_s <= 0:
             raise ValueError("Dreamer shot duration safety limit is invalid")
@@ -145,8 +140,6 @@ class DreamerControlSafetyLimits:
             "min_yield_stop_target_g": float(self.min_yield_stop_target_g),
             "max_yield_stop_target_g": float(self.max_yield_stop_target_g),
             "max_shot_duration_s": float(self.max_shot_duration_s),
-            "min_pump_duty": float(self.min_pump_duty),
-            "max_pump_duty": float(self.max_pump_duty),
             "min_valve_position": float(self.min_valve_position),
             "max_valve_position": float(self.max_valve_position),
         }
@@ -179,8 +172,6 @@ class DreamerControlSafetyLimits:
                 defaults.max_yield_stop_target_g,
             ),
             max_shot_duration_s=_optional_float(value, "max_shot_duration_s", defaults.max_shot_duration_s),
-            min_pump_duty=_optional_float(value, "min_pump_duty", defaults.min_pump_duty),
-            max_pump_duty=_optional_float(value, "max_pump_duty", defaults.max_pump_duty),
             min_valve_position=_optional_float(value, "min_valve_position", defaults.min_valve_position),
             max_valve_position=_optional_float(value, "max_valve_position", defaults.max_valve_position),
         )
@@ -352,7 +343,7 @@ class DreamerControlSpec:
     dynamic_control_enabled: bool = False
     pressure_control_allowed: bool = False
     flow_control_allowed: bool = False
-    pump_control_allowed: bool = False
+    pump_mode_control_allowed: bool = False
     valve_control_allowed: bool = False
     temperature_control_allowed: bool = False
     stop_control_allowed: bool = False
@@ -389,6 +380,8 @@ class DreamerControlSpec:
                 raise ValueError("Adaptive profile control is only available for Dreamer optimizers")
             if not any(self.control_allowed_for_field(field) for field in DREAMER_DYNAMIC_ACTION_FIELDS):
                 raise ValueError("Dreamer dynamic control requires at least one allowed control field")
+            if self.pressure_control_allowed and self.flow_control_allowed and not self.pump_mode_control_allowed:
+                raise ValueError("Dreamer pressure/flow switching requires pump mode control")
         if not isinstance(self.safety_limits, DreamerControlSafetyLimits):
             object.__setattr__(self, "safety_limits", DreamerControlSafetyLimits.from_dict(self.safety_limits))
 
@@ -402,12 +395,12 @@ class DreamerControlSpec:
         return step_index % self.decision_step_count == 0
 
     def control_allowed_for_field(self, field_name: str) -> bool:
+        if field_name == "pump_target_mode":
+            return self.pump_mode_control_allowed or self.pressure_control_allowed or self.flow_control_allowed
         if field_name == "pressure_target_bar":
             return self.pressure_control_allowed
         if field_name == "flow_target_ml_s":
             return self.flow_control_allowed
-        if field_name == "pump_duty":
-            return self.pump_control_allowed
         if field_name == "valve_position":
             return self.valve_control_allowed
         if field_name == "temperature_target_c":
@@ -434,7 +427,7 @@ class DreamerControlSpec:
             "dynamic_control_enabled": self.dynamic_control_enabled,
             "pressure_control_allowed": self.pressure_control_allowed,
             "flow_control_allowed": self.flow_control_allowed,
-            "pump_control_allowed": self.pump_control_allowed,
+            "pump_mode_control_allowed": self.pump_mode_control_allowed,
             "valve_control_allowed": self.valve_control_allowed,
             "temperature_control_allowed": self.temperature_control_allowed,
             "stop_control_allowed": self.stop_control_allowed,
@@ -457,7 +450,7 @@ class DreamerControlSpec:
             dynamic_control_enabled=value.get("dynamic_control_enabled", False),
             pressure_control_allowed=value.get("pressure_control_allowed", False),
             flow_control_allowed=value.get("flow_control_allowed", False),
-            pump_control_allowed=value.get("pump_control_allowed", False),
+            pump_mode_control_allowed=value.get("pump_mode_control_allowed", False),
             valve_control_allowed=value.get("valve_control_allowed", False),
             temperature_control_allowed=value.get("temperature_control_allowed", False),
             stop_control_allowed=value.get("stop_control_allowed", False),
@@ -483,8 +476,7 @@ def validate_dynamic_action_for_control_spec(
         errors.append("Dreamer dynamic action may only be emitted on decision steps")
     if not control_spec.dynamic_control_enabled:
         errors.append("Dreamer dynamic action provided while dynamic control is disabled")
-    if "pressure_target_bar" in action and "flow_target_ml_s" in action:
-        errors.append("Dreamer dynamic action cannot request pressure and flow targets at the same decision step")
+    errors.extend(_validate_pump_mode_selection(action))
 
     for field_name in DREAMER_DYNAMIC_ACTION_FIELDS:
         if field_name not in action:
@@ -514,8 +506,7 @@ def sanitize_dynamic_action_for_control_spec(
         errors.append("Dreamer dynamic action may only be emitted on decision steps")
     if not control_spec.dynamic_control_enabled:
         errors.append("Dreamer dynamic action provided while dynamic control is disabled")
-    if "pressure_target_bar" in action and "flow_target_ml_s" in action:
-        errors.append("Dreamer dynamic action cannot request pressure and flow targets at the same decision step")
+    errors.extend(_validate_pump_mode_selection(action))
 
     sanitized: dict[str, Any] = {}
     clamped_fields: list[str] = []
@@ -530,6 +521,13 @@ def sanitize_dynamic_action_for_control_spec(
                 errors.append("Dreamer dynamic action stop must be boolean")
                 continue
             sanitized[field_name] = bool(action[field_name])
+            continue
+        if field_name == "pump_target_mode":
+            value = action[field_name]
+            if isinstance(value, bool) or not isinstance(value, int) or value not in {1, 2}:
+                errors.append("Dreamer dynamic action pump_target_mode must be pressure (1) or flow (2)")
+                continue
+            sanitized[field_name] = value
             continue
         value = action[field_name]
         action_range = _action_field_range(field_name, control_spec.safety_limits)
@@ -643,6 +641,12 @@ def _validate_action_field(
 ) -> list[str]:
     if field_name == "stop":
         return [] if isinstance(value, bool) else ["Dreamer dynamic action stop must be boolean"]
+    if field_name == "pump_target_mode":
+        return (
+            []
+            if isinstance(value, int) and not isinstance(value, bool) and value in {1, 2}
+            else ["Dreamer dynamic action pump_target_mode must be pressure (1) or flow (2)"]
+        )
     action_range = _action_field_range(field_name, limits)
     if action_range is None:
         return [f"Dreamer dynamic action field {field_name} is invalid"]
@@ -654,14 +658,30 @@ def _validate_action_field(
 
 def _action_field_range(field_name: str, limits: DreamerControlSafetyLimits) -> tuple[float, float] | None:
     ranges = {
+        "pump_target_mode": (1.0, 2.0),
         "pressure_target_bar": (limits.min_pressure_bar, limits.max_pressure_bar),
         "flow_target_ml_s": (limits.min_flow_ml_s, limits.max_flow_ml_s),
-        "pump_duty": (limits.min_pump_duty, limits.max_pump_duty),
         "valve_position": (limits.min_valve_position, limits.max_valve_position),
         "temperature_target_c": (limits.min_temperature_c, limits.max_temperature_c),
         "yield_stop_target_g": (limits.min_yield_stop_target_g, limits.max_yield_stop_target_g),
     }
     return ranges.get(field_name)
+
+
+def _validate_pump_mode_selection(action: dict[str, Any]) -> list[str]:
+    mode = action.get("pump_target_mode")
+    has_pressure = "pressure_target_bar" in action
+    has_flow = "flow_target_ml_s" in action
+    errors: list[str] = []
+    if has_pressure and has_flow:
+        errors.append("Dreamer dynamic action cannot request pressure and flow targets at the same decision step")
+    if (has_pressure or has_flow) and mode is None:
+        errors.append("Dreamer dynamic action pump_target_mode is required for a pump target")
+    if mode == 1 and has_flow:
+        errors.append("Dreamer pressure mode cannot include a flow target")
+    if mode == 2 and has_pressure:
+        errors.append("Dreamer flow mode cannot include a pressure target")
+    return errors
 
 
 def _validate_range(minimum: float, maximum: float, label: str) -> None:
