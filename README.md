@@ -718,9 +718,13 @@ to non-retained command topics:
 
 - `gaggimate/<machine>/rl/dreamer/live_target`
 - `gaggimate/<machine>/rl/dreamer/fail_safe`
+- `gaggimate/<machine>/rl/dreamer/ack`
 
 The live target payload requests `ack_scope=esp32_received`; controller-applied
-acknowledgement is intentionally not required by the core contract.
+acknowledgement is intentionally not required by the core contract. Gaggimate
+firmware validates the command envelope, exact machine/profile identity, and
+bounded target fields before mutating the active Dreamer auto profile phase; it
+publishes accepted/rejected ESP32-received acknowledgements on the ack topic.
 
 ## Warm-Started BO Priors
 
