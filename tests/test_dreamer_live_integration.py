@@ -17,6 +17,7 @@ from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MO
 from espresso_rl.main import build_status_payload
 from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from espresso_rl.optimizers.runtime import RuntimeOptimizer
+from tests.test_dreamer_live_inference import _inference, _select_live_actions
 
 
 class RecordingPublisher:
@@ -117,6 +118,39 @@ class DreamerLiveIntegrationTests(unittest.TestCase):
         self.assertEqual([publication.step_index for publication in publisher.live_control], [0])
         self.assertEqual(publisher.live_control[0].profile_id, "dreamer_auto")
         self.assertEqual(publisher.live_control[0].action, {"pump_target_mode": 1, "pressure_target_bar": 8.0})
+
+    def test_checkpoint_backed_live_inference_publishes_through_gaggimate_adapter_path(self) -> None:
+        publisher = RecordingPublisher()
+        inference, actor = _inference()
+        _select_live_actions(actor, pump_mode=1, pressure_delta=0.5, flow_delta=0.5)
+        app = DreamerLiveTelemetryApplication(
+            inference=inference,
+            live_control=DreamerLiveControlApplication(publisher),
+            context_provider=StaticContextProvider(),
+            enabled=True,
+        )
+        results = []
+        with tempfile.TemporaryDirectory() as tmp:
+            client = GaggimateMQTTClient(
+                config=Config(mqtt_host="localhost", data_dir=Path(tmp), install_id="install_1"),
+                on_shot=lambda event: None,
+                on_feedback=lambda event: None,
+                on_correction=lambda event: None,
+                on_upload_maintenance=lambda event: None,
+                on_decision=lambda event: None,
+                on_apply=lambda event: None,
+                on_machine_state=lambda event: None,
+                on_dreamer_live_telemetry=lambda event: results.append(app.handle_telemetry(event)),
+            )
+
+            _dispatch_telemetry(client, _telemetry_payload(step_index=0, profile_id="dreamer_auto"))
+
+        self.assertEqual([result.outcome for result in results], ["decision_published"])
+        self.assertEqual(len(publisher.live_control), 1)
+        action = publisher.live_control[0].action
+        self.assertEqual(action["pump_target_mode"], 1)
+        self.assertAlmostEqual(action["pressure_target_bar"], 3.5)
+        self.assertNotIn("flow_target_ml_s", action)
 
     def test_active_dreamer_request_without_release_ready_model_reports_bo_fallback_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
