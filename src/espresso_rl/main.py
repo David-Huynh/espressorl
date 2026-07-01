@@ -52,6 +52,7 @@ from espresso_rl.application.dreamer_recommendations import DreamerRecommendatio
 from espresso_rl.application.dreamer_live_acknowledgements import (
     DreamerLiveControlAcknowledgementService,
 )
+from espresso_rl.application.dreamer_live_telemetry import DreamerLiveTelemetryApplication
 from espresso_rl.application.dreamer_shadow_evaluation import (
     DreamerShadowEvaluationError,
     DreamerShadowEvaluationService,
@@ -81,8 +82,10 @@ from espresso_rl.domain.dreamer_control import (
     DreamerLiveControlAcknowledgement,
     DreamerLiveControlPublication,
 )
+from espresso_rl.domain.dreamer_telemetry import DreamerLiveTelemetry
 from espresso_rl.domain.events import (
     LocalResetEvent,
+    MachineStateEvent,
     OptimizerSettingsEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
@@ -208,6 +211,10 @@ def main() -> None:
     )
     dreamer_live_acknowledgements = DreamerLiveControlAcknowledgementService(
         clock_ms=lambda: int(config.now() * 1000),
+    )
+    dreamer_live_telemetry = DreamerLiveTelemetryApplication(
+        inference=None,
+        live_control=None,
     )
 
     stop_event = threading.Event()
@@ -445,6 +452,24 @@ def main() -> None:
             result.step_index,
         )
 
+    def on_dreamer_live_telemetry(event: DreamerLiveTelemetry) -> None:
+        if not _same_machine_id(event.machine_id, config.machine_id):
+            logger.warning("Ignoring Dreamer live telemetry for unexpected machine=%s", event.machine_id)
+            return
+        result = dreamer_live_telemetry.handle_telemetry(event)
+        if result.outcome not in {"observation_accepted", "decision_published"}:
+            logger.debug(
+                "Dreamer live telemetry outcome=%s shot=%s step=%d",
+                result.outcome,
+                event.shot_id,
+                event.step_index,
+            )
+
+    def on_machine_state(event: MachineStateEvent) -> None:
+        if event.state.value != "brewing":
+            dreamer_live_telemetry.end_episode(machine_id=event.machine_id)
+        runtime_coordinator.handle_machine_state(event)
+
     mqtt_client = GaggimateMQTTClient(
         config=config,
         on_shot=runtime_coordinator.handle_shot,
@@ -453,10 +478,11 @@ def main() -> None:
         on_upload_maintenance=on_upload_maintenance,
         on_decision=on_decision,
         on_apply=on_apply,
-        on_machine_state=runtime_coordinator.handle_machine_state,
+        on_machine_state=on_machine_state,
         on_optimizer_settings=on_optimizer_settings,
         on_local_reset=on_local_reset,
         on_dreamer_live_ack=on_dreamer_live_ack,
+        on_dreamer_live_telemetry=on_dreamer_live_telemetry,
     )
 
     def shutdown(sig: int, frame: object) -> None:

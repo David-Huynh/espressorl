@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -24,6 +25,10 @@ from espresso_rl.domain.dreamer_control import (
     DreamerLiveControlAcknowledgement,
     DreamerLiveControlPublication,
 )
+from espresso_rl.domain.dreamer_telemetry import (
+    DreamerLiveTelemetry,
+    DreamerLiveTelemetryCapabilities,
+)
 from espresso_rl.domain.models import Recommendation
 from espresso_rl.domain.models import new_id
 
@@ -39,6 +44,7 @@ MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
 OPTIMIZER_SETTINGS_TOPIC = "gaggimate/+/rl/settings"
 LOCAL_RESET_TOPIC = "gaggimate/+/rl/local/reset"
 DREAMER_ACK_TOPIC = "gaggimate/+/rl/dreamer/ack"
+DREAMER_TELEMETRY_TOPIC = "gaggimate/+/rl/dreamer/telemetry"
 
 _DREAMER_ACK_FIELDS = frozenset(
     {
@@ -54,6 +60,51 @@ _DREAMER_ACK_FIELDS = frozenset(
         "reason",
         "source",
         "timestamp",
+    }
+)
+_DREAMER_TELEMETRY_FIELDS = frozenset(
+    {
+        "event_type",
+        "schema_version",
+        "machine_id",
+        "shot_id",
+        "profile_id",
+        "step_index",
+        "elapsed_ms",
+        "sample_interval_ms",
+        "observation",
+        "target",
+        "capabilities",
+        "source",
+    }
+)
+_DREAMER_TELEMETRY_OBSERVATION_FIELDS = frozenset(
+    {
+        "pressure_bar",
+        "pump_flow_ml_s",
+        "beverage_flow_g_s",
+        "weight_g",
+        "temperature_c",
+    }
+)
+_DREAMER_TELEMETRY_TARGET_FIELDS = frozenset(
+    {
+        "pressure_bar",
+        "pump_flow_ml_s",
+        "temperature_c",
+        "pump_target_mode",
+        "valve_open",
+        "yield_g",
+    }
+)
+_DREAMER_TELEMETRY_CAPABILITY_FIELDS = frozenset(
+    {
+        "pressure_control_allowed",
+        "flow_control_allowed",
+        "pump_control_allowed",
+        "valve_control_allowed",
+        "temperature_control_allowed",
+        "stop_control_allowed",
     }
 )
 
@@ -74,6 +125,7 @@ class GaggimateMQTTClient:
         on_optimizer_settings: Callable[[OptimizerSettingsEvent], None] | None = None,
         on_local_reset: Callable[[LocalResetEvent], None] | None = None,
         on_dreamer_live_ack: Callable[[DreamerLiveControlAcknowledgement], None] | None = None,
+        on_dreamer_live_telemetry: Callable[[DreamerLiveTelemetry], None] | None = None,
     ) -> None:
         self._config = config
         self._on_shot = on_shot
@@ -86,6 +138,7 @@ class GaggimateMQTTClient:
         self._on_optimizer_settings = on_optimizer_settings or (lambda event: None)
         self._on_local_reset = on_local_reset or (lambda event: None)
         self._on_dreamer_live_ack = on_dreamer_live_ack or (lambda event: None)
+        self._on_dreamer_live_telemetry = on_dreamer_live_telemetry or (lambda event: None)
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.mqtt_user:
             self._client.username_pw_set(config.mqtt_user, config.mqtt_password)
@@ -209,8 +262,9 @@ class GaggimateMQTTClient:
             client.subscribe(OPTIMIZER_SETTINGS_TOPIC)
             client.subscribe(LOCAL_RESET_TOPIC)
             client.subscribe(DREAMER_ACK_TOPIC)
+            client.subscribe(DREAMER_TELEMETRY_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
                 FEEDBACK_TOPIC,
                 CORRECTION_TOPIC,
@@ -221,6 +275,7 @@ class GaggimateMQTTClient:
                 OPTIMIZER_SETTINGS_TOPIC,
                 LOCAL_RESET_TOPIC,
                 DREAMER_ACK_TOPIC,
+                DREAMER_TELEMETRY_TOPIC,
             )
         else:
             logger.error("MQTT connection refused: %s", reason_code)
@@ -255,6 +310,8 @@ class GaggimateMQTTClient:
                 self._on_local_reset(self.translate_local_reset_payload(payload, mac))
             elif msg.topic.endswith("/rl/dreamer/ack"):
                 self._on_dreamer_live_ack(self.translate_dreamer_live_ack_payload(payload, mac))
+            elif msg.topic.endswith("/rl/dreamer/telemetry"):
+                self._on_dreamer_live_telemetry(self.translate_dreamer_live_telemetry_payload(payload, mac))
         except Exception:
             logger.exception("Error handling message on %s", msg.topic)
 
@@ -305,6 +362,64 @@ class GaggimateMQTTClient:
             status=status,
             reason=reason,
             reported_at=reported_at,
+        )
+
+    def translate_dreamer_live_telemetry_payload(
+        self,
+        payload: dict[str, Any],
+        mac: str,
+    ) -> DreamerLiveTelemetry:
+        _require_exact_object_fields(payload, _DREAMER_TELEMETRY_FIELDS, "telemetry")
+        if payload.get("event_type") != "dreamer_live_telemetry":
+            raise ValueError("Dreamer live telemetry event_type is invalid")
+        schema_version = _strict_non_negative_int(payload.get("schema_version"), "schema_version")
+        topic_machine_id = f"gaggimate:{mac}"
+        machine_id = _required_bounded_string(payload.get("machine_id"), "machine_id", maximum=160)
+        if not _same_gaggimate_machine_id(topic_machine_id, machine_id):
+            raise ValueError("Dreamer live telemetry machine_id does not match topic")
+        if payload.get("source") != "gaggimate_mqtt":
+            raise ValueError("Dreamer live telemetry source is invalid")
+
+        observation = _require_exact_object_fields(
+            payload.get("observation"),
+            _DREAMER_TELEMETRY_OBSERVATION_FIELDS,
+            "telemetry observation",
+        )
+        target = _require_exact_object_fields(
+            payload.get("target"),
+            _DREAMER_TELEMETRY_TARGET_FIELDS,
+            "telemetry target",
+        )
+        capabilities = _require_exact_object_fields(
+            payload.get("capabilities"),
+            _DREAMER_TELEMETRY_CAPABILITY_FIELDS,
+            "telemetry capabilities",
+        )
+        if any(not isinstance(capabilities[field], bool) for field in _DREAMER_TELEMETRY_CAPABILITY_FIELDS):
+            raise ValueError("Dreamer live telemetry capabilities must be boolean")
+        if not isinstance(target["valve_open"], bool):
+            raise ValueError("Dreamer live telemetry target valve_open must be boolean")
+
+        return DreamerLiveTelemetry(
+            machine_id=machine_id,
+            shot_id=_required_bounded_string(payload.get("shot_id"), "shot_id", maximum=200),
+            profile_id=_required_bounded_string(payload.get("profile_id"), "profile_id", maximum=120),
+            schema_version=schema_version,
+            step_index=_strict_non_negative_int(payload.get("step_index"), "step_index"),
+            elapsed_ms=_strict_non_negative_int(payload.get("elapsed_ms"), "elapsed_ms"),
+            sample_interval_ms=_strict_non_negative_int(payload.get("sample_interval_ms"), "sample_interval_ms"),
+            pressure_bar=_strict_finite_number(observation["pressure_bar"], "observation.pressure_bar"),
+            pressure_target_bar=_strict_finite_number(target["pressure_bar"], "target.pressure_bar"),
+            pump_flow_ml_s=_strict_finite_number(observation["pump_flow_ml_s"], "observation.pump_flow_ml_s"),
+            pump_flow_target_ml_s=_strict_finite_number(target["pump_flow_ml_s"], "target.pump_flow_ml_s"),
+            beverage_flow_g_s=_strict_finite_number(observation["beverage_flow_g_s"], "observation.beverage_flow_g_s"),
+            weight_g=_strict_finite_number(observation["weight_g"], "observation.weight_g"),
+            temperature_c=_strict_finite_number(observation["temperature_c"], "observation.temperature_c"),
+            temperature_target_c=_strict_finite_number(target["temperature_c"], "target.temperature_c"),
+            pump_target_mode=_strict_non_negative_int(target["pump_target_mode"], "target.pump_target_mode"),
+            valve_open=target["valve_open"],
+            target_yield_g=_strict_finite_number(target["yield_g"], "target.yield_g"),
+            capabilities=DreamerLiveTelemetryCapabilities(**capabilities),
         )
 
     def translate_shot_payload(self, payload: dict[str, Any], mac: str) -> ShotProfileEvent:
@@ -710,6 +825,35 @@ def _optional_bounded_string(value: Any, field_name: str, *, maximum: int) -> st
 def _strict_non_negative_int(value: Any, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"Dreamer live acknowledgement {field_name} must be a non-negative integer")
+    return value
+
+
+def _strict_finite_number(value: Any, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Dreamer live telemetry {field_name} must be finite")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"Dreamer live telemetry {field_name} must be finite")
+    return parsed
+
+
+def _require_exact_object_fields(
+    value: Any,
+    expected: frozenset[str],
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"Dreamer live {label} must be an object")
+    actual = set(value)
+    unknown = sorted(str(key) for key in actual - expected)
+    missing = sorted(expected - actual)
+    if unknown or missing:
+        details = []
+        if unknown:
+            details.append(f"unsupported fields: {', '.join(unknown[:5])}")
+        if missing:
+            details.append(f"missing fields: {', '.join(missing[:5])}")
+        raise ValueError(f"Dreamer live {label} fields are invalid ({'; '.join(details)})")
     return value
 
 

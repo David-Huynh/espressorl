@@ -5,7 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from espresso_rl.adapters.gaggimate_mqtt import DREAMER_ACK_TOPIC, GaggimateMQTTClient
+from espresso_rl.adapters.gaggimate_mqtt import (
+    DREAMER_ACK_TOPIC,
+    DREAMER_TELEMETRY_TOPIC,
+    GaggimateMQTTClient,
+)
 from espresso_rl.adapters.sqlite_repositories import (
     SQLiteRecommendationRepository,
     SQLiteShotRepository,
@@ -864,6 +868,66 @@ class GaggimateAdapterTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     client.translate_dreamer_live_ack_payload(payload, "AA_BB")
 
+    def test_dreamer_live_telemetry_translates_and_dispatches_canonical_sample(self) -> None:
+        received = []
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+            on_dreamer_live_telemetry=received.append,
+        )
+        payload = _dreamer_telemetry_payload()
+        message = type(
+            "Message",
+            (),
+            {
+                "topic": "gaggimate/AA_BB/rl/dreamer/telemetry",
+                "payload": json.dumps(payload).encode(),
+            },
+        )()
+
+        client._on_message(client._client, None, message)
+
+        self.assertEqual(len(received), 1)
+        event = received[0]
+        self.assertEqual(event.machine_id, "gaggimate:AA_BB")
+        self.assertEqual(event.step_index, 4)
+        self.assertEqual(event.elapsed_ms, 1000)
+        self.assertEqual(event.observation(), (2.0, 2.5, 1.5, 4.0, 92.0))
+        self.assertTrue(event.capabilities.temperature_control_allowed)
+        self.assertFalse(event.capabilities.pump_control_allowed)
+
+    def test_dreamer_live_telemetry_rejects_hostile_or_inconsistent_payloads(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+        valid = _dreamer_telemetry_payload()
+        invalid_payloads = [
+            {**valid, "machine_id": "gaggimate:CC_DD"},
+            {**valid, "elapsed_ms": 1250},
+            {**valid, "unexpected": "raw-command"},
+            {**valid, "step_index": True},
+            {**valid, "observation": {**valid["observation"], "pressure_bar": float("nan")}},
+            {**valid, "capabilities": {**valid["capabilities"], "stop_control_allowed": 1}},
+        ]
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    client.translate_dreamer_live_telemetry_payload(payload, "AA_BB")
+
     def test_mqtt_connect_subscribes_to_dreamer_ack_topic(self) -> None:
         client = GaggimateMQTTClient(
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
@@ -880,6 +944,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         client._on_connect(subscriber, None, None, 0, None)  # type: ignore[arg-type]
 
         self.assertIn(DREAMER_ACK_TOPIC, subscriber.subscriptions)
+        self.assertIn(DREAMER_TELEMETRY_TOPIC, subscriber.subscriptions)
 
     def test_clear_recommendation_publishes_retained_empty_payload(self) -> None:
         client = GaggimateMQTTClient(
@@ -1248,6 +1313,43 @@ class GaggimateAdapterTests(unittest.TestCase):
                 self.assertEqual(updated.shot.human_rating, 4)
                 self.assertGreater(updated.shot.reward_confidence, 0.5)
                 self.assertEqual(updated.recommendation.source_shot_id, "shot_2")
+
+
+def _dreamer_telemetry_payload() -> dict:
+    return {
+        "event_type": "dreamer_live_telemetry",
+        "schema_version": 1,
+        "machine_id": "gaggimate:AA_BB",
+        "shot_id": "shot_1",
+        "profile_id": "dreamer_auto",
+        "step_index": 4,
+        "elapsed_ms": 1000,
+        "sample_interval_ms": 250,
+        "observation": {
+            "pressure_bar": 2.0,
+            "pump_flow_ml_s": 2.5,
+            "beverage_flow_g_s": 1.5,
+            "weight_g": 4.0,
+            "temperature_c": 92.0,
+        },
+        "target": {
+            "pressure_bar": 3.0,
+            "pump_flow_ml_s": 2.0,
+            "temperature_c": 93.0,
+            "pump_target_mode": 1,
+            "valve_open": True,
+            "yield_g": 36.0,
+        },
+        "capabilities": {
+            "pressure_control_allowed": True,
+            "flow_control_allowed": True,
+            "pump_control_allowed": False,
+            "valve_control_allowed": True,
+            "temperature_control_allowed": True,
+            "stop_control_allowed": True,
+        },
+        "source": "gaggimate_mqtt",
+    }
 
 
 if __name__ == "__main__":

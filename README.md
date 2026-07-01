@@ -716,9 +716,20 @@ resolves Dreamer live actions into canonical `accept`, `replay_last`,
 The Gaggimate MQTT adapter translates only those bounded canonical publications
 to non-retained command topics:
 
+- `gaggimate/<machine>/rl/dreamer/telemetry`
 - `gaggimate/<machine>/rl/dreamer/live_target`
 - `gaggimate/<machine>/rl/dreamer/fail_safe`
 - `gaggimate/<machine>/rl/dreamer/ack`
+
+During a `dreamer_auto` brew, Gaggimate publishes non-retained live telemetry at
+the canonical 250 ms observation cadence. Each strict sample carries pressure,
+pump flow, beverage flow, weight, temperature, active targets, pump target mode,
+valve state, target yield, and the machine's live-control capability mask.
+EspressoRL validates topic identity, exact fields, finite ranges, cadence, and
+sample ordering before passing the canonical event through the live-inference
+port. The actor decision cadence remains independent and defaults to 1000 ms.
+This live stream is separate from the complete fixed-cadence sequence persisted
+with the final shot record.
 
 The live target payload requests `ack_scope=esp32_received`; controller-applied
 acknowledgement is intentionally not required by the core contract. Gaggimate
@@ -731,6 +742,11 @@ duplicate acknowledgements are tracked separately. Public status exposes only
 aggregate counts and allowlisted reason categories under
 `dreamer_live_control_ack`; publication IDs, raw reasons, and target bodies are
 not included.
+
+No model is authorized for live machine control merely because telemetry is
+available. Without a release-ready checkpoint-backed implementation of the
+`DreamerLiveInference` port, samples report `inactive_model`, no target command
+is emitted, and the static `dreamer_auto` fallback profile continues normally.
 
 ## Warm-Started BO Priors
 

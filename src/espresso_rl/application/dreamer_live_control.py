@@ -36,6 +36,7 @@ class DreamerLiveControlApplication:
     def __init__(self, publisher: AutoTuningRuntimePublisher) -> None:
         self._publisher = publisher
         self._states: dict[str, _DreamerLiveControlState] = {}
+        self._last_sequences: dict[str, int] = {}
 
     def handle_live_action(
         self,
@@ -54,7 +55,10 @@ class DreamerLiveControlApplication:
         state_key = _state_key(machine_id, profile_id)
         state = self._states.get(state_key)
         if state is None:
-            state = _DreamerLiveControlState(started_at_ms=now_ms)
+            state = _DreamerLiveControlState(
+                started_at_ms=now_ms,
+                sequence=self._last_sequences.get(state_key, 0),
+            )
             self._states[state_key] = state
 
         milliseconds_since_last_command = _milliseconds_since_last_command(
@@ -86,6 +90,7 @@ class DreamerLiveControlApplication:
             raise ValueError("Dreamer replay decision must carry the last sanitized action")
 
         state.sequence += 1
+        self._last_sequences[state_key] = state.sequence
         publication = DreamerLiveControlPublication(
             machine_id=machine_id,
             profile_id=profile_id,
