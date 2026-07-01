@@ -12,6 +12,7 @@ from espresso_rl.application.checkpoint_loading import load_verified_dreamer_che
 from espresso_rl.domain.model_checkpoint import DreamerCheckpointCompatibility
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
 from espresso_rl.domain.dreamer_episodes import DREAMER_EPISODE_FORMAT, DREAMER_EPISODE_SCHEMA_VERSION
+from espresso_rl.domain.dreamer_live_action import DreamerLiveActionSpec
 from espresso_rl.domain.dreamer_pre_shot import DreamerPreShotActionSpec
 from espresso_rl.domain.dreamer_taste import DreamerTasteObjectiveSpec
 from espresso_rl.domain.model_manifest import (
@@ -174,6 +175,9 @@ def build_dreamer_trainer_artifacts(
     pre_shot_action_spec = DreamerPreShotActionSpec.from_dict(
         training_config["dreamer_pre_shot_action_spec"]
     )
+    live_action_spec = DreamerLiveActionSpec.from_dict(
+        training_config["dreamer_live_action_spec"]
+    )
     taste_objective_spec = DreamerTasteObjectiveSpec.from_dict(
         training_config["dreamer_taste_objective_spec"]
     )
@@ -181,6 +185,7 @@ def build_dreamer_trainer_artifacts(
         training_rows,
         control_spec=control_spec,
         pre_shot_action_spec=pre_shot_action_spec,
+        live_action_spec=live_action_spec,
         taste_objective_spec=taste_objective_spec,
     )
     dreamer_tensor_contract = dreamer_tensor_build["contract"]
@@ -192,6 +197,7 @@ def build_dreamer_trainer_artifacts(
         dreamer_tensor_build["episodes"],
         control_spec=control_spec,
         pre_shot_action_spec=pre_shot_action_spec,
+        live_action_spec=live_action_spec,
         taste_objective_spec=taste_objective_spec,
         training_config=training_config,
     )
@@ -243,6 +249,7 @@ def build_dreamer_trainer_artifacts(
         feature_layout_sha256=dreamer_tensor_contract["feature_layout_sha256"],
         control_spec_sha256=dreamer_tensor_contract["control_spec_sha256"],
         pre_shot_action_spec_sha256=dreamer_tensor_contract["pre_shot_action_spec_sha256"],
+        live_action_spec_sha256=dreamer_tensor_contract["live_action_spec_sha256"],
         taste_objective_spec_sha256=dreamer_tensor_contract["taste_objective_spec_sha256"],
         checkpoint_tensor_manifest_sha256=checkpoint_tensor_manifest_sha256,
         checkpoint_architecture_sha256=checkpoint_architecture_sha256,
@@ -284,6 +291,7 @@ def build_dreamer_trainer_artifacts(
             parity_batch=parity_batch,
             expected_heldout_sha256=heldout_inference_sha256,
             expected_pre_shot_action_spec_sha256=dreamer_tensor_contract["pre_shot_action_spec_sha256"],
+            expected_live_action_spec_sha256=dreamer_tensor_contract["live_action_spec_sha256"],
             expected_taste_objective_spec_sha256=dreamer_tensor_contract["taste_objective_spec_sha256"],
         )
 
@@ -384,6 +392,7 @@ def _dreamer_tensor_build(
     *,
     control_spec: DreamerControlSpec,
     pre_shot_action_spec: DreamerPreShotActionSpec,
+    live_action_spec: DreamerLiveActionSpec,
     taste_objective_spec: DreamerTasteObjectiveSpec,
 ) -> dict[str, Any]:
     try:
@@ -395,6 +404,7 @@ def _dreamer_tensor_build(
             episodes,
             control_spec=control_spec,
             pre_shot_action_spec=pre_shot_action_spec,
+            live_action_spec=live_action_spec,
         )
     except DreamerEpisodeDatasetError as exc:
         raise TrainerArtifactError(f"Dreamer tensor contract validation failed: {exc}") from exc
@@ -403,6 +413,7 @@ def _dreamer_tensor_build(
     feature_names = _feature_names(batch)
     control_spec_dict = control_spec.to_dict()
     pre_shot_action_spec_dict = pre_shot_action_spec.to_dict()
+    live_action_spec_dict = live_action_spec.to_dict()
     taste_objective_spec_dict = taste_objective_spec.to_dict()
     feature_layout = {
         "episode_format": DREAMER_EPISODE_FORMAT,
@@ -411,6 +422,7 @@ def _dreamer_tensor_build(
     }
     control_spec_sha256 = _sha256_json(control_spec_dict)
     pre_shot_action_spec_sha256 = _sha256_json(pre_shot_action_spec_dict)
+    live_action_spec_sha256 = _sha256_json(live_action_spec_dict)
     taste_objective_spec_sha256 = _sha256_json(taste_objective_spec_dict)
     feature_layout_sha256 = _sha256_json(feature_layout)
     tensor_contract_base = {
@@ -433,6 +445,8 @@ def _dreamer_tensor_build(
         "control_spec": control_spec_dict,
         "pre_shot_action_spec_sha256": pre_shot_action_spec_sha256,
         "pre_shot_action_spec": pre_shot_action_spec_dict,
+        "live_action_spec_sha256": live_action_spec_sha256,
+        "live_action_spec": live_action_spec_dict,
         "taste_objective_spec_sha256": taste_objective_spec_sha256,
         "taste_objective_spec": taste_objective_spec_dict,
     }
@@ -468,6 +482,7 @@ def _world_model_train_preview_metrics(
     *,
     control_spec: DreamerControlSpec,
     pre_shot_action_spec: DreamerPreShotActionSpec,
+    live_action_spec: DreamerLiveActionSpec,
     taste_objective_spec: DreamerTasteObjectiveSpec,
     training_config: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -481,11 +496,13 @@ def _world_model_train_preview_metrics(
         split["train_episodes"],
         control_spec=control_spec,
         pre_shot_action_spec=pre_shot_action_spec,
+        live_action_spec=live_action_spec,
     )
     validation_batch = build_dreamer_episode_batch(
         split["validation_episodes"],
         control_spec=control_spec,
         pre_shot_action_spec=pre_shot_action_spec,
+        live_action_spec=live_action_spec,
     )
     try:
         result = run_fixed_cadence_world_model_train_preview(
@@ -517,6 +534,7 @@ def _world_model_train_preview_metrics(
                 early_stop_patience=int(training_config["world_model_preview_early_stop_patience"]),
                 control_spec=control_spec,
                 pre_shot_action_spec=pre_shot_action_spec,
+                live_action_spec=live_action_spec,
                 taste_objective_spec=taste_objective_spec,
                 imagination_horizon=int(training_config["world_model_preview_imagination_horizon"]),
                 imagination_actor_hidden_dim=int(
@@ -656,6 +674,7 @@ def _model_manifest(
             "feature_layout_sha256": dreamer_tensor_contract["feature_layout_sha256"],
             "control_spec_sha256": dreamer_tensor_contract["control_spec_sha256"],
             "pre_shot_action_spec_sha256": dreamer_tensor_contract["pre_shot_action_spec_sha256"],
+            "live_action_spec_sha256": dreamer_tensor_contract["live_action_spec_sha256"],
             "taste_objective_spec_sha256": dreamer_tensor_contract["taste_objective_spec_sha256"],
         },
         "dataset": {
@@ -747,6 +766,7 @@ def _checkpoint_metadata(
     feature_layout_sha256: str,
     control_spec_sha256: str,
     pre_shot_action_spec_sha256: str,
+    live_action_spec_sha256: str,
     taste_objective_spec_sha256: str,
     checkpoint_tensor_manifest_sha256: str,
     checkpoint_architecture_sha256: str,
@@ -771,6 +791,7 @@ def _checkpoint_metadata(
         "feature_layout_sha256": feature_layout_sha256,
         "control_spec_sha256": control_spec_sha256,
         "pre_shot_action_spec_sha256": pre_shot_action_spec_sha256,
+        "live_action_spec_sha256": live_action_spec_sha256,
         "taste_objective_spec_sha256": taste_objective_spec_sha256,
         "tensor_manifest_sha256": checkpoint_tensor_manifest_sha256,
         "architecture_sha256": checkpoint_architecture_sha256,
@@ -870,6 +891,7 @@ def validate_dreamer_checkpoint_safetensors(payload: bytes, model_manifest: dict
         "feature_layout_sha256",
         "control_spec_sha256",
         "pre_shot_action_spec_sha256",
+        "live_action_spec_sha256",
         "taste_objective_spec_sha256",
         "architecture_sha256",
         "inference_probe_sha256",
@@ -948,6 +970,7 @@ def _validate_serialized_checkpoint_parity(
     parity_batch: dict[str, torch.Tensor],
     expected_heldout_sha256: str,
     expected_pre_shot_action_spec_sha256: str,
+    expected_live_action_spec_sha256: str,
     expected_taste_objective_spec_sha256: str,
 ) -> None:
     class MemoryModelStore:
@@ -965,6 +988,7 @@ def _validate_serialized_checkpoint_parity(
             expected_artifact_sha256=expected_model_sha256,
             compatibility=DreamerCheckpointCompatibility(
                 pre_shot_action_spec_sha256=expected_pre_shot_action_spec_sha256,
+                live_action_spec_sha256=expected_live_action_spec_sha256,
                 taste_objective_spec_sha256=expected_taste_objective_spec_sha256,
             ),
         )

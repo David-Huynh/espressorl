@@ -10,6 +10,10 @@ import torch
 import torch.nn as nn
 
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
+from espresso_rl.domain.dreamer_live_action import (
+    DEFAULT_DREAMER_LIVE_ACTION_SPEC,
+    DreamerLiveActionSpec,
+)
 from espresso_rl.domain.dreamer_pre_shot import (
     DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
     DreamerPreShotActionSpec,
@@ -85,6 +89,7 @@ class WorldModelTrainPreviewConfig:
     early_stop_patience: int
     control_spec: DreamerControlSpec
     pre_shot_action_spec: DreamerPreShotActionSpec = DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC
+    live_action_spec: DreamerLiveActionSpec = DEFAULT_DREAMER_LIVE_ACTION_SPEC
     taste_objective_spec: DreamerTasteObjectiveSpec = DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC
     imagination_horizon: int = 3
     imagination_actor_hidden_dim: int = 32
@@ -280,10 +285,11 @@ def run_fixed_cadence_world_model_train_preview(
         torch.manual_seed((config.seed + 0x9E3779B9) % (2**32))
         actor = DreamerV3ImaginationActor(
             feature_dim=model.feature_dim,
-            dynamic_action_dim=validation_tensors["dynamic_actions"].shape[-1],
             taste_objective_dim=validation_tensors["taste_objective"].shape[-1],
             config=imagination_config,
+            control_spec=config.control_spec,
             pre_shot_action_spec=config.pre_shot_action_spec,
+            live_action_spec=config.live_action_spec,
             taste_objective_spec=config.taste_objective_spec,
         )
         critic = DreamerV3ImaginationCritic(
@@ -328,8 +334,9 @@ def run_fixed_cadence_world_model_train_preview(
             observation_dim=int(train_tensors["observations"].shape[-1]),
             behavior_dim=int(_behavior_tensor(train_tensors).shape[-1]),
             static_dim=int(train_tensors["static_context"].shape[-1]),
-            dynamic_action_dim=int(train_tensors["dynamic_actions"].shape[-1]),
+            live_action_dim=int(train_tensors["dynamic_actions"].shape[-1]),
             control_spec=config.control_spec,
+            live_action_spec=config.live_action_spec,
         )
         inference_probe_sha256 = dreamer_inference_probe_sha256(
             world_model=model,
@@ -748,7 +755,8 @@ def _offline_evaluation_report(
             "rmse": _rounded_scalar(critic_value_rmse),
         },
         "actor": {
-            "entropy_mean": _rounded_scalar(rollout["pre_shot_entropy"].mean()),
+            "entropy_mean": _rounded_scalar(rollout["actor_entropy"]),
+            "live_entropy_mean": _rounded_scalar(rollout["live_entropy"].mean()),
             "pre_shot_behavior_loss": _rounded_scalar(rollout["pre_shot_behavior_loss"]),
             "imagined_return_mean": _rounded_scalar(imagined_returns.mean()),
             "imagined_return_std": _rounded_scalar(imagined_returns.std(unbiased=False)),
@@ -843,12 +851,14 @@ def _train_actor_step(
         )
         advantage = (rollout["lambda_returns"] - rollout["values"][:, :-1]).detach()
         pre_shot_policy_loss = -(rollout["pre_shot_log_prob"] * advantage[:, 0]).mean()
+        live_policy_loss = -(rollout["live_log_prob"] * advantage).mean()
         pre_shot_behavior_loss = rollout["pre_shot_behavior_loss"]
         imagined_return_loss = -rollout["lambda_returns"].mean()
-        entropy = rollout["pre_shot_entropy"].mean()
+        entropy = rollout["actor_entropy"]
         actor_loss = (
             imagined_return_loss
             + pre_shot_policy_loss
+            + live_policy_loss
             + imagination_config.pre_shot_behavior_loss_scale * pre_shot_behavior_loss
             - imagination_config.actor_entropy_scale * entropy
         )
@@ -865,6 +875,7 @@ def _train_actor_step(
     return {
         "actor_loss": _rounded_scalar(actor_loss),
         "pre_shot_policy_loss": _rounded_scalar(pre_shot_policy_loss),
+        "live_policy_loss": _rounded_scalar(live_policy_loss),
         "pre_shot_behavior_loss": _rounded_scalar(pre_shot_behavior_loss),
         "imagined_return_loss": _rounded_scalar(imagined_return_loss),
         "actor_entropy_mean": _rounded_scalar(entropy),
@@ -911,6 +922,10 @@ def _checkpoint_tensors(
     )
     tensors["actor.pre_shot_action_bin_counts"] = (
         actor.pre_shot_action_bin_counts.detach().cpu().contiguous().to(dtype=torch.float32)
+    )
+    tensors["actor.live_action_bins"] = actor.live_action_bins.detach().cpu().contiguous().to(dtype=torch.float32)
+    tensors["actor.live_action_bin_counts"] = (
+        actor.live_action_bin_counts.detach().cpu().contiguous().to(dtype=torch.float32)
     )
     tensors["critic.value_bins"] = critic.value_bins.detach().cpu().contiguous().to(dtype=torch.float32)
     return tensors

@@ -8,8 +8,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from espresso_rl.dreamer.dataset import DREAMER_DYNAMIC_ACTION_FEATURES
-from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC
+from espresso_rl.dreamer.dataset import DREAMER_DYNAMIC_ACTION_FEATURES, DREAMER_OBSERVED_TARGET_FEATURES
+from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC, DreamerControlSpec
+from espresso_rl.domain.dreamer_live_action import (
+    DEFAULT_DREAMER_LIVE_ACTION_SPEC,
+    DREAMER_LIVE_ACTION_FIELDS,
+    DreamerLiveActionSpec,
+)
 from espresso_rl.domain.dreamer_pre_shot import (
     DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
     DREAMER_PRE_SHOT_ACTION_FIELDS,
@@ -60,18 +65,23 @@ class DreamerV3ImaginationActor(nn.Module):
         self,
         *,
         feature_dim: int,
-        dynamic_action_dim: int,
         taste_objective_dim: int,
         config: DreamerV3ImaginationConfig,
+        control_spec: DreamerControlSpec = DEFAULT_DREAMER_CONTROL_SPEC,
         pre_shot_action_spec: DreamerPreShotActionSpec = DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
+        live_action_spec: DreamerLiveActionSpec = DEFAULT_DREAMER_LIVE_ACTION_SPEC,
         taste_objective_spec: DreamerTasteObjectiveSpec = DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC,
     ) -> None:
         super().__init__()
         self.config = config
-        self.dynamic_action_dim = dynamic_action_dim
+        self.control_spec = control_spec
+        self.dynamic_target_dim = len(DREAMER_DYNAMIC_ACTION_FEATURES)
         self.taste_objective_dim = taste_objective_dim
         self.pre_shot_action_spec = pre_shot_action_spec
+        self.live_action_spec = live_action_spec
         self.taste_objective_spec = taste_objective_spec
+        if not isinstance(control_spec, DreamerControlSpec):
+            raise ValueError("Dreamer actor control spec is invalid")
         if taste_objective_dim != 1 + len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES):
             raise ValueError("Dreamer actor taste-objective dimension does not match its spec")
         self.pre_shot_head_count = len(DREAMER_PRE_SHOT_ACTION_FIELDS)
@@ -79,6 +89,11 @@ class DreamerV3ImaginationActor(nn.Module):
             len(pre_shot_action_spec.bins[name]) for name in DREAMER_PRE_SHOT_ACTION_FIELDS
         )
         self.pre_shot_max_bin_count = max(self.pre_shot_bin_counts_tuple)
+        self.live_head_count = len(DREAMER_LIVE_ACTION_FIELDS)
+        self.live_bin_counts_tuple = tuple(
+            len(live_action_spec.bins[name]) for name in DREAMER_LIVE_ACTION_FIELDS
+        )
+        self.live_max_bin_count = max(self.live_bin_counts_tuple)
         self.trunk = _mlp(
             feature_dim + taste_objective_dim,
             config.actor_hidden_dim,
@@ -88,7 +103,10 @@ class DreamerV3ImaginationActor(nn.Module):
             nn.Linear(config.actor_hidden_dim, bin_count)
             for bin_count in self.pre_shot_bin_counts_tuple
         )
-        self.dynamic_head = nn.Linear(config.actor_hidden_dim, dynamic_action_dim)
+        self.live_heads = nn.ModuleList(
+            nn.Linear(config.actor_hidden_dim, bin_count)
+            for bin_count in self.live_bin_counts_tuple
+        )
         self.register_buffer(
             "pre_shot_action_bins",
             _pre_shot_action_bin_tensor(pre_shot_action_spec),
@@ -99,7 +117,17 @@ class DreamerV3ImaginationActor(nn.Module):
             torch.tensor(self.pre_shot_bin_counts_tuple, dtype=torch.float32),
             persistent=False,
         )
-        dynamic_low, dynamic_high = _dynamic_action_bound_tensors(dynamic_action_dim)
+        self.register_buffer(
+            "live_action_bins",
+            _live_action_bin_tensor(live_action_spec),
+            persistent=False,
+        )
+        self.register_buffer(
+            "live_action_bin_counts",
+            torch.tensor(self.live_bin_counts_tuple, dtype=torch.float32),
+            persistent=False,
+        )
+        dynamic_low, dynamic_high = _dynamic_action_bound_tensors(control_spec)
         self.register_buffer("dynamic_action_low", dynamic_low, persistent=False)
         self.register_buffer("dynamic_action_high", dynamic_high, persistent=False)
 
@@ -109,11 +137,18 @@ class DreamerV3ImaginationActor(nn.Module):
         taste_objective: torch.Tensor,
         pre_shot_capability_mask: torch.Tensor,
         control_action_mask: torch.Tensor,
+        target_state: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         hidden = self._hidden(features, taste_objective)
+        if target_state is None:
+            target_state = torch.zeros(
+                (*hidden.shape[:-1], self.dynamic_target_dim),
+                dtype=hidden.dtype,
+                device=hidden.device,
+            )
         return {
             **self._pre_shot_output(hidden, pre_shot_capability_mask),
-            **self._dynamic_output(hidden, control_action_mask),
+            **self._dynamic_output(hidden, control_action_mask, target_state),
         }
 
     def select_pre_shot(
@@ -129,8 +164,9 @@ class DreamerV3ImaginationActor(nn.Module):
         features: torch.Tensor,
         taste_objective: torch.Tensor,
         control_action_mask: torch.Tensor,
+        target_state: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        return self._dynamic_output(self._hidden(features, taste_objective), control_action_mask)
+        return self._dynamic_output(self._hidden(features, taste_objective), control_action_mask, target_state)
 
     def _hidden(self, features: torch.Tensor, taste_objective: torch.Tensor) -> torch.Tensor:
         if features.ndim < 2 or taste_objective.shape != (*features.shape[:-1], self.taste_objective_dim):
@@ -189,18 +225,62 @@ class DreamerV3ImaginationActor(nn.Module):
         self,
         hidden: torch.Tensor,
         control_action_mask: torch.Tensor,
+        target_state: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        if control_action_mask.shape != (*hidden.shape[:-1], self.dynamic_action_dim):
+        if control_action_mask.shape != (*hidden.shape[:-1], self.dynamic_target_dim):
             raise ValueError("Dreamer dynamic action capability mask shape is invalid")
+        if target_state.shape != (*hidden.shape[:-1], self.dynamic_target_dim):
+            raise ValueError("Dreamer dynamic target state shape is invalid")
         dynamic_action_mask = (control_action_mask > 0.5).to(dtype=hidden.dtype)
-        raw_dynamic_actions = torch.tanh(self.dynamic_head(hidden))
         dynamic_low = self.dynamic_action_low.to(dtype=hidden.dtype, device=hidden.device)
         dynamic_high = self.dynamic_action_high.to(dtype=hidden.dtype, device=hidden.device)
-        bounded_dynamic_actions = dynamic_low + (raw_dynamic_actions + 1.0) * 0.5 * (dynamic_high - dynamic_low)
-        dynamic_actions = bounded_dynamic_actions * dynamic_action_mask
+        padded_logits = torch.full(
+            (*hidden.shape[:-1], self.live_head_count, self.live_max_bin_count),
+            torch.finfo(hidden.dtype).min,
+            dtype=hidden.dtype,
+            device=hidden.device,
+        )
+        indexes: list[torch.Tensor] = []
+        deltas: list[torch.Tensor] = []
+        selected_log_probs: list[torch.Tensor] = []
+        entropies: list[torch.Tensor] = []
+        for head_index, (head, bin_count) in enumerate(
+            zip(self.live_heads, self.live_bin_counts_tuple, strict=True)
+        ):
+            logits = head(hidden)
+            padded_logits[..., head_index, :bin_count] = logits
+            index = torch.argmax(logits, dim=-1)
+            bins = self.live_action_bins[head_index, :bin_count].to(
+                dtype=hidden.dtype,
+                device=hidden.device,
+            )
+            indexes.append(index)
+            deltas.append(bins[index])
+            log_probs = F.log_softmax(logits, dim=-1)
+            selected_log_probs.append(log_probs.gather(-1, index.unsqueeze(-1)).squeeze(-1))
+            entropies.append(-(F.softmax(logits, dim=-1) * log_probs).sum(dim=-1))
+        index_tensor = torch.stack(indexes, dim=-1)
+        delta_tensor = torch.stack(deltas, dim=-1) * dynamic_action_mask
+        next_target_state = _apply_live_action_delta(
+            target_state.to(dtype=hidden.dtype),
+            delta_tensor,
+            dynamic_low,
+            dynamic_high,
+        )
+        dynamic_actions = next_target_state * dynamic_action_mask
+        log_prob_tensor = torch.stack(selected_log_probs, dim=-1) * dynamic_action_mask
+        entropy_tensor = torch.stack(entropies, dim=-1) * dynamic_action_mask
+        capability_count = dynamic_action_mask.sum(dim=-1).clamp_min(1.0)
         return {
+            "live_action_logits": padded_logits,
+            "live_action_indexes": index_tensor,
+            "live_action_deltas": delta_tensor,
+            "live_action_mask": dynamic_action_mask,
+            "live_log_prob": log_prob_tensor.sum(dim=-1),
+            "live_entropy": entropy_tensor.sum(dim=-1) / capability_count,
             "dynamic_actions": dynamic_actions,
             "dynamic_action_mask": dynamic_action_mask,
+            "dynamic_target_state": next_target_state,
         }
 
 
@@ -303,10 +383,11 @@ def run_dreamer_v3_imagination_preview(
         pre_shot_spec = _pre_shot_spec_from_batch(batch)
         actor = DreamerV3ImaginationActor(
             feature_dim=world_model.feature_dim,
-            dynamic_action_dim=batch["dynamic_actions"].shape[-1],
             taste_objective_dim=batch["taste_objective"].shape[-1],
             config=config,
+            control_spec=_control_spec_from_batch(batch),
             pre_shot_action_spec=pre_shot_spec,
+            live_action_spec=_live_action_spec_from_batch(batch),
             taste_objective_spec=_taste_objective_spec_from_batch(batch),
         )
     if critic is None:
@@ -338,12 +419,18 @@ def run_dreamer_v3_imagination_preview(
         "pre_shot_action_bins": {
             key: list(actor.pre_shot_action_spec.bins[key]) for key in DREAMER_PRE_SHOT_ACTION_FIELDS
         },
+        "live_action_heads": list(DREAMER_LIVE_ACTION_FIELDS),
+        "live_action_bins": {
+            key: list(actor.live_action_spec.bins[key]) for key in DREAMER_LIVE_ACTION_FIELDS
+        },
         "dynamic_action_features": list(DREAMER_DYNAMIC_ACTION_FEATURES),
         "start_count": int(rollout["imagined_features"].shape[0]),
         "feature_dim": int(world_model.feature_dim),
         "pre_shot_logits_shape": _shape(rollout["pre_shot_logits"]),
         "pre_shot_action_shape": _shape(rollout["pre_shot_actions"]),
         "pre_shot_held_action_shape": _shape(rollout["pre_shot_actions_held"]),
+        "live_action_logits_shape": _shape(rollout["live_action_logits"]),
+        "live_action_delta_shape": _shape(rollout["live_action_deltas"]),
         "dynamic_action_shape": _shape(dynamic_action_tensor),
         "control_action_mask_shape": _shape(control_mask),
         "supported_dynamic_action_count": int(control_mask.sum().item()),
@@ -396,9 +483,20 @@ def dreamer_v3_imagination_rollout(
         batch["pre_shot_action_mask"],
         actor.pre_shot_bin_counts_tuple,
     )
+    target_state = _initial_dynamic_target_state(
+        batch,
+        batch_indexes=batch_indexes,
+        start_indexes=start_indexes,
+        pre_shot_actions=pre_shot_output["pre_shot_actions"],
+    )
 
     imagined_features: list[torch.Tensor] = []
     dynamic_actions: list[torch.Tensor] = []
+    live_action_logits: list[torch.Tensor] = []
+    live_action_indexes: list[torch.Tensor] = []
+    live_action_deltas: list[torch.Tensor] = []
+    live_log_probs: list[torch.Tensor] = []
+    live_entropies: list[torch.Tensor] = []
     rewards: list[torch.Tensor] = []
     continuations: list[torch.Tensor] = []
     values: list[torch.Tensor] = [critic.value(features, taste_objective)]
@@ -406,8 +504,14 @@ def dreamer_v3_imagination_rollout(
 
     for _ in range(config.horizon):
         imagined_features.append(features)
-        dynamic_output = actor.select_dynamic(features, taste_objective, control_mask)
+        dynamic_output = actor.select_dynamic(features, taste_objective, control_mask, target_state)
+        target_state = dynamic_output["dynamic_target_state"]
         dynamic_actions.append(dynamic_output["dynamic_actions"])
+        live_action_logits.append(dynamic_output["live_action_logits"])
+        live_action_indexes.append(dynamic_output["live_action_indexes"])
+        live_action_deltas.append(dynamic_output["live_action_deltas"])
+        live_log_probs.append(dynamic_output["live_log_prob"])
+        live_entropies.append(dynamic_output["live_entropy"])
         behavior = behavior_tensor_from_parts(
             observed_profile_targets=torch.zeros(
                 features.shape[0],
@@ -454,11 +558,16 @@ def dreamer_v3_imagination_rollout(
     critic_loss = critic.loss(imagined_feature_tensor, taste_objective, lambda_target_tensor, step_mask)
     advantage = lambda_target_tensor - value_tensor[:, :-1]
     pre_shot_policy_loss = -(pre_shot_output["pre_shot_log_prob"] * advantage[:, 0].detach()).mean()
+    live_log_prob_tensor = torch.stack(live_log_probs, dim=1)
+    live_entropy_tensor = torch.stack(live_entropies, dim=1)
+    live_policy_loss = -(live_log_prob_tensor * advantage.detach()).mean()
+    entropy = 0.5 * (pre_shot_output["pre_shot_entropy"].mean() + live_entropy_tensor.mean())
     actor_loss = (
         -lambda_target_tensor.mean()
         + pre_shot_policy_loss
+        + live_policy_loss
         + config.pre_shot_behavior_loss_scale * pre_shot_behavior_loss
-        - config.actor_entropy_scale * pre_shot_output["pre_shot_entropy"].mean()
+        - config.actor_entropy_scale * entropy
     )
     dynamic_action_tensor = torch.stack(dynamic_actions, dim=1)
     return {
@@ -479,6 +588,13 @@ def dreamer_v3_imagination_rollout(
         "pre_shot_entropy": pre_shot_output["pre_shot_entropy"],
         "pre_shot_policy_loss": pre_shot_policy_loss,
         "pre_shot_behavior_loss": pre_shot_behavior_loss,
+        "live_action_logits": torch.stack(live_action_logits, dim=1),
+        "live_action_indexes": torch.stack(live_action_indexes, dim=1),
+        "live_action_deltas": torch.stack(live_action_deltas, dim=1),
+        "live_log_prob": live_log_prob_tensor,
+        "live_entropy": live_entropy_tensor,
+        "live_policy_loss": live_policy_loss,
+        "actor_entropy": entropy,
         "taste_objective": taste_objective,
         "dynamic_actions": dynamic_action_tensor,
         "control_action_mask": control_mask,
@@ -527,6 +643,16 @@ def _pre_shot_spec_from_batch(batch: dict[str, Any]) -> DreamerPreShotActionSpec
     return DreamerPreShotActionSpec.from_dict(value) if isinstance(value, dict) else DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC
 
 
+def _live_action_spec_from_batch(batch: dict[str, Any]) -> DreamerLiveActionSpec:
+    value = batch.get("live_action_spec")
+    return DreamerLiveActionSpec.from_dict(value) if isinstance(value, dict) else DEFAULT_DREAMER_LIVE_ACTION_SPEC
+
+
+def _control_spec_from_batch(batch: dict[str, Any]) -> DreamerControlSpec:
+    value = batch.get("control_spec")
+    return DreamerControlSpec.from_dict(value) if isinstance(value, dict) else DEFAULT_DREAMER_CONTROL_SPEC
+
+
 def _taste_objective_spec_from_batch(batch: dict[str, Any]) -> DreamerTasteObjectiveSpec:
     value = batch.get("taste_objective_spec")
     return (
@@ -545,10 +671,17 @@ def _pre_shot_action_bin_tensor(spec: DreamerPreShotActionSpec) -> torch.Tensor:
     return tensor
 
 
-def _dynamic_action_bound_tensors(dynamic_action_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
-    if dynamic_action_dim != len(DREAMER_DYNAMIC_ACTION_FEATURES):
-        raise ValueError("Dreamer dynamic_action_dim must match the canonical dynamic action feature count")
-    limits = DEFAULT_DREAMER_CONTROL_SPEC.safety_limits
+def _live_action_bin_tensor(spec: DreamerLiveActionSpec) -> torch.Tensor:
+    maximum = max(len(spec.bins[name]) for name in DREAMER_LIVE_ACTION_FIELDS)
+    tensor = torch.zeros((len(DREAMER_LIVE_ACTION_FIELDS), maximum), dtype=torch.float32)
+    for index, name in enumerate(DREAMER_LIVE_ACTION_FIELDS):
+        values = torch.tensor(spec.bins[name], dtype=torch.float32)
+        tensor[index, : values.shape[0]] = values
+    return tensor
+
+
+def _dynamic_action_bound_tensors(control_spec: DreamerControlSpec) -> tuple[torch.Tensor, torch.Tensor]:
+    limits = control_spec.safety_limits
     ranges = {
         "pressure_target_bar": (limits.min_pressure_bar, limits.max_pressure_bar),
         "flow_target_ml_s": (limits.min_flow_ml_s, limits.max_flow_ml_s),
@@ -561,6 +694,56 @@ def _dynamic_action_bound_tensors(dynamic_action_dim: int) -> tuple[torch.Tensor
     low = torch.tensor([ranges[name][0] for name in DREAMER_DYNAMIC_ACTION_FEATURES], dtype=torch.float32)
     high = torch.tensor([ranges[name][1] for name in DREAMER_DYNAMIC_ACTION_FEATURES], dtype=torch.float32)
     return low, high
+
+
+def _apply_live_action_delta(
+    target_state: torch.Tensor,
+    live_action_deltas: torch.Tensor,
+    dynamic_low: torch.Tensor,
+    dynamic_high: torch.Tensor,
+) -> torch.Tensor:
+    next_target = target_state + live_action_deltas
+    stop_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("stop")
+    next_target = torch.maximum(torch.minimum(next_target, dynamic_high), dynamic_low)
+    requested_stop = (live_action_deltas[..., stop_index] > 0.5).to(dtype=next_target.dtype)
+    next_target[..., stop_index] = torch.maximum(target_state[..., stop_index], requested_stop)
+    return next_target
+
+
+def _initial_dynamic_target_state(
+    batch: dict[str, torch.Tensor],
+    *,
+    batch_indexes: torch.Tensor,
+    start_indexes: torch.Tensor,
+    pre_shot_actions: torch.Tensor,
+) -> torch.Tensor:
+    target_state = torch.zeros(
+        batch_indexes.shape[0],
+        len(DREAMER_DYNAMIC_ACTION_FEATURES),
+        dtype=pre_shot_actions.dtype,
+        device=pre_shot_actions.device,
+    )
+    observed_targets = batch["observed_profile_targets"][batch_indexes, start_indexes].to(dtype=pre_shot_actions.dtype)
+    observed_mask = batch["observed_profile_target_mask"][batch_indexes, start_indexes].to(dtype=pre_shot_actions.dtype)
+    profile_to_dynamic = {
+        "pressure_target_bar": "pressure_target_bar",
+        "flow_target_ml_s": "flow_target_ml_s",
+        "temperature_target_c": "temperature_target_c",
+        "valve_open": "valve_position",
+    }
+    for observed_name, dynamic_name in profile_to_dynamic.items():
+        observed_index = DREAMER_OBSERVED_TARGET_FEATURES.index(observed_name)
+        dynamic_index = DREAMER_DYNAMIC_ACTION_FEATURES.index(dynamic_name)
+        target_state[:, dynamic_index] = observed_targets[:, observed_index] * observed_mask[:, observed_index]
+    pump_mode_index = DREAMER_OBSERVED_TARGET_FEATURES.index("pump_target_mode")
+    pump_duty_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pump_duty")
+    target_state[:, pump_duty_index] = (observed_targets[:, pump_mode_index] > 0.5).to(dtype=pre_shot_actions.dtype)
+    yield_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("yield_stop_target_g")
+    pre_shot_yield_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("yield_target_g")
+    target_state[:, yield_index] = pre_shot_actions[:, pre_shot_yield_index]
+    logged_actions = batch["dynamic_actions"][batch_indexes, start_indexes].to(dtype=pre_shot_actions.dtype)
+    logged_mask = batch["dynamic_action_mask"][batch_indexes, start_indexes].to(dtype=pre_shot_actions.dtype)
+    return torch.where(logged_mask > 0.5, logged_actions, target_state)
 
 
 def _condition_on_taste(

@@ -73,6 +73,7 @@ class TrainerArtifactTests(unittest.TestCase):
         config = json.loads(files[TRAINING_CONFIG_FILENAME].content.decode("utf-8"))
         self.assertEqual(config["dreamer_control_spec"]["observation_interval_ms"], 250)
         self.assertEqual(config["dreamer_control_spec"]["decision_interval_ms"], 1000)
+        self.assertIn("dreamer_live_action_spec", config)
         self.assertEqual(manifest["model_artifact"]["format"], "safetensors")
         self.assertEqual(manifest["model_artifact"]["checkpoint_format"], CHECKPOINT_ARTIFACT_FORMAT)
         self.assertEqual(manifest["model_artifact"]["tensor_count"], 0)
@@ -122,6 +123,7 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(len(tensor_contract["feature_layout_sha256"]), 64)
         self.assertEqual(len(tensor_contract["control_spec_sha256"]), 64)
         self.assertEqual(len(tensor_contract["pre_shot_action_spec_sha256"]), 64)
+        self.assertEqual(len(tensor_contract["live_action_spec_sha256"]), 64)
         self.assertEqual(len(tensor_contract["taste_objective_spec_sha256"]), 64)
         self.assertEqual(len(tensor_contract["tensor_contract_sha256"]), 64)
         self.assertEqual(
@@ -131,6 +133,14 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(
             model_metadata["pre_shot_action_spec_sha256"],
             tensor_contract["pre_shot_action_spec_sha256"],
+        )
+        self.assertEqual(
+            manifest["model_artifact"]["live_action_spec_sha256"],
+            tensor_contract["live_action_spec_sha256"],
+        )
+        self.assertEqual(
+            model_metadata["live_action_spec_sha256"],
+            tensor_contract["live_action_spec_sha256"],
         )
         self.assertEqual(
             manifest["model_artifact"]["taste_objective_spec_sha256"],
@@ -370,6 +380,8 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertIn("context_encoder.recurrent.weight_ih_l0", model_header)
         self.assertIn("actor.pre_shot_action_bins", model_header)
         self.assertIn("actor.pre_shot_action_bin_counts", model_header)
+        self.assertIn("actor.live_action_bins", model_header)
+        self.assertIn("actor.live_action_bin_counts", model_header)
         self.assertIn("critic.value_bins", model_header)
         self.assertEqual(
             manifest["model_artifact"]["tensor_manifest_sha256"],
@@ -426,6 +438,8 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertFalse(preview["imagination_preview"]["inference_ready"])
         self.assertTrue(preview["imagination_preview"]["contract_only"])
         self.assertEqual(preview["imagination_preview"]["pre_shot_logits_shape"][:2], [1, 9])
+        self.assertEqual(preview["imagination_preview"]["live_action_logits_shape"][:2], [1, 3])
+        self.assertEqual(preview["imagination_preview"]["live_action_delta_shape"], [1, 3, 7])
         self.assertEqual(preview["imagination_preview"]["pre_shot_held_action_shape"], [1, 3, 9])
         self.assertEqual(preview["imagination_preview"]["lambda_return_shape"], [1, 3])
         self.assertEqual(preview["dataset_split"]["train_source_training_row_ids"], [1, 2, 3])

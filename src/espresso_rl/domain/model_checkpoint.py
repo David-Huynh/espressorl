@@ -4,14 +4,15 @@ from dataclasses import dataclass
 import math
 
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
+from espresso_rl.domain.dreamer_live_action import DreamerLiveActionSpec
 from espresso_rl.domain.dreamer_pre_shot import DreamerPreShotActionSpec
 from espresso_rl.domain.dreamer_taste import (
     DREAMER_TASTE_OBJECTIVE_ATTRIBUTES,
     DreamerTasteObjectiveSpec,
 )
 
-DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT = "espresso_rl_dreamer_v3_checkpoint_architecture_v2"
-DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION = 2
+DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT = "espresso_rl_dreamer_v3_checkpoint_architecture_v3"
+DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION = 3
 DREAMER_INFERENCE_PROBE_FORMAT = "espresso_rl_dreamer_v3_inference_probe_v1"
 
 _HEX_CHARS = frozenset("0123456789abcdef")
@@ -24,6 +25,7 @@ class DreamerCheckpointCompatibility:
     feature_layout_sha256: str | None = None
     control_spec_sha256: str | None = None
     pre_shot_action_spec_sha256: str | None = None
+    live_action_spec_sha256: str | None = None
     taste_objective_spec_sha256: str | None = None
     tensor_contract_sha256: str | None = None
 
@@ -32,6 +34,7 @@ class DreamerCheckpointCompatibility:
             "feature_layout_sha256",
             "control_spec_sha256",
             "pre_shot_action_spec_sha256",
+            "live_action_spec_sha256",
             "taste_objective_spec_sha256",
             "tensor_contract_sha256",
         ):
@@ -162,10 +165,11 @@ class DreamerCheckpointArchitecture:
     observation_dim: int
     behavior_dim: int
     static_dim: int
-    dynamic_action_dim: int
+    live_action_dim: int
     taste_objective_dim: int
     control_spec: DreamerControlSpec
     pre_shot_action_spec: DreamerPreShotActionSpec
+    live_action_spec: DreamerLiveActionSpec
     taste_objective_spec: DreamerTasteObjectiveSpec
     world_model: DreamerWorldModelArchitecture
     context_encoder: DreamerContextEncoderArchitecture
@@ -181,7 +185,7 @@ class DreamerCheckpointArchitecture:
         _bounded_int(self.observation_dim, 1, 256, "observation_dim")
         _bounded_int(self.behavior_dim, 1, 512, "behavior_dim")
         _bounded_int(self.static_dim, 1, 256, "static_dim")
-        _bounded_int(self.dynamic_action_dim, 1, 64, "dynamic_action_dim")
+        _bounded_int(self.live_action_dim, 1, 64, "live_action_dim")
         _bounded_int(self.taste_objective_dim, 1, 64, "taste_objective_dim")
         if not isinstance(self.world_model, DreamerWorldModelArchitecture):
             raise ValueError("checkpoint world-model architecture is invalid")
@@ -193,8 +197,12 @@ class DreamerCheckpointArchitecture:
             raise ValueError("checkpoint control spec is invalid")
         if not isinstance(self.pre_shot_action_spec, DreamerPreShotActionSpec):
             raise ValueError("checkpoint pre-shot action spec is invalid")
+        if not isinstance(self.live_action_spec, DreamerLiveActionSpec):
+            raise ValueError("checkpoint live action spec is invalid")
         if not isinstance(self.taste_objective_spec, DreamerTasteObjectiveSpec):
             raise ValueError("checkpoint taste-objective spec is invalid")
+        if self.live_action_dim != len(self.live_action_spec.bins):
+            raise ValueError("checkpoint live_action_dim does not match live-action spec")
         if self.taste_objective_dim != 1 + len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES):
             raise ValueError("checkpoint taste_objective_dim does not match taste-objective spec")
         if self.world_model.reward_bins != self.imagination.value_bins:
@@ -211,10 +219,11 @@ class DreamerCheckpointArchitecture:
             "observation_dim": self.observation_dim,
             "behavior_dim": self.behavior_dim,
             "static_dim": self.static_dim,
-            "dynamic_action_dim": self.dynamic_action_dim,
+            "live_action_dim": self.live_action_dim,
             "taste_objective_dim": self.taste_objective_dim,
             "control_spec": self.control_spec.to_dict(),
             "pre_shot_action_spec": self.pre_shot_action_spec.to_dict(),
+            "live_action_spec": self.live_action_spec.to_dict(),
             "taste_objective_spec": self.taste_objective_spec.to_dict(),
             "world_model": self.world_model.to_dict(),
             "context_encoder": self.context_encoder.to_dict(),
@@ -237,6 +246,7 @@ class VerifiedDreamerCheckpoint:
     feature_layout_sha256: str
     control_spec_sha256: str
     pre_shot_action_spec_sha256: str
+    live_action_spec_sha256: str
     taste_objective_spec_sha256: str
     evaluation_report_sha256: str | None
     architecture_sha256: str

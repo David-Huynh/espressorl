@@ -144,6 +144,7 @@ def dreamer_episode_batch_from_training_rows(
             episodes,
             control_spec=architecture.control_spec,
             pre_shot_action_spec=architecture.pre_shot_action_spec,
+            live_action_spec=architecture.live_action_spec,
             device="cpu",
         )
     except DreamerEpisodeDatasetError as exc:
@@ -151,7 +152,7 @@ def dreamer_episode_batch_from_training_rows(
     if (
         batch["observations"].shape[-1] != architecture.observation_dim
         or batch["static_context"].shape[-1] != architecture.static_dim
-        or batch["dynamic_actions"].shape[-1] != architecture.dynamic_action_dim
+        or batch["dynamic_actions"].shape[-1] != architecture.live_action_dim
         or batch["context_static"].shape[-1] != architecture.context_encoder.static_dim
         or batch["context_terminal"].shape[-1] != architecture.context_encoder.terminal_dim
         or batch["context_time"].shape[-1] != architecture.context_encoder.time_dim

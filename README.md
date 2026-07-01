@@ -584,11 +584,12 @@ uv run espresso-rl-build-dreamer-artifacts \
 
 It validates the dataset hash, revalidates every JSONL transition, rejects
 absolute grinder fields, builds `espresso_rl_dreamer_episode_v3` episodes,
-constructs deterministic Dreamer tensors under the configured control and
-pre-shot action specs, writes tensor feature/cadence hashes into the audit
-report, and binds the pre-shot action and taste-objective schema hashes into
-the model manifest and safetensors metadata. The checkpoint loader rejects
-artifacts whose authenticated schemas differ from the runtime contracts. The
+constructs deterministic Dreamer tensors under the configured control,
+pre-shot action, and live-action specs, writes tensor feature/cadence hashes
+into the audit report, and binds the pre-shot action, live-action, and
+taste-objective schema hashes into the model manifest and safetensors metadata.
+The checkpoint loader rejects artifacts whose authenticated schemas differ from
+the runtime contracts. The
 builder optionally runs a
 deterministic CPU-only `world_model_smoke` step through the reference-aligned
 categorical RSSM world model, and writes only fixed safe filenames.
@@ -600,9 +601,12 @@ hyperparameters in `audit_report.json`. It also runs an audit-only DreamerV3
 imagination preview from posterior RSSM starts through the prior. Its
 taste-conditioned pre-shot actor has one categorical head per authenticated
 pre-shot action field and a masked behavior-cloning loss. The selected plan is
-held in every imagined RSSM transition while the existing dynamic-control head
-acts at fixed cadence. A taste-conditioned symlog/two-hot critic supplies
-lambda-return targets. The preview stage now performs a bounded
+held in every imagined RSSM transition while the live actor emits
+authenticated categorical target deltas at fixed cadence. Those deltas are
+applied to the current target state and clamped to the control-spec safety
+envelope before the world model receives the dynamic target tensor. A
+taste-conditioned symlog/two-hot critic supplies lambda-return targets. The
+preview stage now performs a bounded
 deterministic actor/critic training loop in latent imagination and records
 actor loss, critic loss, entropy, imagined return, and dynamic-control mask
 metrics in the audit report. After training, it writes a deterministic offline
@@ -630,7 +634,8 @@ training curves from latent imagination and an offline evaluation report.
 Neither stage produces a useful runtime model artifact. The train-preview stage
 serializes its deterministic RSSM, trained actor-head, and trained critic-head
 tensors with explicit tensor names, shapes, component metadata, feature-layout
-hash, control-spec hash, tensor-manifest hash, and evaluation-report hash;
+hash, control-spec hash, pre-shot action spec hash, live-action spec hash,
+taste-objective spec hash, tensor-manifest hash, and evaluation-report hash;
 runtime compatibility should only be set after inference is safe. The command
 has a configurable `--max-dataset-bytes` resource
 guard, defaulting to 8 GiB, because this skeleton validates JSONL in-process.

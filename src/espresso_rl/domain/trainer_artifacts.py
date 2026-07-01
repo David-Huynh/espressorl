@@ -4,6 +4,10 @@ import math
 from typing import Any
 
 from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC, DreamerControlSpec
+from espresso_rl.domain.dreamer_live_action import (
+    DEFAULT_DREAMER_LIVE_ACTION_SPEC,
+    DreamerLiveActionSpec,
+)
 from espresso_rl.domain.dreamer_pre_shot import (
     DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
     DreamerPreShotActionSpec,
@@ -37,6 +41,7 @@ _TRAINING_CONFIG_FIELDS = frozenset(
         "artifact_stage",
         "dreamer_control_spec",
         "dreamer_pre_shot_action_spec",
+        "dreamer_live_action_spec",
         "dreamer_taste_objective_spec",
         "world_model_smoke_steps",
         "world_model_preview_epochs",
@@ -106,6 +111,13 @@ def validate_training_config(config: dict[str, Any]) -> list[str]:
             DreamerPreShotActionSpec.from_dict(config.get("dreamer_pre_shot_action_spec"))
         except (TypeError, ValueError) as exc:
             errors.append(str(exc))
+    if "dreamer_live_action_spec" not in config:
+        errors.append("training config dreamer_live_action_spec is required")
+    else:
+        try:
+            DreamerLiveActionSpec.from_dict(config.get("dreamer_live_action_spec"))
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
     try:
         DreamerTasteObjectiveSpec.from_dict(config.get("dreamer_taste_objective_spec"))
     except (TypeError, ValueError) as exc:
@@ -131,6 +143,7 @@ def default_training_config(
         "artifact_stage": artifact_stage,
         "dreamer_control_spec": DEFAULT_DREAMER_CONTROL_SPEC.to_dict(),
         "dreamer_pre_shot_action_spec": DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.to_dict(),
+        "dreamer_live_action_spec": DEFAULT_DREAMER_LIVE_ACTION_SPEC.to_dict(),
         "dreamer_taste_objective_spec": DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict(),
         "seed": seed,
     }

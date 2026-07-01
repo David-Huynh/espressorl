@@ -10,6 +10,7 @@ from pathlib import Path
 from espresso_rl.adapters.local_model_store import LocalModelArtifactStore
 from espresso_rl.application.checkpoint_loading import CheckpointLoadError, load_verified_dreamer_checkpoint
 from espresso_rl.domain.model_checkpoint import DreamerCheckpointCompatibility
+from espresso_rl.domain.dreamer_live_action import DEFAULT_DREAMER_LIVE_ACTION_SPEC
 from espresso_rl.domain.dreamer_pre_shot import DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC
 from espresso_rl.domain.dreamer_taste import DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC
 from espresso_rl.domain.model_manifest import CHECKPOINT_ARTIFACT_FORMAT, CHECKPOINT_ARTIFACT_SCHEMA_VERSION
@@ -61,6 +62,10 @@ class CheckpointLoadingTests(unittest.TestCase):
         self.assertEqual(
             checkpoint.taste_objective_spec_sha256,
             sha256_json(DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict()),
+        )
+        self.assertEqual(
+            checkpoint.live_action_spec_sha256,
+            sha256_json(DEFAULT_DREAMER_LIVE_ACTION_SPEC.to_dict()),
         )
 
     def test_loads_release_ready_checkpoint_without_local_shadow_promotion(self) -> None:
@@ -335,16 +340,18 @@ def checkpoint_bundle(
     control_spec_sha256 = sha256_json(control_spec)
     pre_shot_action_spec_sha256 = sha256_json(DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.to_dict())
     taste_objective_spec_sha256 = sha256_json(DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict())
+    live_action_spec_sha256 = sha256_json(DEFAULT_DREAMER_LIVE_ACTION_SPEC.to_dict())
     architecture = {
-        "format": "espresso_rl_dreamer_v3_checkpoint_architecture_v2",
-        "schema_version": 2,
+        "format": "espresso_rl_dreamer_v3_checkpoint_architecture_v3",
+        "schema_version": 3,
         "observation_dim": 5,
         "behavior_dim": 66,
         "static_dim": 18,
-        "dynamic_action_dim": 7,
+        "live_action_dim": 7,
         "taste_objective_dim": 9,
         "control_spec": control_spec,
         "pre_shot_action_spec": DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.to_dict(),
+        "live_action_spec": DEFAULT_DREAMER_LIVE_ACTION_SPEC.to_dict(),
         "taste_objective_spec": DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict(),
         "world_model": {
             "model_preset": "espresso_debug",
@@ -394,6 +401,7 @@ def checkpoint_bundle(
         "feature_layout_sha256": "5" * 64,
         "control_spec_sha256": control_spec_sha256,
         "pre_shot_action_spec_sha256": pre_shot_action_spec_sha256,
+        "live_action_spec_sha256": live_action_spec_sha256,
         "taste_objective_spec_sha256": taste_objective_spec_sha256,
         "tensor_manifest_sha256": tensor_manifest_sha256,
         "architecture_sha256": architecture_sha256,
@@ -430,6 +438,7 @@ def checkpoint_bundle(
             "feature_layout_sha256": "5" * 64,
             "control_spec_sha256": control_spec_sha256,
             "pre_shot_action_spec_sha256": pre_shot_action_spec_sha256,
+            "live_action_spec_sha256": live_action_spec_sha256,
             "taste_objective_spec_sha256": taste_objective_spec_sha256,
         },
         "dataset": {

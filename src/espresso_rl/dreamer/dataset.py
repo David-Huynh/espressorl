@@ -29,6 +29,10 @@ from espresso_rl.domain.dreamer_episodes import (
     DREAMER_EPISODE_SCHEMA_VERSION,
     validate_dreamer_episode,
 )
+from espresso_rl.domain.dreamer_live_action import (
+    DEFAULT_DREAMER_LIVE_ACTION_SPEC,
+    DreamerLiveActionSpec,
+)
 from espresso_rl.domain.dreamer_pre_shot import (
     DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
     DREAMER_PRE_SHOT_ACTION_FIELDS,
@@ -276,6 +280,7 @@ def build_dreamer_episode_batch(
     pad_to_step_count: int | None = None,
     control_spec: DreamerControlSpec | dict[str, Any] | None = None,
     pre_shot_action_spec: DreamerPreShotActionSpec | dict[str, Any] | None = None,
+    live_action_spec: DreamerLiveActionSpec | dict[str, Any] | None = None,
     context_window_size: int = DREAMER_CONTEXT_WINDOW_SIZE,
     device: torch.device | str | None = None,
 ) -> dict[str, Any]:
@@ -284,6 +289,7 @@ def build_dreamer_episode_batch(
         raise DreamerEpisodeDatasetError("Dreamer episode batch must contain at least one episode")
     resolved_control_spec = _resolve_control_spec(control_spec)
     resolved_pre_shot_spec = _resolve_pre_shot_action_spec(pre_shot_action_spec)
+    resolved_live_action_spec = _resolve_live_action_spec(live_action_spec)
     context_window_size = _context_window_size(context_window_size)
     context_windows = _context_windows(sorted_episodes, context_window_size)
 
@@ -452,6 +458,7 @@ def build_dreamer_episode_batch(
         "context_window_size": context_window_size,
         "control_spec": resolved_control_spec.to_dict(),
         "pre_shot_action_spec": resolved_pre_shot_spec.to_dict(),
+        "live_action_spec": resolved_live_action_spec.to_dict(),
         "feature_names": {
             "observations": DREAMER_OBSERVATION_FEATURES,
             "observed_profile_targets": DREAMER_OBSERVED_TARGET_FEATURES,
@@ -504,6 +511,17 @@ def _resolve_pre_shot_action_spec(
         return DreamerPreShotActionSpec.from_dict(spec)
     except (TypeError, ValueError) as exc:
         raise DreamerEpisodeDatasetError(f"Dreamer pre-shot action spec is invalid: {exc}") from exc
+
+
+def _resolve_live_action_spec(
+    spec: DreamerLiveActionSpec | dict[str, Any] | None,
+) -> DreamerLiveActionSpec:
+    if isinstance(spec, DreamerLiveActionSpec):
+        return spec
+    try:
+        return DreamerLiveActionSpec.from_dict(spec)
+    except (TypeError, ValueError) as exc:
+        raise DreamerEpisodeDatasetError(f"Dreamer live action spec is invalid: {exc}") from exc
 
 
 def _attach_pre_shot_actions(

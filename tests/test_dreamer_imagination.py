@@ -14,6 +14,7 @@ from espresso_rl.dreamer.imagination import (
     masked_pre_shot_behavior_loss,
     run_dreamer_v3_imagination_preview,
 )
+from espresso_rl.domain.dreamer_live_action import DREAMER_LIVE_ACTION_FIELDS
 from espresso_rl.domain.dreamer_pre_shot import DREAMER_PRE_SHOT_ACTION_FIELDS
 from espresso_rl.dreamer.reference_world_model import DreamerV3VectorWorldModel, default_world_model_config
 from tests.test_dreamer_world_model_training import smoke_batch
@@ -24,11 +25,11 @@ class DreamerImaginationTests(unittest.TestCase):
         torch.manual_seed(3)
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            dynamic_action_dim=7,
             taste_objective_dim=9,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         features = torch.ones((2, 6), dtype=torch.float32)
+        target_state = torch.zeros((2, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=torch.float32)
         control_mask = torch.tensor(
             [
                 [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -37,50 +38,61 @@ class DreamerImaginationTests(unittest.TestCase):
             dtype=torch.float32,
         )
 
-        output = actor(features, _auto_taste(2), torch.ones((2, 9)), control_mask)
+        output = actor(features, _auto_taste(2), torch.ones((2, 9)), control_mask, target_state)
 
         self.assertEqual(output["pre_shot_logits"].shape[:2], (2, len(DREAMER_PRE_SHOT_ACTION_FIELDS)))
         self.assertEqual(output["pre_shot_actions"].shape, (2, len(DREAMER_PRE_SHOT_ACTION_FIELDS)))
+        self.assertEqual(output["live_action_logits"].shape[:2], (2, len(DREAMER_LIVE_ACTION_FIELDS)))
         self.assertTrue(torch.equal(output["dynamic_action_mask"], control_mask))
+        self.assertTrue(torch.equal(output["live_action_mask"], control_mask))
         self.assertEqual(float((output["dynamic_actions"] * (1.0 - control_mask)).abs().max().item()), 0.0)
+        self.assertEqual(float((output["live_action_deltas"] * (1.0 - control_mask)).abs().max().item()), 0.0)
 
-    def test_actor_forward_bounds_supported_dynamic_actions_in_physical_units(self) -> None:
+    def test_actor_forward_applies_categorical_live_deltas_and_clamps_target_state(self) -> None:
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            dynamic_action_dim=7,
             taste_objective_dim=9,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         with torch.no_grad():
-            actor.dynamic_head.weight.zero_()
-            actor.dynamic_head.bias.fill_(100.0)
+            for head, bin_count in zip(actor.live_heads, actor.live_bin_counts_tuple, strict=True):
+                head.weight.zero_()
+                head.bias.fill_(-100.0)
+                head.bias[bin_count - 1] = 100.0
 
         features = torch.ones((1, 6), dtype=torch.float32)
         control_mask = torch.ones((1, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=torch.float32)
+        target_state = torch.tensor([[10.0, 18.0, 0.8, 1.0, 98.0, 88.0, 0.0]], dtype=torch.float32)
 
-        output = actor(features, _auto_taste(1), torch.ones((1, 9)), control_mask)
+        output = actor(features, _auto_taste(1), torch.ones((1, 9)), control_mask, target_state)
         actions = output["dynamic_actions"][0]
 
         self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")].item(), 12.0)
         self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("temperature_target_c")].item(), 100.0)
         self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("yield_stop_target_g")].item(), 90.0)
         self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("stop")].item(), 1.0)
+        self.assertGreater(
+            output["live_action_deltas"][0, DREAMER_LIVE_ACTION_FIELDS.index("pressure_delta_bar")].item(),
+            0.0,
+        )
 
     def test_actor_forward_allows_low_temperature_targets_down_to_twenty_c(self) -> None:
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            dynamic_action_dim=7,
             taste_objective_dim=9,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         with torch.no_grad():
-            actor.dynamic_head.weight.zero_()
-            actor.dynamic_head.bias.fill_(-100.0)
+            for head in actor.live_heads:
+                head.weight.zero_()
+                head.bias.fill_(-100.0)
+                head.bias[0] = 100.0
 
         features = torch.ones((1, 6), dtype=torch.float32)
         control_mask = torch.ones((1, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=torch.float32)
+        target_state = torch.tensor([[1.0, 1.0, 0.2, 1.0, 22.0, 12.0, 0.0]], dtype=torch.float32)
 
-        output = actor(features, _auto_taste(1), torch.ones((1, 9)), control_mask)
+        output = actor(features, _auto_taste(1), torch.ones((1, 9)), control_mask, target_state)
         actions = output["dynamic_actions"][0]
 
         self.assertEqual(actions[DREAMER_DYNAMIC_ACTION_FEATURES.index("temperature_target_c")].item(), 20.0)
@@ -133,7 +145,6 @@ class DreamerImaginationTests(unittest.TestCase):
     def test_masked_behavior_loss_only_trains_observed_supported_heads(self) -> None:
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            dynamic_action_dim=7,
             taste_objective_dim=9,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
@@ -171,7 +182,6 @@ class DreamerImaginationTests(unittest.TestCase):
     def test_taste_objective_conditions_pre_shot_policy_without_changing_context(self) -> None:
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            dynamic_action_dim=7,
             taste_objective_dim=9,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
@@ -189,7 +199,6 @@ class DreamerImaginationTests(unittest.TestCase):
         config = DreamerV3ImaginationConfig(horizon=3, actor_hidden_dim=8, critic_hidden_dim=8)
         actor = DreamerV3ImaginationActor(
             feature_dim=model.feature_dim,
-            dynamic_action_dim=7,
             taste_objective_dim=9,
             config=config,
         )

@@ -18,6 +18,10 @@ from espresso_rl.domain.model_checkpoint import (
     VerifiedDreamerCheckpoint,
 )
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
+from espresso_rl.domain.dreamer_live_action import (
+    DEFAULT_DREAMER_LIVE_ACTION_SPEC_SHA256,
+    DreamerLiveActionSpec,
+)
 from espresso_rl.domain.dreamer_pre_shot import (
     DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC_SHA256,
     DreamerPreShotActionSpec,
@@ -82,6 +86,7 @@ _ARTIFACT_FIELDS = frozenset(
         "feature_layout_sha256",
         "control_spec_sha256",
         "pre_shot_action_spec_sha256",
+        "live_action_spec_sha256",
         "taste_objective_spec_sha256",
         "architecture",
         "architecture_sha256",
@@ -102,6 +107,7 @@ _METADATA_FIELDS = frozenset(
         "feature_layout_sha256",
         "control_spec_sha256",
         "pre_shot_action_spec_sha256",
+        "live_action_spec_sha256",
         "taste_objective_spec_sha256",
         "tensor_manifest_sha256",
         "architecture_sha256",
@@ -220,6 +226,10 @@ def load_verified_dreamer_checkpoint(
         "pre_shot_action_spec_sha256"
     ):
         raise CheckpointLoadError("checkpoint runtime pre-shot action spec does not match its SHA-256")
+    if architecture is not None and _sha256_json(architecture.live_action_spec.to_dict()) != artifact.get(
+        "live_action_spec_sha256"
+    ):
+        raise CheckpointLoadError("checkpoint runtime live-action spec does not match its SHA-256")
     if architecture is not None and _sha256_json(architecture.taste_objective_spec.to_dict()) != artifact.get(
         "taste_objective_spec_sha256"
     ):
@@ -239,6 +249,7 @@ def load_verified_dreamer_checkpoint(
     resolved_compatibility = compatibility or DreamerCheckpointCompatibility()
     if (
         resolved_compatibility.pre_shot_action_spec_sha256 is None
+        or resolved_compatibility.live_action_spec_sha256 is None
         or resolved_compatibility.taste_objective_spec_sha256 is None
     ):
         resolved_compatibility = DreamerCheckpointCompatibility(
@@ -247,6 +258,10 @@ def load_verified_dreamer_checkpoint(
             pre_shot_action_spec_sha256=(
                 resolved_compatibility.pre_shot_action_spec_sha256
                 or DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC_SHA256
+            ),
+            live_action_spec_sha256=(
+                resolved_compatibility.live_action_spec_sha256
+                or DEFAULT_DREAMER_LIVE_ACTION_SPEC_SHA256
             ),
             taste_objective_spec_sha256=(
                 resolved_compatibility.taste_objective_spec_sha256
@@ -285,6 +300,10 @@ def load_verified_dreamer_checkpoint(
         pre_shot_action_spec_sha256=_require_sha256(
             artifact.get("pre_shot_action_spec_sha256"),
             "checkpoint pre-shot action spec SHA-256",
+        ),
+        live_action_spec_sha256=_require_sha256(
+            artifact.get("live_action_spec_sha256"),
+            "checkpoint live-action spec SHA-256",
         ),
         taste_objective_spec_sha256=_require_sha256(
             artifact.get("taste_objective_spec_sha256"),
@@ -388,6 +407,7 @@ def _validate_metadata(
         "feature_layout_sha256": artifact["feature_layout_sha256"],
         "control_spec_sha256": artifact["control_spec_sha256"],
         "pre_shot_action_spec_sha256": artifact["pre_shot_action_spec_sha256"],
+        "live_action_spec_sha256": artifact["live_action_spec_sha256"],
         "taste_objective_spec_sha256": artifact["taste_objective_spec_sha256"],
         "tensor_manifest_sha256": tensor_manifest_sha256,
         "architecture_sha256": artifact["architecture_sha256"],
@@ -528,6 +548,11 @@ def _validate_compatibility(artifact: dict[str, Any], compatibility: DreamerChec
             "pre-shot action spec",
         ),
         (
+            "live_action_spec_sha256",
+            compatibility.live_action_spec_sha256,
+            "live-action spec",
+        ),
+        (
             "taste_objective_spec_sha256",
             compatibility.taste_objective_spec_sha256,
             "taste-objective spec",
@@ -549,10 +574,11 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
                 "observation_dim",
                 "behavior_dim",
                 "static_dim",
-                "dynamic_action_dim",
+                "live_action_dim",
                 "taste_objective_dim",
                 "control_spec",
                 "pre_shot_action_spec",
+                "live_action_spec",
                 "taste_objective_spec",
                 "world_model",
                 "context_encoder",
@@ -627,10 +653,11 @@ def _parse_architecture(value: dict[str, Any]) -> DreamerCheckpointArchitecture:
             observation_dim=value["observation_dim"],
             behavior_dim=value["behavior_dim"],
             static_dim=value["static_dim"],
-            dynamic_action_dim=value["dynamic_action_dim"],
+            live_action_dim=value["live_action_dim"],
             taste_objective_dim=value["taste_objective_dim"],
             control_spec=DreamerControlSpec.from_dict(value.get("control_spec")),
             pre_shot_action_spec=DreamerPreShotActionSpec.from_dict(value.get("pre_shot_action_spec")),
+            live_action_spec=DreamerLiveActionSpec.from_dict(value.get("live_action_spec")),
             taste_objective_spec=DreamerTasteObjectiveSpec.from_dict(value.get("taste_objective_spec")),
             world_model=DreamerWorldModelArchitecture(**world_model),
             context_encoder=DreamerContextEncoderArchitecture(**context_encoder),
