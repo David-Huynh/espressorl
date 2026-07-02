@@ -576,6 +576,7 @@ def verify_model_manifest_file(
     validation = validate_model_manifest(
         manifest,
         expected_model_sha256=expected_digest,
+        require_inference_ready=False,
     )
     return _manifest_status_from_validation(
         path=path_text,

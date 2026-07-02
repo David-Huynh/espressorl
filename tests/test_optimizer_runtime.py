@@ -499,11 +499,32 @@ def write_manifest(
         "runtime_compatibility": {
             "optimizer_mode": "dreamer_v3_shadow",
             "espresso_rl_runtime_schema_version": 1,
-            "inference_ready": True,
+            "inference_ready": False,
         },
     }
     if overrides:
         manifest.update(overrides)
+    if manifest["runtime_compatibility"]["inference_ready"]:
+        release_authorization = {
+            "format": "espresso_rl_dreamer_release_authorization_v1",
+            "schema_version": 1,
+            "candidate_artifact_sha256": "e" * 64,
+            "candidate_manifest_sha256": "f" * 64,
+            "released_by": "runtime-test",
+            "release_version": "v1.0.0-test",
+            "released_at": 1_800_000_100,
+            "approval": "approved_for_runtime_inference",
+        }
+        manifest["release_authorization"] = release_authorization
+        manifest["model_artifact"]["release_authorization_sha256"] = hashlib.sha256(
+            json.dumps(
+                release_authorization,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
     path = root / "dreamer_v3_manifest.json"
     path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     return path

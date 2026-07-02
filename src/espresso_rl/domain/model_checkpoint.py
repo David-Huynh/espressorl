@@ -10,6 +10,7 @@ from espresso_rl.domain.dreamer_taste import (
     DREAMER_TASTE_OBJECTIVE_ATTRIBUTES,
     DreamerTasteObjectiveSpec,
 )
+from espresso_rl.domain.model_release import DreamerReleaseAuthorization
 
 DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT = "espresso_rl_dreamer_v3_checkpoint_architecture_v3"
 DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION = 3
@@ -255,12 +256,15 @@ class VerifiedDreamerCheckpoint:
     architecture: DreamerCheckpointArchitecture | None
     artifact_stage: str
     inference_ready: bool
+    release_authorization: DreamerReleaseAuthorization | None
     tensors: tuple[DreamerCheckpointTensor, ...]
     payload: bytes
 
     def __post_init__(self) -> None:
         if not isinstance(self.inference_ready, bool):
             raise ValueError("checkpoint inference_ready must be boolean")
+        if self.inference_ready != (self.release_authorization is not None):
+            raise ValueError("checkpoint release authorization must match inference readiness")
 
     @property
     def component_names(self) -> tuple[str, ...]:

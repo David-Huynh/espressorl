@@ -72,6 +72,7 @@ _MANIFEST_FIELDS = frozenset(
         "runtime_compatibility",
     }
 )
+_RELEASE_MANIFEST_FIELDS = frozenset({"release_authorization"})
 _ARTIFACT_FIELDS = frozenset(
     {
         "format",
@@ -96,6 +97,7 @@ _ARTIFACT_FIELDS = frozenset(
         "heldout_inference_sha256",
     }
 )
+_RELEASE_ARTIFACT_FIELDS = frozenset({"release_authorization_sha256"})
 _METADATA_FIELDS = frozenset(
     {
         "format",
@@ -121,6 +123,13 @@ _METADATA_FIELDS = frozenset(
         "world_model_release_candidate_sha256",
         "row_count",
         "created_at",
+    }
+)
+_RELEASE_METADATA_FIELDS = frozenset(
+    {
+        "release_authorization_sha256",
+        "release_candidate_artifact_sha256",
+        "release_candidate_manifest_sha256",
     }
 )
 
@@ -160,7 +169,13 @@ def load_verified_dreamer_checkpoint(
         raise CheckpointLoadError("checkpoint artifact SHA-256 does not match the configured digest")
 
     manifest = _parse_json_object(manifest_payload, "checkpoint manifest")
-    _require_exact_fields(manifest, _MANIFEST_FIELDS, "checkpoint manifest")
+    runtime_declaration = manifest.get("runtime_compatibility")
+    release_declared = isinstance(runtime_declaration, dict) and runtime_declaration.get("inference_ready") is True
+    _require_exact_fields(
+        manifest,
+        _MANIFEST_FIELDS | (_RELEASE_MANIFEST_FIELDS if release_declared else frozenset()),
+        "checkpoint manifest",
+    )
     validation = validate_model_manifest(
         manifest,
         expected_model_sha256=expected_digest,
@@ -171,7 +186,11 @@ def load_verified_dreamer_checkpoint(
         raise CheckpointLoadError(validation.unavailable_reason or "checkpoint manifest is invalid")
 
     artifact = _require_object(manifest.get("model_artifact"), "checkpoint manifest model_artifact")
-    _require_exact_fields(artifact, _ARTIFACT_FIELDS, "checkpoint manifest model_artifact")
+    _require_exact_fields(
+        artifact,
+        _ARTIFACT_FIELDS | (_RELEASE_ARTIFACT_FIELDS if validation.inference_ready else frozenset()),
+        "checkpoint manifest model_artifact",
+    )
     dataset = _require_object(manifest.get("dataset"), "checkpoint manifest dataset")
     _require_exact_fields(dataset, frozenset({"format", "sha256", "manifest_sha256"}), "checkpoint manifest dataset")
     trainer = _require_object(manifest.get("trainer"), "checkpoint manifest trainer")
@@ -205,6 +224,8 @@ def load_verified_dreamer_checkpoint(
     metadata = _require_object(header.get("__metadata__"), "checkpoint safetensors metadata")
     _validate_metadata(metadata, manifest=manifest, tensor_manifest_sha256=expected_tensor_manifest_sha256)
     artifact_stage = str(metadata["artifact_stage"])
+    if validation.inference_ready and artifact_stage != TRAINER_ARTIFACT_STAGE_WORLD_MODEL_RELEASE_CANDIDATE:
+        raise CheckpointLoadError("checkpoint release authorization requires a release-candidate training stage")
     tensors = _validate_tensors(
         header,
         tensor_manifest=tensor_manifest,
@@ -322,6 +343,7 @@ def load_verified_dreamer_checkpoint(
         architecture=architecture,
         artifact_stage=artifact_stage,
         inference_ready=bool(validation.inference_ready),
+        release_authorization=validation.release_authorization,
         tensors=tensors,
         payload=artifact_payload,
     )
@@ -392,7 +414,12 @@ def _validate_metadata(
     manifest: dict[str, Any],
     tensor_manifest_sha256: str,
 ) -> None:
-    _require_exact_fields(metadata, _METADATA_FIELDS, "checkpoint safetensors metadata")
+    inference_ready = manifest["runtime_compatibility"]["inference_ready"] is True
+    _require_exact_fields(
+        metadata,
+        _METADATA_FIELDS | (_RELEASE_METADATA_FIELDS if inference_ready else frozenset()),
+        "checkpoint safetensors metadata",
+    )
     if any(not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items()):
         raise CheckpointLoadError("checkpoint safetensors metadata keys and values must be strings")
 
@@ -419,6 +446,15 @@ def _validate_metadata(
         "evaluation_report_sha256": artifact["evaluation_report_sha256"],
         "artifact_stage": trainer["artifact_stage"],
     }
+    if inference_ready:
+        release_authorization = manifest["release_authorization"]
+        expected.update(
+            {
+                "release_authorization_sha256": artifact["release_authorization_sha256"],
+                "release_candidate_artifact_sha256": release_authorization["candidate_artifact_sha256"],
+                "release_candidate_manifest_sha256": release_authorization["candidate_manifest_sha256"],
+            }
+        )
     for key, expected_value in expected.items():
         if metadata.get(key) != expected_value:
             raise CheckpointLoadError(f"checkpoint safetensors metadata {key} does not match manifest")

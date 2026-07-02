@@ -589,6 +589,31 @@ uv run espresso-rl-build-dreamer-artifacts \
   --trainer-git-sha TRAINER_REPO_COMMIT
 ```
 
+After reviewing the candidate audit and evaluation outputs, create the separate
+runtime release bundle with both exact candidate hashes:
+
+```bash
+uv run espresso-rl-release-dreamer-model \
+  --candidate-artifact model_out/dreamer_v3.safetensors \
+  --candidate-manifest model_out/dreamer_v3_manifest.json \
+  --candidate-artifact-sha256 CANDIDATE_ARTIFACT_SHA256 \
+  --candidate-manifest-sha256 CANDIDATE_MANIFEST_SHA256 \
+  --released-by RELEASE_IDENTITY \
+  --release-version RELEASE_TAG \
+  --output-dir release_out
+```
+
+The release command accepts only `world_model_release_candidate`, revalidates
+the candidate through the strict checkpoint loader, materializes it to verify
+the deterministic inference probe, and preserves every tensor byte. It changes
+only authenticated release/readiness metadata and produces
+`dreamer_v3.safetensors`, `dreamer_v3_manifest.json`, `release_record.json`,
+and `checksums.txt`. It refuses preview, tampered, already released, or
+wrong-hash inputs and never overwrites the candidate inputs. Configure the
+released artifact SHA-256, not the candidate SHA-256, as
+`ESPRESSORL_RELEASE_MODEL_ARTIFACT_SHA256` or
+`optimizer_model_artifact_sha256`.
+
 It validates the dataset hash, revalidates every JSONL transition, rejects
 absolute grinder fields, builds `espresso_rl_dreamer_episode_v4` episodes,
 constructs deterministic Dreamer tensors under the configured control,
@@ -653,8 +678,10 @@ runtime inference. Preview and release-candidate stages serialize deterministic
 RSSM, trained actor-head, and trained critic-head tensors with explicit tensor
 names, shapes, component metadata, feature-layout hash, control-spec hash,
 pre-shot action spec hash, live-action spec hash, taste-objective spec hash,
-tensor-manifest hash, and evaluation-report hash; runtime compatibility should
-only be set by a separate explicit release step after inference is safe. The
+tensor-manifest hash, and evaluation-report hash. Runtime compatibility is set
+only by the explicit release command after the candidate has been reviewed.
+The release authorization is bound into both the manifest and safetensors
+metadata, including the exact candidate artifact and manifest identities. The
 command has a configurable `--max-dataset-bytes` resource
 guard, defaulting to 8 GiB, because this skeleton validates JSONL in-process.
 That guard is not a training policy; real large-scale Dreamer training should

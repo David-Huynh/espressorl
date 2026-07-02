@@ -14,6 +14,7 @@ from espresso_rl.domain.dreamer_live_action import DEFAULT_DREAMER_LIVE_ACTION_S
 from espresso_rl.domain.dreamer_pre_shot import DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC
 from espresso_rl.domain.dreamer_taste import DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC
 from espresso_rl.domain.model_manifest import CHECKPOINT_ARTIFACT_FORMAT, CHECKPOINT_ARTIFACT_SCHEMA_VERSION
+from espresso_rl.domain.model_release import DreamerReleaseAuthorization
 from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
     OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
@@ -77,7 +78,20 @@ class CheckpointLoadingTests(unittest.TestCase):
         checkpoint = load_bundle(bundle)
 
         self.assertTrue(checkpoint.inference_ready)
+        self.assertIsInstance(checkpoint.release_authorization, DreamerReleaseAuthorization)
         self.assertEqual(checkpoint.component_names, ("actor", "context_encoder", "critic", "world_model"))
+
+    def test_rejects_inference_ready_checkpoint_without_release_authorization(self) -> None:
+        bundle = checkpoint_bundle()
+        bundle["manifest"]["runtime_compatibility"] = {
+            "optimizer_mode": OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+            "espresso_rl_runtime_schema_version": 1,
+            "inference_ready": True,
+        }
+        refresh_manifest(bundle)
+
+        with self.assertRaisesRegex(CheckpointLoadError, "fields are invalid"):
+            load_bundle(bundle)
 
     def test_rejects_configured_artifact_hash_mismatch(self) -> None:
         bundle = checkpoint_bundle()
@@ -387,11 +401,12 @@ def checkpoint_bundle(
         },
     }
     architecture_sha256 = sha256_json(architecture)
+    artifact_stage = "world_model_release_candidate" if inference_ready else "world_model_train_preview"
     metadata = {
         "format": CHECKPOINT_ARTIFACT_FORMAT,
         "schema_version": str(CHECKPOINT_ARTIFACT_SCHEMA_VERSION),
         "model_family": "dreamer_v3",
-        "artifact_stage": "world_model_train_preview",
+        "artifact_stage": artifact_stage,
         "inference_ready": "true" if inference_ready else "false",
         "dataset_sha256": "1" * 64,
         "training_config_sha256": "3" * 64,
@@ -408,10 +423,30 @@ def checkpoint_bundle(
         "evaluation_report_sha256": "7" * 64,
         "world_model_smoke_sha256": "",
         "world_model_train_preview_sha256": "8" * 64,
-        "world_model_release_candidate_sha256": "",
+        "world_model_release_candidate_sha256": "6" * 64 if inference_ready else "",
         "row_count": "4",
         "created_at": "1800000000",
     }
+    release_authorization = None
+    if inference_ready:
+        release_authorization = {
+            "format": "espresso_rl_dreamer_release_authorization_v1",
+            "schema_version": 1,
+            "candidate_artifact_sha256": "b" * 64,
+            "candidate_manifest_sha256": "c" * 64,
+            "released_by": "release-test",
+            "release_version": "v1.0.0-test",
+            "released_at": 1_800_000_100,
+            "approval": "approved_for_runtime_inference",
+        }
+        release_authorization_sha256 = sha256_json(release_authorization)
+        metadata.update(
+            {
+                "release_authorization_sha256": release_authorization_sha256,
+                "release_candidate_artifact_sha256": release_authorization["candidate_artifact_sha256"],
+                "release_candidate_manifest_sha256": release_authorization["candidate_manifest_sha256"],
+            }
+        )
     artifact = encode_safetensors({"__metadata__": metadata, **header_entries}, b"".join(chunks))
     artifact_sha256 = sha256(artifact)
     manifest = {
@@ -439,6 +474,11 @@ def checkpoint_bundle(
             "pre_shot_action_spec_sha256": pre_shot_action_spec_sha256,
             "live_action_spec_sha256": live_action_spec_sha256,
             "taste_objective_spec_sha256": taste_objective_spec_sha256,
+            **(
+                {"release_authorization_sha256": release_authorization_sha256}
+                if release_authorization is not None
+                else {}
+            ),
         },
         "dataset": {
             "format": "espresso_rl_training_dataset_v1",
@@ -448,7 +488,7 @@ def checkpoint_bundle(
         "trainer": {
             "git_sha": "trainerabc",
             "training_config_sha256": "3" * 64,
-            "artifact_stage": "world_model_train_preview",
+            "artifact_stage": artifact_stage,
         },
         "schemas": {
             "state_schema_version": 1,
@@ -460,6 +500,7 @@ def checkpoint_bundle(
             "espresso_rl_runtime_schema_version": 1,
             "inference_ready": inference_ready,
         },
+        **({"release_authorization": release_authorization} if release_authorization is not None else {}),
     }
     bundle = {
         "artifact": artifact,

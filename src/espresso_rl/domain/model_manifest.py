@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Any
 
 from espresso_rl.domain.dreamer_actions import DREAMER_ACTION_SCHEMA_VERSION
@@ -8,6 +10,7 @@ from espresso_rl.domain.optimization import (
     OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
 )
+from espresso_rl.domain.model_release import DreamerReleaseAuthorization
 from espresso_rl.domain.training import TRAINING_DATASET_FORMAT
 
 MODEL_MANIFEST_FORMAT = "espresso_rl_model_manifest_v1"
@@ -60,6 +63,8 @@ class ModelManifestValidation:
     architecture_sha256: str | None = None
     inference_probe_sha256: str | None = None
     heldout_inference_sha256: str | None = None
+    release_authorization_sha256: str | None = None
+    release_authorization: DreamerReleaseAuthorization | None = None
 
 
 def validate_model_manifest(
@@ -149,6 +154,27 @@ def validate_model_manifest(
     if require_inference_ready and inference_ready is False:
         return _invalid("DreamerV3 model manifest marks artifact as not inference-ready.")
 
+    release_authorization: DreamerReleaseAuthorization | None = None
+    release_authorization_sha256: str | None = None
+    release_payload = manifest.get("release_authorization")
+    release_hash_value = artifact.get("release_authorization_sha256")
+    if inference_ready:
+        if runtime.get("optimizer_mode") != OPTIMIZER_MODE_DREAMER_V3_ACTIVE:
+            return _invalid("DreamerV3 inference-ready model manifest must select active optimizer mode.")
+        try:
+            release_authorization = DreamerReleaseAuthorization.from_dict(release_payload)
+        except ValueError as exc:
+            return _invalid(str(exc))
+        release_authorization_sha256 = _sha256(release_hash_value)
+        if release_authorization_sha256 is None:
+            return _invalid("DreamerV3 model release authorization SHA-256 is invalid.")
+        if release_authorization_sha256 != _sha256_json(release_authorization.to_dict()):
+            return _invalid("DreamerV3 model release authorization SHA-256 does not match its content.")
+        if release_authorization.candidate_artifact_sha256 == model_artifact_sha256:
+            return _invalid("DreamerV3 released artifact must differ from its release candidate.")
+    elif "release_authorization" in manifest or "release_authorization_sha256" in artifact:
+        return _invalid("DreamerV3 non-runtime manifest must not contain release authorization.")
+
     checkpoint_format = artifact.get("checkpoint_format")
     checkpoint_schema_version = _int_value(artifact.get("checkpoint_schema_version"))
     tensor_manifest_sha256 = _sha256(artifact.get("tensor_manifest_sha256"))
@@ -190,6 +216,8 @@ def validate_model_manifest(
         architecture_sha256=architecture_sha256,
         inference_probe_sha256=inference_probe_sha256,
         heldout_inference_sha256=heldout_inference_sha256,
+        release_authorization_sha256=release_authorization_sha256,
+        release_authorization=release_authorization,
     )
 
 
@@ -293,3 +321,14 @@ def _nonnegative_int(value: object) -> int | None:
     if parsed is None or parsed < 0:
         return None
     return parsed
+
+
+def _sha256_json(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
