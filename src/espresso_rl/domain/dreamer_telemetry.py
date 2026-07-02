@@ -5,22 +5,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from espresso_rl.domain.dreamer_episodes import validate_dreamer_episode
+from espresso_rl.domain.dreamer_resolved_control import (
+    DREAMER_PUMP_TARGET_MODE_FLOW,
+    DREAMER_PUMP_TARGET_MODE_PRESSURE,
+    DREAMER_PUMP_TARGET_MODE_SIMPLE,
+    DREAMER_PUMP_TARGET_MODES,
+)
 from espresso_rl.domain.dreamer_taste import normalize_dreamer_taste_objective
 from espresso_rl.domain.models import FIXED_CADENCE_SAMPLE_INTERVAL_MS
 
 DREAMER_LIVE_TELEMETRY_SCHEMA_VERSION = 2
 DREAMER_LIVE_CONTEXT_WINDOW_SIZE = 16
 DREAMER_AUTO_PROFILE_ID = "dreamer_auto"
-DREAMER_PUMP_TARGET_MODE_SIMPLE = 0
-DREAMER_PUMP_TARGET_MODE_PRESSURE = 1
-DREAMER_PUMP_TARGET_MODE_FLOW = 2
-DREAMER_PUMP_TARGET_MODES = frozenset(
-    {
-        DREAMER_PUMP_TARGET_MODE_SIMPLE,
-        DREAMER_PUMP_TARGET_MODE_PRESSURE,
-        DREAMER_PUMP_TARGET_MODE_FLOW,
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -120,16 +116,6 @@ class DreamerLiveTelemetry:
             self.weight_g,
             self.temperature_c,
         )
-
-    def observed_profile_targets(self) -> tuple[float, ...]:
-        return (
-            self.pressure_target_bar,
-            self.pump_flow_target_ml_s,
-            self.temperature_target_c,
-            float(self.pump_target_mode),
-            1.0 if self.valve_open else 0.0,
-        )
-
 
 @dataclass(frozen=True)
 class DreamerLiveEpisodeContext:

@@ -276,13 +276,12 @@ def dreamer_inference_probe_sha256(
             taste_objective,
             batch["pre_shot_capability_mask"],
             control_mask,
-            batch["dynamic_actions"][:, -1],
+            batch["resolved_controls"][:, -1],
+            batch["resolved_control_mask"][:, -1],
         )
         behavior = behavior_tensor_from_parts(
-            observed_profile_targets=batch["observed_profile_targets"][:, -1],
-            observed_profile_target_mask=batch["observed_profile_target_mask"][:, -1],
-            dynamic_actions=actor_output["dynamic_actions"],
-            dynamic_action_mask=actor_output["dynamic_action_mask"],
+            resolved_controls=actor_output["resolved_controls"],
+            resolved_control_mask=actor_output["resolved_control_mask"],
             control_action_mask=control_mask,
             constraints=batch["constraints"][:, -1],
             decision_step_mask=batch["decision_step_mask"][:, -1],
@@ -297,7 +296,7 @@ def dreamer_inference_probe_sha256(
             sample=False,
         )
         outputs = {
-            "actor.dynamic_actions": actor_output["dynamic_actions"],
+            "actor.resolved_controls": actor_output["resolved_controls"],
             "actor.live_action_choices": actor_output["live_action_choices"],
             "actor.live_action_logits": actor_output["live_action_logits"],
             "actor.pre_shot_actions": actor_output["pre_shot_actions"],
@@ -348,7 +347,8 @@ def dreamer_batch_inference_sha256(
             features,
             taste_objective,
             batch["control_action_mask"],
-            batch["dynamic_actions"],
+            batch["resolved_controls"],
+            batch["resolved_control_mask"],
         )
         pre_shot_output = actor.select_pre_shot(
             features[:, -1],
@@ -356,7 +356,7 @@ def dreamer_batch_inference_sha256(
             batch["pre_shot_capability_mask"],
         )
         outputs = {
-            "actor.dynamic_actions": dynamic_output["dynamic_actions"],
+            "actor.resolved_controls": dynamic_output["resolved_controls"],
             "actor.live_action_choices": dynamic_output["live_action_choices"],
             "actor.live_action_logits": dynamic_output["live_action_logits"],
             "actor.pre_shot_actions": pre_shot_output["pre_shot_actions"],
@@ -419,18 +419,26 @@ def _probe_batch(architecture: DreamerCheckpointArchitecture) -> dict[str, torch
     observation_dim = architecture.observation_dim
     dynamic_dim = architecture.live_action_dim
     pre_shot_dim = len(architecture.pre_shot_action_spec.bins)
-    expected_behavior_dim = observation_dim * 2 + dynamic_dim * 4 + 1 + pre_shot_dim * 3
+    expected_behavior_dim = dynamic_dim * 4 + 1 + pre_shot_dim * 3
     if expected_behavior_dim != architecture.behavior_dim:
         raise DreamerCheckpointMaterializationError(
             "checkpoint behavior dimension is incompatible with the probe feature layout"
         )
 
     observations = _sequence_tensor(batch_size, step_count, observation_dim, scale=0.03125)
-    observed_targets = _sequence_tensor(batch_size, step_count, observation_dim, scale=0.015625)
-    dynamic_actions = _sequence_tensor(batch_size, step_count, dynamic_dim, scale=0.0078125)
+    resolved_controls = torch.tensor(
+        [
+            [1.0, 8.0, 0.0, 1.0, 93.0, 36.0, 0.0],
+            [1.0, 8.5, 0.0, 1.0, 93.0, 36.0, 0.0],
+            [2.0, 0.0, 2.5, 1.0, 92.5, 38.0, 0.0],
+        ],
+        dtype=torch.float32,
+    ).unsqueeze(0).expand(batch_size, -1, -1).clone()
+    resolved_control_mask = torch.ones_like(resolved_controls)
+    resolved_control_mask[:, :2, 2] = 0.0
+    resolved_control_mask[:, 2, 1] = 0.0
     control_mask = torch.ones((batch_size, step_count, dynamic_dim), dtype=torch.float32)
     control_mask[:, 1, 1::2] = 0.0
-    dynamic_action_mask = control_mask.clone()
     constraints = torch.ones((batch_size, step_count, dynamic_dim), dtype=torch.float32)
     pre_shot_actions = _sequence_tensor(batch_size, 1, pre_shot_dim, scale=0.00390625)[:, 0]
     pre_shot_capability_mask = torch.ones_like(pre_shot_actions)
@@ -438,10 +446,8 @@ def _probe_batch(architecture: DreamerCheckpointArchitecture) -> dict[str, torch
     taste_objective[:, 0] = 1.0
     return {
         "observations": observations,
-        "observed_profile_targets": observed_targets,
-        "observed_profile_target_mask": torch.ones_like(observed_targets),
-        "dynamic_actions": dynamic_actions * dynamic_action_mask,
-        "dynamic_action_mask": dynamic_action_mask,
+        "resolved_controls": resolved_controls * resolved_control_mask,
+        "resolved_control_mask": resolved_control_mask,
         "control_action_mask": control_mask,
         "constraints": constraints,
         "pre_shot_actions": pre_shot_actions,

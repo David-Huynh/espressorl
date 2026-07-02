@@ -27,7 +27,7 @@ from espresso_rl.dreamer.context_encoder import DreamerContextEncoder, DreamerCo
 from espresso_rl.dreamer.dataset import (
     DREAMER_CONTEXT_TIME_FEATURES,
     DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
-    DREAMER_DYNAMIC_ACTION_FEATURES,
+    DREAMER_RESOLVED_CONTROL_FEATURES,
     DREAMER_STATIC_CONTEXT_FEATURES,
     DREAMER_TERMINAL_FEATURES,
 )
@@ -132,7 +132,7 @@ def _inference() -> tuple[CheckpointDreamerLiveInference, DreamerV3ImaginationAc
     world_config = default_world_model_config("espresso_debug")
     world_model = DreamerV3VectorWorldModel(
         observation_dim=5,
-        behavior_dim=66,
+        behavior_dim=56,
         static_dim=len(DREAMER_STATIC_CONTEXT_FEATURES),
         config=world_config,
     )
@@ -169,9 +169,9 @@ def _inference() -> tuple[CheckpointDreamerLiveInference, DreamerV3ImaginationAc
         actor=actor,
         critic=critic,
         observation_dim=5,
-        behavior_dim=66,
+        behavior_dim=56,
         static_dim=len(DREAMER_STATIC_CONTEXT_FEATURES),
-        live_action_dim=len(DREAMER_DYNAMIC_ACTION_FEATURES),
+        live_action_dim=len(DREAMER_RESOLVED_CONTROL_FEATURES),
         control_spec=control_spec,
         live_action_spec=live_action_spec,
     )

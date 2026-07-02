@@ -68,10 +68,8 @@ _MAX_DATASET_MANIFEST_BYTES = 256 * 1024
 _MAX_TRAINING_CONFIG_BYTES = 128 * 1024
 _DREAMER_TENSOR_KEYS = (
     "observations",
-    "observed_profile_targets",
-    "observed_profile_target_mask",
-    "dynamic_actions",
-    "dynamic_action_mask",
+    "resolved_controls",
+    "resolved_control_mask",
     "pre_shot_actions",
     "pre_shot_action_indexes",
     "pre_shot_action_mask",

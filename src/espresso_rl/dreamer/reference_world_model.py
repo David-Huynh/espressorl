@@ -444,10 +444,8 @@ def _mlp(input_dim: int, hidden_dim: int, output_dim: int) -> nn.Sequential:
 def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
     step_count = batch["observations"].shape[1]
     return behavior_tensor_from_parts(
-        observed_profile_targets=batch["observed_profile_targets"],
-        observed_profile_target_mask=batch["observed_profile_target_mask"],
-        dynamic_actions=batch["dynamic_actions"],
-        dynamic_action_mask=batch["dynamic_action_mask"],
+        resolved_controls=batch["resolved_controls"],
+        resolved_control_mask=batch["resolved_control_mask"],
         control_action_mask=batch["control_action_mask"],
         constraints=batch["constraints"],
         decision_step_mask=batch["decision_step_mask"],
@@ -459,10 +457,8 @@ def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
 
 def behavior_tensor_from_parts(
     *,
-    observed_profile_targets: torch.Tensor,
-    observed_profile_target_mask: torch.Tensor,
-    dynamic_actions: torch.Tensor,
-    dynamic_action_mask: torch.Tensor,
+    resolved_controls: torch.Tensor,
+    resolved_control_mask: torch.Tensor,
     control_action_mask: torch.Tensor,
     constraints: torch.Tensor,
     decision_step_mask: torch.Tensor,
@@ -472,10 +468,8 @@ def behavior_tensor_from_parts(
 ) -> torch.Tensor:
     return torch.cat(
         [
-            observed_profile_targets,
-            observed_profile_target_mask,
-            dynamic_actions,
-            dynamic_action_mask,
+            resolved_controls,
+            resolved_control_mask,
             control_action_mask,
             constraints,
             decision_step_mask.unsqueeze(-1),

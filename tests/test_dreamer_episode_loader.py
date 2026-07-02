@@ -12,9 +12,8 @@ from espresso_rl.domain.dreamer_pre_shot import (
 from espresso_rl.dreamer.dataset import (
     DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
     DREAMER_CONTEXT_WINDOW_SIZE,
-    DREAMER_DYNAMIC_ACTION_FEATURES,
+    DREAMER_RESOLVED_CONTROL_FEATURES,
     DREAMER_OBSERVATION_FEATURES,
-    DREAMER_OBSERVED_TARGET_FEATURES,
     DREAMER_STATIC_CONTEXT_FEATURES,
     DREAMER_TERMINAL_FEATURES,
     DreamerEpisodeDatasetError,
@@ -323,9 +322,9 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(tuple(batch["source_training_row_ids"].tolist()), (1, 2))
         self.assertEqual(batch["episode_ids"], ("training_row_1", "training_row_2"))
         self.assertEqual(tuple(batch["observations"].shape), (2, 4, len(DREAMER_OBSERVATION_FEATURES)))
-        self.assertEqual(tuple(batch["observed_profile_targets"].shape), (2, 4, len(DREAMER_OBSERVED_TARGET_FEATURES)))
-        self.assertEqual(tuple(batch["observed_profile_target_mask"].shape), (2, 4, len(DREAMER_OBSERVED_TARGET_FEATURES)))
-        self.assertEqual(tuple(batch["control_action_mask"].shape), (2, 4, len(DREAMER_DYNAMIC_ACTION_FEATURES)))
+        self.assertEqual(tuple(batch["resolved_controls"].shape), (2, 4, len(DREAMER_RESOLVED_CONTROL_FEATURES)))
+        self.assertEqual(tuple(batch["resolved_control_mask"].shape), (2, 4, len(DREAMER_RESOLVED_CONTROL_FEATURES)))
+        self.assertEqual(tuple(batch["control_action_mask"].shape), (2, 4, len(DREAMER_RESOLVED_CONTROL_FEATURES)))
         self.assertEqual(tuple(batch["decision_step_mask"].shape), (2, 4))
         self.assertEqual(tuple(batch["static_context"].shape), (2, len(DREAMER_STATIC_CONTEXT_FEATURES)))
         self.assertEqual(tuple(batch["context_static"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE, len(DREAMER_STATIC_CONTEXT_FEATURES)))
@@ -338,8 +337,9 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(tuple(batch["context_mask"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE))
         self.assertEqual(tuple(batch["context_source_training_row_ids"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE))
         self.assertEqual(batch["feature_names"]["observations"], DREAMER_OBSERVATION_FEATURES)
-        self.assertEqual(batch["feature_names"]["observed_profile_target_mask"], DREAMER_OBSERVED_TARGET_FEATURES)
-        self.assertEqual(batch["feature_names"]["control_action_mask"], DREAMER_DYNAMIC_ACTION_FEATURES)
+        self.assertEqual(batch["feature_names"]["resolved_controls"], DREAMER_RESOLVED_CONTROL_FEATURES)
+        self.assertEqual(batch["feature_names"]["resolved_control_mask"], DREAMER_RESOLVED_CONTROL_FEATURES)
+        self.assertEqual(batch["feature_names"]["control_action_mask"], DREAMER_RESOLVED_CONTROL_FEATURES)
         self.assertEqual(batch["feature_names"]["context_static"], DREAMER_STATIC_CONTEXT_FEATURES)
         self.assertEqual(batch["feature_names"]["context_terminal"], DREAMER_TERMINAL_FEATURES)
         self.assertEqual(
@@ -350,9 +350,9 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         pressure_index = DREAMER_OBSERVATION_FEATURES.index("pressure_bar")
         weight_index = DREAMER_OBSERVATION_FEATURES.index("weight_g")
         temp_index = DREAMER_OBSERVATION_FEATURES.index("temperature_c")
-        target_temp_index = DREAMER_OBSERVED_TARGET_FEATURES.index("temperature_target_c")
-        target_pressure_index = DREAMER_OBSERVED_TARGET_FEATURES.index("pressure_target_bar")
-        target_flow_index = DREAMER_OBSERVED_TARGET_FEATURES.index("flow_target_ml_s")
+        target_temp_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("temperature_target_c")
+        target_pressure_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("pressure_target_bar")
+        target_flow_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("flow_target_ml_s")
         grind_index = DREAMER_STATIC_CONTEXT_FEATURES.index("relative_grind_steps_from_reference")
         initial_yield_index = DREAMER_STATIC_CONTEXT_FEATURES.index("initial_target_yield_g")
         direction_index = DREAMER_STATIC_CONTEXT_FEATURES.index("step_direction_sign")
@@ -361,10 +361,10 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(batch["observations"][0, 0, pressure_index].item(), 1.0)
         self.assertAlmostEqual(batch["observations"][0, 2, weight_index].item(), 0.72, places=6)
         self.assertEqual(batch["observations"][0, 0, temp_index].item(), 93.0)
-        self.assertEqual(batch["observed_profile_targets"][0, 0, target_temp_index].item(), 92.5)
-        self.assertEqual(batch["observed_profile_targets"][0, 0, target_pressure_index].item(), 8.0)
-        self.assertAlmostEqual(batch["observed_profile_targets"][0, 0, target_flow_index].item(), 2.4, places=6)
-        self.assertEqual(batch["observed_profile_target_mask"][0, 0].tolist(), [1.0, 0.0, 1.0, 1.0, 1.0])
+        self.assertEqual(batch["resolved_controls"][0, 0, target_temp_index].item(), 92.5)
+        self.assertEqual(batch["resolved_controls"][0, 0, target_pressure_index].item(), 8.0)
+        self.assertEqual(batch["resolved_controls"][0, 0, target_flow_index].item(), 0.0)
+        self.assertEqual(batch["resolved_control_mask"][0, 0].tolist(), [1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0])
         self.assertEqual(batch["static_context"][0, grind_index].item(), -2.0)
         self.assertEqual(batch["static_context"][0, initial_yield_index].item(), 36.0)
         self.assertEqual(batch["static_context"][0, direction_index].item(), 1.0)
@@ -442,13 +442,13 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         batch = build_dreamer_episode_batch([episode])
 
         temp_index = DREAMER_OBSERVATION_FEATURES.index("temperature_c")
-        target_feature_index = DREAMER_OBSERVED_TARGET_FEATURES.index("temperature_target_c")
+        target_feature_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("temperature_target_c")
         pump_pressure_index = DREAMER_TERMINAL_FEATURES.index("final_pump_target_pressure")
         pump_flow_index = DREAMER_TERMINAL_FEATURES.index("final_pump_target_flow")
         final_flow_index = DREAMER_TERMINAL_FEATURES.index("final_target_flow")
         self.assertEqual(batch["observations"][0, 0, temp_index].item(), 93.0)
-        self.assertEqual(batch["observed_profile_targets"][0, 0, target_feature_index].item(), 92.5)
-        self.assertEqual(batch["observed_profile_target_mask"][0, 0, target_feature_index].item(), 1.0)
+        self.assertEqual(batch["resolved_controls"][0, 0, target_feature_index].item(), 92.5)
+        self.assertEqual(batch["resolved_control_mask"][0, 0, target_feature_index].item(), 1.0)
         self.assertEqual(batch["terminal"][0, pump_pressure_index].item(), 0.0)
         self.assertEqual(batch["terminal"][0, pump_flow_index].item(), 1.0)
         self.assertEqual(batch["terminal"][0, final_flow_index].item(), 2.5)
@@ -477,9 +477,9 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
 
         batch = build_dreamer_episode_batch(episodes)
 
-        self.assertEqual(batch["observed_profile_target_mask"][0, 0].tolist(), [1.0, 0.0, 1.0, 1.0, 1.0])
-        self.assertEqual(batch["observed_profile_target_mask"][1, 0].tolist(), [0.0, 1.0, 1.0, 1.0, 1.0])
-        self.assertEqual(batch["observed_profile_target_mask"][2, 0].tolist(), [0.0, 0.0, 0.0, 1.0, 1.0])
+        self.assertEqual(batch["resolved_control_mask"][0, 0].tolist(), [1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(batch["resolved_control_mask"][1, 0].tolist(), [1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(batch["resolved_control_mask"][2, 0].tolist(), [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0])
 
     def test_episode_batch_uses_explicit_pump_target_mode_masks(self) -> None:
         episode = build_dreamer_episodes_from_training_rows(
@@ -502,10 +502,10 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         batch = build_dreamer_episode_batch([episode])
 
         temp_index = DREAMER_OBSERVATION_FEATURES.index("temperature_c")
-        target_temp_index = DREAMER_OBSERVED_TARGET_FEATURES.index("temperature_target_c")
-        self.assertEqual(batch["observed_profile_target_mask"][0, 0].tolist(), [0.0, 1.0, 1.0, 1.0, 1.0])
+        target_temp_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("temperature_target_c")
+        self.assertEqual(batch["resolved_control_mask"][0, 0].tolist(), [1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0])
         self.assertEqual(batch["observations"][0, 0, temp_index].item(), 86.0)
-        self.assertEqual(batch["observed_profile_targets"][0, 0, target_temp_index].item(), 86.5)
+        self.assertEqual(batch["resolved_controls"][0, 0, target_temp_index].item(), 86.5)
 
     def test_episode_batch_pads_shorter_episodes_and_masks_padding(self) -> None:
         first, second = build_dreamer_episodes_from_training_rows(
@@ -524,7 +524,7 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(batch["rewards"][0, [0, 2, 3]].tolist(), [0.0, 0.0, 0.0])
         self.assertEqual(batch["continuations"][1].tolist(), [1.0, 1.0, 0.0, 0.0])
 
-    def test_episode_batch_encodes_dynamic_action_values_and_presence_masks(self) -> None:
+    def test_episode_batch_applies_issued_yield_and_stop_control_on_next_sample(self) -> None:
         episode = build_dreamer_episodes_from_training_rows([training_row(1)])[0]
         episode["steps"][0]["dynamic_action"] = {"yield_stop_target_g": 38.5, "stop": False}
 
@@ -533,20 +533,20 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
             control_spec=DreamerControlSpec(dynamic_control_enabled=True, stop_control_allowed=True),
         )
 
-        yield_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("yield_stop_target_g")
-        stop_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("stop")
-        pressure_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")
-        self.assertEqual(batch["dynamic_actions"][0, 0, yield_index].item(), 38.5)
-        self.assertEqual(batch["dynamic_action_mask"][0, 0, yield_index].item(), 1.0)
-        self.assertEqual(batch["dynamic_actions"][0, 0, stop_index].item(), 0.0)
-        self.assertEqual(batch["dynamic_action_mask"][0, 0, stop_index].item(), 1.0)
-        self.assertEqual(batch["dynamic_action_mask"][0, 0, pressure_index].item(), 0.0)
+        yield_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("yield_stop_target_g")
+        stop_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("stop")
+        pressure_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("pressure_target_bar")
+        self.assertEqual(batch["resolved_controls"][0, 0, yield_index].item(), 36.0)
+        self.assertEqual(batch["resolved_control_mask"][0, 0, yield_index].item(), 1.0)
+        self.assertEqual(batch["resolved_controls"][0, 0, stop_index].item(), 0.0)
+        self.assertEqual(batch["resolved_control_mask"][0, 0, stop_index].item(), 1.0)
+        self.assertEqual(batch["resolved_control_mask"][0, 0, pressure_index].item(), 1.0)
         self.assertEqual(batch["control_action_mask"][0, 0, yield_index].item(), 1.0)
         self.assertEqual(batch["control_action_mask"][0, 0, stop_index].item(), 1.0)
         self.assertEqual(batch["control_action_mask"][0, 0, pressure_index].item(), 0.0)
-        self.assertEqual(batch["dynamic_actions"][0, 1, yield_index].item(), 38.5)
-        self.assertEqual(batch["dynamic_action_mask"][0, 1, yield_index].item(), 1.0)
-        self.assertEqual(batch["dynamic_action_mask"][0, 3, stop_index].item(), 1.0)
+        self.assertEqual(batch["resolved_controls"][0, 1, yield_index].item(), 38.5)
+        self.assertEqual(batch["resolved_control_mask"][0, 1, yield_index].item(), 1.0)
+        self.assertEqual(batch["resolved_control_mask"][0, 3, stop_index].item(), 1.0)
 
     def test_episode_batch_rejects_dynamic_actions_between_decision_steps(self) -> None:
         episode = build_dreamer_episodes_from_training_rows([training_row(1)])[0]
@@ -573,16 +573,16 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
             ),
         )
 
-        pressure_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")
-        stop_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("stop")
-        flow_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("flow_target_ml_s")
+        pressure_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("pressure_target_bar")
+        stop_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("stop")
+        flow_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("flow_target_ml_s")
         self.assertEqual(batch["decision_step_mask"][0].tolist(), [1.0, 0.0, 1.0, 0.0, 1.0])
         self.assertEqual(batch["control_action_mask"][0, 0, pressure_index].item(), 1.0)
         self.assertEqual(batch["control_action_mask"][0, 0, stop_index].item(), 1.0)
         self.assertEqual(batch["control_action_mask"][0, 0, flow_index].item(), 0.0)
         self.assertEqual(batch["control_action_mask"][0, 1].sum().item(), 0.0)
 
-    def test_episode_batch_holds_decision_action_until_next_fixed_decision_step(self) -> None:
+    def test_episode_batch_uses_applied_targets_instead_of_unacknowledged_commands(self) -> None:
         episode = build_dreamer_episodes_from_training_rows(
             [training_row(1, observation_overrides={"fixed_cadence_sequence": fixed_cadence_sequence(5)})]
         )[0]
@@ -598,10 +598,10 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
             ),
         )
 
-        pressure_index = DREAMER_DYNAMIC_ACTION_FEATURES.index("pressure_target_bar")
+        pressure_index = DREAMER_RESOLVED_CONTROL_FEATURES.index("pressure_target_bar")
         self.assertEqual(batch["decision_step_mask"][0].tolist(), [1.0, 0.0, 1.0, 0.0, 1.0])
-        self.assertEqual(batch["dynamic_actions"][0, :, pressure_index].tolist(), [2.0, 2.0, 8.0, 8.0, 8.0])
-        self.assertEqual(batch["dynamic_action_mask"][0, :, pressure_index].tolist(), [1.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertEqual(batch["resolved_controls"][0, :, pressure_index].tolist(), [8.0, 8.0, 8.0, 8.0, 8.0])
+        self.assertEqual(batch["resolved_control_mask"][0, :, pressure_index].tolist(), [1.0, 1.0, 1.0, 1.0, 1.0])
         self.assertEqual(batch["control_action_mask"][0, :, pressure_index].tolist(), [1.0, 0.0, 1.0, 0.0, 1.0])
 
     def test_episode_batch_rejects_invalid_episode(self) -> None:

@@ -86,7 +86,7 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         self.assertIn("critic_loss", first["actor_critic_train_curve"][0])
         self.assertIn("imagined_return_mean", first["actor_critic_train_curve"][0])
         evaluation = first["evaluation_report"]
-        self.assertEqual(evaluation["format"], "espresso_rl_dreamer_v3_offline_evaluation_report_v1")
+        self.assertEqual(evaluation["format"], "espresso_rl_dreamer_v3_offline_evaluation_report_v2")
         self.assertFalse(evaluation["inference_ready"])
         self.assertIn("loss_total", evaluation["world_model_validation"])
         self.assertIn("rmse", evaluation["reward_prediction"])
@@ -101,7 +101,7 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         preview = first["imagination_preview"]
         self.assertFalse(preview["inference_ready"])
         self.assertTrue(preview["contract_only"])
-        self.assertEqual(preview["dynamic_action_shape"], [1, 3, 7])
+        self.assertEqual(preview["resolved_control_shape"], [1, 3, 7])
         self.assertEqual(preview["lambda_return_shape"], [1, 3])
 
     def test_actor_critic_training_respects_dynamic_control_masks(self) -> None:
@@ -136,12 +136,12 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
 
         curve = result["actor_critic_train_curve"]
         self.assertEqual(len(curve), 2)
-        self.assertEqual(curve[0]["supported_dynamic_action_count"], 4.0)
-        self.assertEqual(curve[0]["unsupported_dynamic_action_abs_max"], 0.0)
+        self.assertEqual(curve[0]["supported_live_action_count"], 4.0)
+        self.assertEqual(curve[0]["unsupported_live_action_abs_max"], 0.0)
         self.assertGreater(curve[0]["actor_entropy_mean"], 0.0)
         evaluation = result["evaluation_report"]
         self.assertTrue(evaluation["gates"]["action_mask_ok"])
-        self.assertEqual(evaluation["actor"]["unsupported_dynamic_action_abs_max"], 0.0)
+        self.assertEqual(evaluation["actor"]["unsupported_live_action_abs_max"], 0.0)
 
     def test_release_candidate_training_reports_explicit_release_requirement(self) -> None:
         config = WorldModelReleaseCandidateConfig(
@@ -206,23 +206,25 @@ def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
         ],
         dtype=torch.float32,
     )
-    observed_targets = torch.tensor(
+    resolved_controls = torch.tensor(
         [
             [
-                [8.0, 2.0, 93.0, 1.0, 1.0],
-                [8.0, 2.0, 93.0, 1.0, 1.0],
-                [8.0, 2.0, 93.0, 1.0, 1.0],
-                [8.0, 2.0, 93.0, 1.0, 1.0],
+                [1.0, 8.0, 0.0, 1.0, 93.0, 36.0, 0.0],
+                [1.0, 8.0, 0.0, 1.0, 93.0, 36.0, 0.0],
+                [1.0, 8.0, 0.0, 1.0, 93.0, 36.0, 0.0],
+                [1.0, 8.0, 0.0, 1.0, 92.5, 36.0, 0.0],
             ]
         ],
         dtype=torch.float32,
     )
+    resolved_control_mask = torch.tensor(
+        [[[1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0]] * 4],
+        dtype=torch.float32,
+    )
     batch = {
         "observations": observations,
-        "observed_profile_targets": observed_targets,
-        "observed_profile_target_mask": torch.ones((1, 4, 5), dtype=torch.float32),
-        "dynamic_actions": torch.zeros((1, 4, 7), dtype=torch.float32),
-        "dynamic_action_mask": torch.zeros((1, 4, 7), dtype=torch.float32),
+        "resolved_controls": resolved_controls,
+        "resolved_control_mask": resolved_control_mask,
         "control_action_mask": torch.zeros((1, 4, 7), dtype=torch.float32),
         "constraints": torch.zeros((1, 4, 7), dtype=torch.float32),
         "pre_shot_actions": torch.zeros((1, 9), dtype=torch.float32),

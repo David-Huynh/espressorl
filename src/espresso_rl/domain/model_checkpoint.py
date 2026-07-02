@@ -12,9 +12,9 @@ from espresso_rl.domain.dreamer_taste import (
 )
 from espresso_rl.domain.model_release import DreamerReleaseAuthorization
 
-DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT = "espresso_rl_dreamer_v3_checkpoint_architecture_v3"
-DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION = 3
-DREAMER_INFERENCE_PROBE_FORMAT = "espresso_rl_dreamer_v3_inference_probe_v1"
+DREAMER_CHECKPOINT_ARCHITECTURE_FORMAT = "espresso_rl_dreamer_v3_checkpoint_architecture_v4"
+DREAMER_CHECKPOINT_ARCHITECTURE_SCHEMA_VERSION = 4
+DREAMER_INFERENCE_PROBE_FORMAT = "espresso_rl_dreamer_v3_inference_probe_v2"
 
 _HEX_CHARS = frozenset("0123456789abcdef")
 

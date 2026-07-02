@@ -62,7 +62,7 @@ class DreamerReferenceWorldModelTests(unittest.TestCase):
         config = default_world_model_config("espresso_debug")
         model = DreamerV3VectorWorldModel(
             observation_dim=5,
-            behavior_dim=66,
+            behavior_dim=56,
             static_dim=18,
             config=config,
         )
@@ -89,7 +89,7 @@ class DreamerReferenceWorldModelTests(unittest.TestCase):
         torch.manual_seed(7)
         model = DreamerV3VectorWorldModel(
             observation_dim=5,
-            behavior_dim=66,
+            behavior_dim=56,
             static_dim=18,
             config=default_world_model_config("espresso_debug"),
         )
@@ -110,10 +110,14 @@ def reference_batch(step_count: int) -> dict[str, torch.Tensor]:
     )
     return {
         "observations": observations,
-        "observed_profile_targets": torch.ones((1, step_count, 5), dtype=torch.float32),
-        "observed_profile_target_mask": torch.ones((1, step_count, 5), dtype=torch.float32),
-        "dynamic_actions": torch.zeros((1, step_count, 7), dtype=torch.float32),
-        "dynamic_action_mask": torch.zeros((1, step_count, 7), dtype=torch.float32),
+        "resolved_controls": torch.tensor(
+            [[[1.0, 8.0, 0.0, 1.0, 93.0, 36.0, 0.0]] * step_count],
+            dtype=torch.float32,
+        ),
+        "resolved_control_mask": torch.tensor(
+            [[[1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0]] * step_count],
+            dtype=torch.float32,
+        ),
         "control_action_mask": torch.zeros((1, step_count, 7), dtype=torch.float32),
         "constraints": torch.zeros((1, step_count, 7), dtype=torch.float32),
         "pre_shot_actions": torch.zeros((1, 9), dtype=torch.float32),

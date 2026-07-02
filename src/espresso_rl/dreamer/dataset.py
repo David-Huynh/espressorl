@@ -19,9 +19,14 @@ import torch
 from espresso_rl.domain.dreamer_control import (
     DEFAULT_DREAMER_CONTROL_SPEC,
     DREAMER_CONTROL_CONSTRAINT_FIELDS,
-    DREAMER_DYNAMIC_ACTION_FIELDS,
     DreamerControlSpec,
     validate_dynamic_action_for_control_spec,
+)
+from espresso_rl.domain.dreamer_resolved_control import (
+    DREAMER_PUMP_TARGET_MODE_FLOW,
+    DREAMER_PUMP_TARGET_MODE_PRESSURE,
+    DREAMER_RESOLVED_CONTROL_FIELDS,
+    resolve_applied_dreamer_control,
 )
 from espresso_rl.domain.dreamer_episodes import (
     DREAMER_EPISODE_FORMAT,
@@ -37,8 +42,6 @@ from espresso_rl.domain.dreamer_telemetry import DREAMER_LIVE_CONTEXT_WINDOW_SIZ
 from espresso_rl.domain.dreamer_pre_shot import (
     DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC,
     DREAMER_PRE_SHOT_ACTION_FIELDS,
-    DREAMER_PUMP_TARGET_MODE_FLOW,
-    DREAMER_PUMP_TARGET_MODE_PRESSURE,
     DreamerPreShotActionSpec,
     build_dreamer_pre_shot_action,
     encode_dreamer_pre_shot_action,
@@ -57,8 +60,6 @@ MIN_SHOTS = 4
 GRIND_BINS = 11
 DOSE_BINS = 11
 
-_PUMP_TARGET_MODE_PRESSURE = 1
-_PUMP_TARGET_MODE_FLOW = 2
 _DEFAULT_CONSTRAINTS = DEFAULT_DREAMER_CONTROL_SPEC.constraints()
 DREAMER_OBSERVATION_FEATURES = DREAMER_PROFILE_CHANNELS
 DREAMER_OBSERVED_TARGET_FEATURES = (
@@ -68,7 +69,7 @@ DREAMER_OBSERVED_TARGET_FEATURES = (
     "pump_target_mode",
     "valve_open",
 )
-DREAMER_DYNAMIC_ACTION_FEATURES = DREAMER_DYNAMIC_ACTION_FIELDS
+DREAMER_RESOLVED_CONTROL_FEATURES = DREAMER_RESOLVED_CONTROL_FIELDS
 DREAMER_CONSTRAINT_FEATURES = DREAMER_CONTROL_CONSTRAINT_FIELDS
 DREAMER_STATIC_CONTEXT_FEATURES = (
     "relative_grind_steps_from_reference",
@@ -302,15 +303,13 @@ def build_dreamer_episode_batch(
 
     batch_size = len(sorted_episodes)
     observations = np.zeros((batch_size, max_steps, len(DREAMER_OBSERVATION_FEATURES)), dtype=np.float32)
-    observed_targets = np.zeros((batch_size, max_steps, len(DREAMER_OBSERVED_TARGET_FEATURES)), dtype=np.float32)
-    observed_target_mask = np.zeros_like(observed_targets)
-    dynamic_actions = np.zeros((batch_size, max_steps, len(DREAMER_DYNAMIC_ACTION_FEATURES)), dtype=np.float32)
-    dynamic_action_mask = np.zeros_like(dynamic_actions)
+    resolved_controls = np.zeros((batch_size, max_steps, len(DREAMER_RESOLVED_CONTROL_FEATURES)), dtype=np.float32)
+    resolved_control_mask = np.zeros_like(resolved_controls)
     pre_shot_actions = np.zeros((batch_size, len(DREAMER_PRE_SHOT_ACTION_FIELDS)), dtype=np.float32)
     pre_shot_action_indexes = np.zeros((batch_size, len(DREAMER_PRE_SHOT_ACTION_FIELDS)), dtype=np.int64)
     pre_shot_action_mask = np.zeros_like(pre_shot_actions)
     pre_shot_capability_mask = np.zeros_like(pre_shot_actions)
-    control_action_mask = np.zeros_like(dynamic_actions)
+    control_action_mask = np.zeros_like(resolved_controls)
     constraints = np.zeros((batch_size, max_steps, len(DREAMER_CONSTRAINT_FEATURES)), dtype=np.float32)
     decision_step_mask = np.zeros((batch_size, max_steps), dtype=np.float32)
     elapsed_seconds = np.zeros((batch_size, max_steps, 1), dtype=np.float32)
@@ -380,11 +379,14 @@ def build_dreamer_episode_batch(
                 step["observation"],
                 DREAMER_OBSERVATION_FEATURES,
             )
-            observed_targets[batch_index, step_index] = _encode_object(
+            resolved_values, resolved_mask = _encode_resolved_control(
                 step["observed_profile_target"],
-                DREAMER_OBSERVED_TARGET_FEATURES,
+                pre_shot_actions[batch_index],
+                pre_shot_action_mask[batch_index],
+                held_dynamic_action,
             )
-            observed_target_mask[batch_index, step_index] = _encode_observed_target_mask(step["observed_profile_target"])
+            resolved_controls[batch_index, step_index] = resolved_values
+            resolved_control_mask[batch_index, step_index] = resolved_mask
             decision_action = step.get("dynamic_action")
             if decision_action is not None:
                 action_errors = validate_dynamic_action_for_control_spec(
@@ -398,11 +400,8 @@ def build_dreamer_episode_batch(
                         f"Dreamer episode {label} dynamic action is invalid: {'; '.join(action_errors[:10])}"
                     )
                 held_dynamic_action = dict(decision_action)
-            action_values, action_mask = _encode_dynamic_action(held_dynamic_action)
-            dynamic_actions[batch_index, step_index] = action_values
-            dynamic_action_mask[batch_index, step_index] = action_mask
             constraints[batch_index, step_index] = _encode_bool_object(
-                step["constraints"],
+                resolved_control_spec.constraints(),
                 DREAMER_CONSTRAINT_FEATURES,
             )
             if resolved_control_spec.is_decision_step(step_index):
@@ -420,10 +419,8 @@ def build_dreamer_episode_batch(
     target_device = torch.device(device) if device is not None else None
     return {
         "observations": torch.tensor(observations, dtype=torch.float32, device=target_device),
-        "observed_profile_targets": torch.tensor(observed_targets, dtype=torch.float32, device=target_device),
-        "observed_profile_target_mask": torch.tensor(observed_target_mask, dtype=torch.float32, device=target_device),
-        "dynamic_actions": torch.tensor(dynamic_actions, dtype=torch.float32, device=target_device),
-        "dynamic_action_mask": torch.tensor(dynamic_action_mask, dtype=torch.float32, device=target_device),
+        "resolved_controls": torch.tensor(resolved_controls, dtype=torch.float32, device=target_device),
+        "resolved_control_mask": torch.tensor(resolved_control_mask, dtype=torch.float32, device=target_device),
         "pre_shot_actions": torch.tensor(pre_shot_actions, dtype=torch.float32, device=target_device),
         "pre_shot_action_indexes": torch.tensor(pre_shot_action_indexes, dtype=torch.long, device=target_device),
         "pre_shot_action_mask": torch.tensor(pre_shot_action_mask, dtype=torch.float32, device=target_device),
@@ -462,14 +459,13 @@ def build_dreamer_episode_batch(
         "live_action_spec": resolved_live_action_spec.to_dict(),
         "feature_names": {
             "observations": DREAMER_OBSERVATION_FEATURES,
-            "observed_profile_targets": DREAMER_OBSERVED_TARGET_FEATURES,
-            "observed_profile_target_mask": DREAMER_OBSERVED_TARGET_FEATURES,
-            "dynamic_actions": DREAMER_DYNAMIC_ACTION_FEATURES,
+            "resolved_controls": DREAMER_RESOLVED_CONTROL_FEATURES,
+            "resolved_control_mask": DREAMER_RESOLVED_CONTROL_FEATURES,
             "pre_shot_actions": DREAMER_PRE_SHOT_ACTION_FIELDS,
             "pre_shot_action_indexes": DREAMER_PRE_SHOT_ACTION_FIELDS,
             "pre_shot_action_mask": DREAMER_PRE_SHOT_ACTION_FIELDS,
             "pre_shot_capability_mask": DREAMER_PRE_SHOT_ACTION_FIELDS,
-            "control_action_mask": DREAMER_DYNAMIC_ACTION_FEATURES,
+            "control_action_mask": DREAMER_RESOLVED_CONTROL_FEATURES,
             "constraints": DREAMER_CONSTRAINT_FEATURES,
             "static_context": DREAMER_STATIC_CONTEXT_FEATURES,
             "taste_objective": DREAMER_TASTE_OBJECTIVE_FEATURES,
@@ -850,17 +846,59 @@ def _encode_observed_target_mask(observed_profile_target: dict[str, Any]) -> np.
     )
 
 
-def _encode_dynamic_action(action: dict[str, Any] | None) -> tuple[np.ndarray, np.ndarray]:
-    values = np.zeros(len(DREAMER_DYNAMIC_ACTION_FEATURES), dtype=np.float32)
-    mask = np.zeros(len(DREAMER_DYNAMIC_ACTION_FEATURES), dtype=np.float32)
-    if action is None:
-        return values, mask
-    for feature_index, feature in enumerate(DREAMER_DYNAMIC_ACTION_FEATURES):
-        if feature not in action:
-            continue
-        mask[feature_index] = 1.0
-        values[feature_index] = _bool_or_number(action.get(feature))
-    return values, mask
+def _encode_resolved_control(
+    observed_target: dict[str, Any],
+    pre_shot_action: np.ndarray,
+    pre_shot_mask: np.ndarray,
+    previously_issued_action: dict[str, Any] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    raw_mode = observed_target.get("pump_target_mode")
+    if (
+        isinstance(raw_mode, bool)
+        or not isinstance(raw_mode, (int, float))
+        or not np.isfinite(float(raw_mode))
+        or not float(raw_mode).is_integer()
+    ):
+        raise DreamerEpisodeDatasetError("Dreamer resolved pump target mode is invalid")
+    mode = int(raw_mode)
+    yield_index = DREAMER_PRE_SHOT_ACTION_FIELDS.index("yield_target_g")
+    yield_target: object | None = (
+        float(pre_shot_action[yield_index]) if pre_shot_mask[yield_index] > 0.5 else None
+    )
+    stop: object | None = False
+    if previously_issued_action is not None:
+        if "yield_stop_target_g" in previously_issued_action:
+            yield_target = previously_issued_action["yield_stop_target_g"]
+        if "stop" in previously_issued_action:
+            stop = previously_issued_action["stop"]
+    try:
+        resolved = resolve_applied_dreamer_control(
+            pump_target_mode=mode,
+            pressure_target_bar=(
+                observed_target.get("pressure_target_bar")
+                if mode == DREAMER_PUMP_TARGET_MODE_PRESSURE
+                else None
+            ),
+            flow_target_ml_s=(
+                observed_target.get("flow_target_ml_s")
+                if mode == DREAMER_PUMP_TARGET_MODE_FLOW
+                else None
+            ),
+            valve_position=1.0 if observed_target.get("valve_open") is True else 0.0,
+            temperature_target_c=(
+                observed_target.get("temperature_target_c")
+                if observed_target.get("temperature_target_active") is True
+                else None
+            ),
+            yield_stop_target_g=yield_target,
+            stop=stop,
+        )
+    except ValueError as exc:
+        raise DreamerEpisodeDatasetError(f"Dreamer resolved control is invalid: {exc}") from exc
+    return (
+        np.asarray(resolved.values, dtype=np.float32),
+        np.asarray(resolved.observed_mask, dtype=np.float32),
+    )
 
 
 def _episode_weight(episode: dict[str, Any]) -> float:
@@ -960,8 +998,8 @@ def _fixed_cadence_steps(sequence: dict[str, Any], observation: dict[str, Any]) 
         pressure_target = sequence["pressure_target_bar"][index]
         flow_target = sequence["pump_flow_target_ml_s"][index]
         pump_target_mode = sequence["pump_target_mode"][index]
-        pressure_target_active = pump_target_mode == _PUMP_TARGET_MODE_PRESSURE
-        flow_target_active = pump_target_mode == _PUMP_TARGET_MODE_FLOW
+        pressure_target_active = pump_target_mode == DREAMER_PUMP_TARGET_MODE_PRESSURE
+        flow_target_active = pump_target_mode == DREAMER_PUMP_TARGET_MODE_FLOW
         if flow_targets_masked:
             flow_target_active = False
         step_observation = {

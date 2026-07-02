@@ -521,20 +521,23 @@ Relative grind, dose, the initial planned yield target, grinder calibration,
 and the logged taste objective stay in `static_context`. A separate canonical
 `taste_objective` query tensor conditions the actor and critic without changing
 the context replay identity. Historical
-pressure/pump-flow/temperature setpoints are stored separately as observed profile
-targets with a matching active mask, while `dynamic_action` remains null unless
-a future capability-gated control path supplies safe per-step actions such as
-`yield_stop_target_g` or `stop`. Pressure and flow targets are represented as
-profile targets/control modes, not as proof that pressure and flow are
-independently writable on a given machine. Dreamer episode construction requires
+pressure/pump-flow/temperature setpoints are retained as source telemetry and
+converted into one canonical `resolved_controls` vector with an observation
+mask. The vector contains pump mode, the active pressure-or-flow target, valve,
+temperature, yield-stop target, and stop state. Categorical actor deltas are
+resolved into exactly the same representation before imagined RSSM transitions;
+live inference derives it from the machine-reported applied targets. A nullable
+episode `dynamic_action` is retained only as an issued-command audit field and
+is not a second world-model action channel. Pressure and flow targets are not
+treated as proof that both are independently writable. Dreamer episode construction requires
 sampled actual temperature, sampled resolved target temperature, explicit
 per-step pump target mode, and valve state. It also requires sampled beverage
 flow separately from pump flow. Scalar profile/final temperatures remain
 metadata and are never expanded into fabricated live telemetry.
 `espresso_rl.dreamer.dataset.build_dreamer_episode_batch` then turns validated
 episodes into deterministic tensors for offline training: observations,
-observed profile targets plus active masks, dynamic action tensors plus
-presence masks, constraints, static context, terminal features, rewards,
+resolved controls plus observation masks, capability masks, constraints,
+static context, terminal features, rewards,
 continuations, and step padding masks. The batch includes feature-name metadata
 so external trainers can audit the numeric layout instead of relying on
 implicit column order. `elapsed_seconds` advances by 0.25 on every valid step,
@@ -542,8 +545,9 @@ and `step_duration_seconds` is 0.25 for valid steps and zero for padding.
 The batch also includes a Dreamer control spec, a `decision_step_mask`, and a
 `control_action_mask`. Observations use the 250 ms recurrent clock, while actor
 decisions default to 1000 ms and must never be faster than the supported control
-cadence. Decision steps are fixed and equally spaced; the batcher forward-fills
-the latest decision as the held action between decision ticks. BO and other
+cadence. Decision steps are fixed and equally spaced. The RSSM always consumes
+the applied control state for the current sample; actor choices affect the next
+imagined state and live commands are confirmed by subsequent telemetry. BO and other
 shot-level optimizers do not emit adaptive in-shot profile controls.
 
 Episode v4 also contains a versioned `pre_shot_action`. It deterministically
@@ -704,7 +708,7 @@ bytes may be safe for shadow evaluation without being a release-approved active
 policy. `dreamer_v3_shadow` remains the default Dreamer-compatible mode while
 Bayesian Optimization serves recommendations.
 
-Checkpoint architecture v2 also authenticates the exact world-model,
+Checkpoint architecture v4 also authenticates the exact world-model,
 factorized pre-shot actor, taste-objective spec, and critic reconstruction
 configuration. The trainer records a deterministic
 inference-probe hash from the original modules, serializes the checkpoint,

@@ -39,6 +39,7 @@ from espresso_rl.dreamer.imagination import (
 from espresso_rl.dreamer.reference_world_model import (
     DreamerV3VectorWorldModel,
     DreamerV3WorldModelConfig,
+    behavior_tensor_from_parts,
     default_world_model_config,
 )
 
@@ -48,12 +49,12 @@ WORLD_MODEL_TRAIN_PREVIEW_FORMAT = "espresso_rl_world_model_train_preview_v1"
 WORLD_MODEL_TRAIN_PREVIEW_SCHEMA_VERSION = 1
 WORLD_MODEL_RELEASE_CANDIDATE_FORMAT = "espresso_rl_world_model_release_candidate_v1"
 WORLD_MODEL_RELEASE_CANDIDATE_SCHEMA_VERSION = 1
-DREAMER_V3_EVALUATION_REPORT_FORMAT = "espresso_rl_dreamer_v3_offline_evaluation_report_v1"
-DREAMER_V3_EVALUATION_REPORT_SCHEMA_VERSION = 1
+DREAMER_V3_EVALUATION_REPORT_FORMAT = "espresso_rl_dreamer_v3_offline_evaluation_report_v2"
+DREAMER_V3_EVALUATION_REPORT_SCHEMA_VERSION = 2
 _EVAL_WORLD_MODEL_LOSS_MAX = 1_000_000.0
 _EVAL_REWARD_RMSE_MAX = 10.0
 _EVAL_CRITIC_VALUE_RMSE_MAX = 10.0
-_EVAL_UNSUPPORTED_DYNAMIC_ACTION_MAX = 0.0
+_EVAL_UNSUPPORTED_LIVE_ACTION_MAX = 0.0
 
 
 @dataclass(frozen=True)
@@ -390,7 +391,7 @@ def run_fixed_cadence_world_model_train_preview(
             observation_dim=int(train_tensors["observations"].shape[-1]),
             behavior_dim=int(_behavior_tensor(train_tensors).shape[-1]),
             static_dim=int(train_tensors["static_context"].shape[-1]),
-            live_action_dim=int(train_tensors["dynamic_actions"].shape[-1]),
+            live_action_dim=int(train_tensors["resolved_controls"].shape[-1]),
             control_spec=config.control_spec,
             live_action_spec=config.live_action_spec,
         )
@@ -451,10 +452,8 @@ def run_fixed_cadence_world_model_release_candidate(
 def _cpu_float_batch(batch: dict[str, Any]) -> dict[str, torch.Tensor]:
     required = (
         "observations",
-        "observed_profile_targets",
-        "observed_profile_target_mask",
-        "dynamic_actions",
-        "dynamic_action_mask",
+        "resolved_controls",
+        "resolved_control_mask",
         "pre_shot_actions",
         "pre_shot_action_mask",
         "pre_shot_capability_mask",
@@ -503,10 +502,8 @@ def _validate_batch_shapes(batch: dict[str, torch.Tensor]) -> None:
     if batch_size <= 0 or step_count <= 1:
         raise FixedCadenceWorldModelTrainingError("world model training batch must contain at least two valid steps")
     for key in (
-        "observed_profile_targets",
-        "observed_profile_target_mask",
-        "dynamic_actions",
-        "dynamic_action_mask",
+        "resolved_controls",
+        "resolved_control_mask",
         "control_action_mask",
         "constraints",
     ):
@@ -654,21 +651,16 @@ def _positive_count(value: object, label: str) -> int:
 
 
 def _behavior_tensor(batch: dict[str, torch.Tensor]) -> torch.Tensor:
-    step_count = batch["observed_profile_targets"].shape[1]
-    return torch.cat(
-        [
-            batch["observed_profile_targets"],
-            batch["observed_profile_target_mask"],
-            batch["dynamic_actions"],
-            batch["dynamic_action_mask"],
-            batch["control_action_mask"],
-            batch["constraints"],
-            batch["decision_step_mask"].unsqueeze(-1),
-            batch["pre_shot_actions"].unsqueeze(1).expand(-1, step_count, -1),
-            batch["pre_shot_action_mask"].unsqueeze(1).expand(-1, step_count, -1),
-            batch["pre_shot_capability_mask"].unsqueeze(1).expand(-1, step_count, -1),
-        ],
-        dim=-1,
+    step_count = batch["resolved_controls"].shape[1]
+    return behavior_tensor_from_parts(
+        resolved_controls=batch["resolved_controls"],
+        resolved_control_mask=batch["resolved_control_mask"],
+        control_action_mask=batch["control_action_mask"],
+        constraints=batch["constraints"],
+        decision_step_mask=batch["decision_step_mask"],
+        pre_shot_actions=batch["pre_shot_actions"].unsqueeze(1).expand(-1, step_count, -1),
+        pre_shot_action_mask=batch["pre_shot_action_mask"].unsqueeze(1).expand(-1, step_count, -1),
+        pre_shot_capability_mask=batch["pre_shot_capability_mask"].unsqueeze(1).expand(-1, step_count, -1),
     )
 
 
@@ -842,16 +834,16 @@ def _offline_evaluation_report(
     critic_error = rollout["values"][:, :-1] - rollout["lambda_returns"]
     critic_value_mae = critic_error.abs().mean()
     critic_value_rmse = torch.sqrt(critic_error.square().mean().clamp_min(0.0))
-    dynamic_actions = rollout["dynamic_actions"]
+    live_actions = rollout["live_action_choices"]
     control_mask = rollout["control_action_mask"]
-    unsupported_dynamic = dynamic_actions * (1.0 - control_mask.unsqueeze(1))
-    unsupported_abs_max = unsupported_dynamic.abs().max()
+    unsupported_live = live_actions * (1.0 - control_mask.unsqueeze(1))
+    unsupported_abs_max = unsupported_live.abs().max()
     imagined_returns = rollout["lambda_returns"]
 
     world_model_loss_ok = _finite_bounded(validation_losses["loss_total"], _EVAL_WORLD_MODEL_LOSS_MAX)
     reward_calibration_ok = _finite_bounded(reward_rmse, _EVAL_REWARD_RMSE_MAX)
     critic_value_ok = _finite_bounded(critic_value_rmse, _EVAL_CRITIC_VALUE_RMSE_MAX)
-    action_mask_ok = bool(unsupported_abs_max.item() <= _EVAL_UNSUPPORTED_DYNAMIC_ACTION_MAX)
+    action_mask_ok = bool(unsupported_abs_max.item() <= _EVAL_UNSUPPORTED_LIVE_ACTION_MAX)
 
     return {
         "format": DREAMER_V3_EVALUATION_REPORT_FORMAT,
@@ -882,8 +874,8 @@ def _offline_evaluation_report(
             "pre_shot_behavior_loss": _rounded_scalar(rollout["pre_shot_behavior_loss"]),
             "imagined_return_mean": _rounded_scalar(imagined_returns.mean()),
             "imagined_return_std": _rounded_scalar(imagined_returns.std(unbiased=False)),
-            "supported_dynamic_action_count": _rounded_scalar(control_mask.sum()),
-            "unsupported_dynamic_action_abs_max": _rounded_scalar(unsupported_abs_max),
+            "supported_live_action_count": _rounded_scalar(control_mask.sum()),
+            "unsupported_live_action_abs_max": _rounded_scalar(unsupported_abs_max),
         },
         "gates": {
             "world_model_loss_ok": world_model_loss_ok,
@@ -901,7 +893,7 @@ def _offline_evaluation_report(
             "world_model_loss_total_max": _EVAL_WORLD_MODEL_LOSS_MAX,
             "reward_rmse_max": _EVAL_REWARD_RMSE_MAX,
             "critic_value_rmse_max": _EVAL_CRITIC_VALUE_RMSE_MAX,
-            "unsupported_dynamic_action_abs_max": _EVAL_UNSUPPORTED_DYNAMIC_ACTION_MAX,
+            "unsupported_live_action_abs_max": _EVAL_UNSUPPORTED_LIVE_ACTION_MAX,
         },
     }
 
@@ -991,9 +983,9 @@ def _train_actor_step(
         for parameter, requires_grad in zip(critic.parameters(), critic_requires_grad, strict=True):
             parameter.requires_grad_(requires_grad)
 
-    dynamic_actions = rollout["dynamic_actions"]
+    live_actions = rollout["live_action_choices"]
     control_mask = rollout["control_action_mask"]
-    unsupported_dynamic = dynamic_actions * (1.0 - control_mask.unsqueeze(1))
+    unsupported_live = live_actions * (1.0 - control_mask.unsqueeze(1))
     return {
         "actor_loss": _rounded_scalar(actor_loss),
         "pre_shot_policy_loss": _rounded_scalar(pre_shot_policy_loss),
@@ -1003,8 +995,8 @@ def _train_actor_step(
         "actor_entropy_mean": _rounded_scalar(entropy),
         "imagined_return_mean": _rounded_scalar(rollout["lambda_returns"].mean()),
         "actor_grad_norm": _rounded_scalar(grad_norm),
-        "supported_dynamic_action_count": _rounded_scalar(control_mask.sum()),
-        "unsupported_dynamic_action_abs_max": _rounded_scalar(unsupported_dynamic.abs().max()),
+        "supported_live_action_count": _rounded_scalar(control_mask.sum()),
+        "unsupported_live_action_abs_max": _rounded_scalar(unsupported_live.abs().max()),
     }
 
 

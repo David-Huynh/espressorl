@@ -152,7 +152,7 @@ def dreamer_episode_batch_from_training_rows(
     if (
         batch["observations"].shape[-1] != architecture.observation_dim
         or batch["static_context"].shape[-1] != architecture.static_dim
-        or batch["dynamic_actions"].shape[-1] != architecture.live_action_dim
+        or batch["resolved_controls"].shape[-1] != architecture.live_action_dim
         or batch["context_static"].shape[-1] != architecture.context_encoder.static_dim
         or batch["context_terminal"].shape[-1] != architecture.context_encoder.terminal_dim
         or batch["context_time"].shape[-1] != architecture.context_encoder.time_dim
