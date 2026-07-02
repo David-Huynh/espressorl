@@ -193,7 +193,7 @@ class TrainingDatasetExportTests(unittest.TestCase):
         self.assertEqual(exported_row["recommendation"]["follow_through"], "not_followed")
         self.assertEqual(exported_row["recommendation"]["attribution_weight"], 0.0)
 
-    def test_export_skips_noncanonical_recommendation_actions(self) -> None:
+    def test_export_preserves_fractional_recommendation_grind_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = TrainingDatasetExportService(
                 warehouse=FakeWarehouse(
@@ -212,9 +212,12 @@ class TrainingDatasetExportTests(unittest.TestCase):
             )
 
             result = service.export_once(limit=10)
+            files = {Path(file.relative_path).name: Path(file.absolute_path) for file in result.files}
+            exported_row = json.loads(files["training_rows.jsonl"].read_text(encoding="utf-8"))
 
-        self.assertEqual(result.row_count, 0)
-        self.assertEqual(result.skipped_row_count, 1)
+        self.assertEqual(result.row_count, 1)
+        self.assertEqual(result.skipped_row_count, 0)
+        self.assertEqual(exported_row["recommendation"]["grind_delta_steps_from_current"], 1.5)
 
     def test_export_order_is_deterministic_by_training_row_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

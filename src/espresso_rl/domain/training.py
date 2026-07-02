@@ -178,7 +178,11 @@ def validate_training_transition(row: dict[str, Any]) -> list[str]:
         else:
             _reject_unknown_fields(recommendation, _RECOMMENDATION_FIELDS, errors, path="recommendation")
             _optional_string(recommendation.get("recommendation_id"), "recommendation.recommendation_id", errors)
-            _optional_int(recommendation.get("grind_delta_steps_from_current"), "recommendation.grind_delta_steps_from_current", errors)
+            _optional_finite_number(
+                recommendation.get("grind_delta_steps_from_current"),
+                "recommendation.grind_delta_steps_from_current",
+                errors,
+            )
             _optional_finite_number(recommendation.get("grind_delta_um_from_current"), "recommendation.grind_delta_um_from_current", errors)
             _optional_finite_number(
                 recommendation.get("projected_relative_step_from_reference"),

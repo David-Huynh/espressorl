@@ -121,6 +121,7 @@ class PostgresStore:
             "shot_end_state": "TEXT",
             "grinder_calibration_mode": "TEXT NOT NULL DEFAULT 'relative_calibrated'",
             "grinder_step_direction": "TEXT NOT NULL DEFAULT 'higher_is_finer'",
+            "grinder_adjustment_mode": "TEXT NOT NULL DEFAULT 'stepped'",
             "grinder_reference_label": "TEXT NOT NULL DEFAULT 'reference'",
             "current_absolute_step": "DOUBLE PRECISION",
             "absolute_reference_step": "DOUBLE PRECISION",
@@ -132,12 +133,23 @@ class PostgresStore:
             "raw_profile_hash": "TEXT",
             "grinder_calibration_mode": "TEXT NOT NULL DEFAULT 'relative_calibrated'",
             "grinder_step_direction": "TEXT NOT NULL DEFAULT 'higher_is_finer'",
+            "grinder_adjustment_mode": "TEXT NOT NULL DEFAULT 'stepped'",
             "grinder_reference_label": "TEXT NOT NULL DEFAULT 'reference'",
             "current_absolute_step": "DOUBLE PRECISION",
             "absolute_reference_step": "DOUBLE PRECISION",
             "projected_absolute_step": "DOUBLE PRECISION",
         }.items():
             self.conn.execute(f"ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS {column} {definition}")
+        self.conn.execute(
+            "ALTER TABLE shots "
+            "ALTER COLUMN recommended_grind_delta_steps_from_current TYPE DOUBLE PRECISION "
+            "USING recommended_grind_delta_steps_from_current::DOUBLE PRECISION"
+        )
+        self.conn.execute(
+            "ALTER TABLE recommendations "
+            "ALTER COLUMN grind_delta_steps_from_current TYPE DOUBLE PRECISION "
+            "USING grind_delta_steps_from_current::DOUBLE PRECISION"
+        )
         self.conn.execute(
             "ALTER TABLE dreamer_shadow_evaluations "
             f"ADD COLUMN IF NOT EXISTS inference_contract_id TEXT NOT NULL DEFAULT '{SHADOW_INFERENCE_CONTRACT_LEGACY_V1}'"

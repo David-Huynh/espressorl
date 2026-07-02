@@ -16,6 +16,7 @@ from espresso_rl.domain.events import (
 from espresso_rl.domain.follow_through import infer_follow_through
 from espresso_rl.domain.models import (
     FollowThroughState,
+    GrinderAdjustmentMode,
     GrinderCalibrationMode,
     GrinderStepDirection,
     MachineState,
@@ -324,6 +325,7 @@ class EspressoRLService:
             grinder_context_id=event.grinder_context_id,
             grinder_calibration_mode=event.grinder_calibration_mode,
             grinder_step_direction=event.grinder_step_direction,
+            grinder_adjustment_mode=event.grinder_adjustment_mode,
             grinder_reference_label=event.grinder_reference_label,
             current_absolute_step=event.current_absolute_step,
             absolute_reference_step=event.absolute_reference_step,
@@ -406,6 +408,7 @@ class EspressoRLService:
             now=now,
             grinder_calibration_mode=shot.grinder_calibration_mode,
             grinder_step_direction=shot.grinder_step_direction,
+            grinder_adjustment_mode=shot.grinder_adjustment_mode,
             grinder_reference_label=shot.grinder_reference_label,
             current_absolute_step=shot.current_absolute_step,
             absolute_reference_step=shot.absolute_reference_step,
@@ -482,6 +485,7 @@ class EspressoRLService:
             now=now,
             grinder_calibration_mode=shot.grinder_calibration_mode,
             grinder_step_direction=shot.grinder_step_direction,
+            grinder_adjustment_mode=shot.grinder_adjustment_mode,
             grinder_reference_label=shot.grinder_reference_label,
             current_absolute_step=shot.current_absolute_step,
             absolute_reference_step=shot.absolute_reference_step,
@@ -726,6 +730,7 @@ class EspressoRLService:
             now=now,
             grinder_calibration_mode=event.grinder_calibration_mode,
             grinder_step_direction=event.grinder_step_direction,
+            grinder_adjustment_mode=event.grinder_adjustment_mode,
             grinder_reference_label=event.grinder_reference_label,
             current_absolute_step=event.current_absolute_step,
             absolute_reference_step=event.absolute_reference_step,
@@ -745,6 +750,7 @@ class EspressoRLService:
         now: int | None = None,
         grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED,
         grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER,
+        grinder_adjustment_mode: GrinderAdjustmentMode = GrinderAdjustmentMode.STEPPED,
         grinder_reference_label: str = "reference",
         current_absolute_step: float | None = None,
         absolute_reference_step: float | None = None,
@@ -847,6 +853,7 @@ class EspressoRLService:
             recommendation,
             grinder_calibration_mode=grinder_calibration_mode,
             grinder_step_direction=grinder_step_direction,
+            grinder_adjustment_mode=grinder_adjustment_mode,
             grinder_reference_label=grinder_reference_label,
             current_absolute_step=current_absolute_step,
             absolute_reference_step=absolute_reference_step,
@@ -897,12 +904,14 @@ class EspressoRLService:
         *,
         grinder_calibration_mode: GrinderCalibrationMode,
         grinder_step_direction: GrinderStepDirection,
+        grinder_adjustment_mode: GrinderAdjustmentMode,
         grinder_reference_label: str,
         current_absolute_step: float | None,
         absolute_reference_step: float | None,
     ) -> None:
         recommendation.grinder_calibration_mode = GrinderCalibrationMode(grinder_calibration_mode)
         recommendation.grinder_step_direction = GrinderStepDirection(grinder_step_direction)
+        recommendation.grinder_adjustment_mode = GrinderAdjustmentMode(grinder_adjustment_mode)
         recommendation.grinder_reference_label = grinder_reference_label or "reference"
         recommendation.current_absolute_step = current_absolute_step
         recommendation.absolute_reference_step = absolute_reference_step
@@ -928,6 +937,7 @@ class EspressoRLService:
                 dose_g=event.dose_in_g,
                 target_yield_g=event.target_yield_g,
                 grinder_step_direction=event.grinder_step_direction,
+                grinder_adjustment_mode=event.grinder_adjustment_mode,
             )
         if event.recommendation_id:
             recommendation = self._recommendations.get(event.recommendation_id)
@@ -1004,6 +1014,7 @@ class EspressoRLService:
                 min(self._safety_bounds.target_yield_max_g, shot.realized_yield_g),
             ),
             grinder_step_direction=shot.grinder_step_direction,
+            grinder_adjustment_mode=shot.grinder_adjustment_mode,
         )
 
     def _decision_from_recommendation(

@@ -490,7 +490,11 @@ def _validate_terminal(terminal: dict[str, Any], errors: list[str]) -> None:
 def _validate_recommendation(recommendation: dict[str, Any], errors: list[str]) -> None:
     _reject_unknown_fields(recommendation, _RECOMMENDATION_FIELDS, errors, path="episode.recommendation")
     _optional_string(recommendation.get("recommendation_id"), "episode.recommendation.recommendation_id", errors)
-    _optional_int(recommendation.get("grind_delta_steps_from_current"), "episode.recommendation.grind_delta_steps_from_current", errors)
+    _optional_finite_number(
+        recommendation.get("grind_delta_steps_from_current"),
+        "episode.recommendation.grind_delta_steps_from_current",
+        errors,
+    )
     _optional_finite_number(recommendation.get("grind_delta_um_from_current"), "episode.recommendation.grind_delta_um_from_current", errors)
     _optional_finite_number(
         recommendation.get("projected_relative_step_from_reference"),

@@ -32,6 +32,7 @@ SHOT_RECORD_FIELDS = frozenset(
         "raw_profile_available",
         "raw_profile_hash",
         "grinder_calibration_mode",
+        "grinder_adjustment_mode",
         "microns_per_step",
         "step_direction",
         "reference_label",
@@ -124,6 +125,7 @@ RECOMMENDATION_RECORD_FIELDS = frozenset(
         "projected_relative_step_from_reference",
         "projected_relative_grind_um_from_reference",
         "grinder_calibration_mode",
+        "grinder_adjustment_mode",
         "microns_per_step",
         "step_direction",
         "reference_label",
@@ -315,6 +317,7 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
         {"uncalibrated", "relative_calibrated", "absolute_display_calibrated"},
         errors,
     )
+    _optional_enum(payload, "grinder_adjustment_mode", {"stepped", "stepless"}, errors)
     _optional_enum(payload, "step_direction", {"higher_is_finer", "higher_is_coarser"}, errors)
     _optional_string(payload, "reference_label", 80, errors)
     _optional_number_range(payload, "microns_per_step", 0.1, 100, errors)
@@ -418,6 +421,7 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
         {"uncalibrated", "relative_calibrated", "absolute_display_calibrated"},
         errors,
     )
+    _optional_enum(payload, "grinder_adjustment_mode", {"stepped", "stepless"}, errors)
     _optional_enum(payload, "step_direction", {"higher_is_finer", "higher_is_coarser"}, errors)
     _optional_string(payload, "reference_label", 80, errors)
     _optional_number_range(payload, "microns_per_step", 0.1, 100, errors)

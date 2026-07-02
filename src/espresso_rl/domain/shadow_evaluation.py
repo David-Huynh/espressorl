@@ -29,7 +29,7 @@ class ShadowProposalMatch(str, Enum):
 @dataclass(frozen=True)
 class ShadowRecipeProposal:
     source: str
-    grind_delta_steps_from_current: int
+    grind_delta_steps_from_current: float
     projected_relative_step_from_reference: float
     projected_relative_grind_um_from_reference: float
     next_dose_g: float
@@ -42,10 +42,7 @@ class ShadowRecipeProposal:
     def __post_init__(self) -> None:
         if self.source not in {"dreamer_v3", "bayesian_optimization"}:
             raise ValueError("shadow proposal source is invalid")
-        if isinstance(self.grind_delta_steps_from_current, bool) or not isinstance(
-            self.grind_delta_steps_from_current, int
-        ):
-            raise ValueError("shadow proposal grind delta must be integer relative steps")
+        _finite(self.grind_delta_steps_from_current, "shadow proposal grind_delta_steps_from_current")
         for field_name in (
             "projected_relative_step_from_reference",
             "projected_relative_grind_um_from_reference",

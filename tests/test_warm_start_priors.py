@@ -10,6 +10,7 @@ from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityPrior
 from espresso_rl.domain.models import (
     FollowThroughState,
+    GrinderAdjustmentMode,
     GrinderStepDirection,
     Recipe,
     RecommendationDecision,
@@ -29,6 +30,50 @@ from tests.test_application_service import (
 
 
 class WarmStartPriorTests(unittest.TestCase):
+    def test_single_observation_probe_uses_whole_step_for_stepped_grinder(self) -> None:
+        current = Recipe(42, 12.5, 18.0, 36.0)
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[shot_record("shot_1", timestamp=1, reward=0.5, rating=3)],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertEqual(recommendation.grinder_adjustment_mode, GrinderAdjustmentMode.STEPPED)
+        self.assertEqual(recommendation.grind_delta_steps_from_current, 1.0)
+        self.assertEqual(recommendation.projected_relative_step_from_reference, 43.0)
+
+    def test_single_observation_probe_can_use_fractional_steps_for_stepless_grinder(self) -> None:
+        current = Recipe(
+            42,
+            12.5,
+            18.0,
+            36.0,
+            grinder_adjustment_mode=GrinderAdjustmentMode.STEPLESS,
+        )
+        context = OptimizationContext(
+            install_id="install_1",
+            machine_id="machine_1",
+            bean_context_id="bean_1",
+            machine_adapter="gaggimate",
+            current_recipe=current,
+            shots=[shot_record("shot_1", timestamp=1, reward=0.5, rating=3)],
+            safety_bounds=SafetyBounds(),
+            now=100,
+        )
+
+        recommendation = ConservativeBOOptimizer().recommend(context)
+
+        self.assertEqual(recommendation.grinder_adjustment_mode, GrinderAdjustmentMode.STEPLESS)
+        self.assertEqual(recommendation.grind_delta_steps_from_current, 0.5)
+        self.assertEqual(recommendation.projected_relative_step_from_reference, 42.5)
+
     def test_finer_rule_uses_active_grinder_step_direction(self) -> None:
         optimizer = ConservativeBOOptimizer()
         signal = PriorSignal(

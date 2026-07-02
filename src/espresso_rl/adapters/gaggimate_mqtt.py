@@ -180,6 +180,7 @@ class GaggimateMQTTClient:
             "status": recommendation.status.value,
             "grinder_calibration_mode": recommendation.grinder_calibration_mode.value,
             "step_direction": recommendation.grinder_step_direction.value,
+            "grinder_adjustment_mode": recommendation.grinder_adjustment_mode.value,
             "reference_label": recommendation.grinder_reference_label,
             "current_absolute_step": recommendation.current_absolute_step,
             "absolute_reference_step": recommendation.absolute_reference_step,
@@ -512,6 +513,7 @@ class GaggimateMQTTClient:
             grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
             grinder_calibration_mode=payload.get("grinder_calibration_mode", "relative_calibrated"),
             grinder_step_direction=payload.get("step_direction", "higher_is_finer"),
+            grinder_adjustment_mode=payload.get("grinder_adjustment_mode", "stepped"),
             grinder_reference_label=payload.get("reference_label", "reference"),
             current_absolute_step=_optional_float(payload.get("current_absolute_step")),
             absolute_reference_step=_optional_float(payload.get("absolute_reference_step")),
@@ -631,6 +633,7 @@ class GaggimateMQTTClient:
             grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
             grinder_calibration_mode=payload.get("grinder_calibration_mode", "relative_calibrated"),
             grinder_step_direction=payload.get("step_direction", "higher_is_finer"),
+            grinder_adjustment_mode=payload.get("grinder_adjustment_mode", "stepped"),
             grinder_reference_label=payload.get("reference_label", "reference"),
             relative_grind_steps_from_reference=_relative_grind_steps_from_payload(
                 payload,

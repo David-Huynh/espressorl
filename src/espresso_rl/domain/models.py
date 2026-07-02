@@ -116,6 +116,11 @@ class GrinderStepDirection(str, Enum):
     HIGHER_IS_COARSER = "higher_is_coarser"
 
 
+class GrinderAdjustmentMode(str, Enum):
+    STEPPED = "stepped"
+    STEPLESS = "stepless"
+
+
 VALID_TASTE_TAGS = {
     "sour",
     "bitter",
@@ -150,9 +155,11 @@ class Recipe:
     target_yield_g: float
     target_ratio: float | None = None
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
+    grinder_adjustment_mode: GrinderAdjustmentMode = GrinderAdjustmentMode.STEPPED
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "grinder_step_direction", GrinderStepDirection(self.grinder_step_direction))
+        object.__setattr__(self, "grinder_adjustment_mode", GrinderAdjustmentMode(self.grinder_adjustment_mode))
         if self.microns_per_step <= 0:
             raise ValueError("microns_per_step must be positive")
         if self.dose_g <= 0:
@@ -193,7 +200,7 @@ class Recommendation:
     install_id: str
     machine_id: str
     bean_context_id: str | None
-    grind_delta_steps_from_current: int
+    grind_delta_steps_from_current: float
     grind_delta_um_from_current: float
     projected_relative_step_from_reference: float
     projected_relative_grind_um_from_reference: float
@@ -221,6 +228,7 @@ class Recommendation:
     apply_error: str | None = None
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
+    grinder_adjustment_mode: GrinderAdjustmentMode = GrinderAdjustmentMode.STEPPED
     grinder_reference_label: str = "reference"
     current_absolute_step: float | None = None
     absolute_reference_step: float | None = None
@@ -232,6 +240,7 @@ class Recommendation:
         self.apply_status = RecommendationApplyStatus(self.apply_status)
         self.grinder_calibration_mode = GrinderCalibrationMode(self.grinder_calibration_mode)
         self.grinder_step_direction = GrinderStepDirection(self.grinder_step_direction)
+        self.grinder_adjustment_mode = GrinderAdjustmentMode(self.grinder_adjustment_mode)
         self.confidence = max(0.0, min(1.0, float(self.confidence)))
         if self.next_dose_g <= 0:
             raise ValueError("next_dose_g must be positive")
@@ -428,7 +437,7 @@ class ShotRecord:
     recommendation_id: str | None = None
     raw_profile_available: bool = True
     raw_profile_hash: str | None = None
-    recommended_grind_delta_steps_from_current: int | None = None
+    recommended_grind_delta_steps_from_current: float | None = None
     recommended_grind_delta_um_from_current: float | None = None
     recommended_projected_relative_step_from_reference: float | None = None
     recommended_dose_g: float | None = None
@@ -484,6 +493,7 @@ class ShotRecord:
     shot_end_state: str | None = None
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
+    grinder_adjustment_mode: GrinderAdjustmentMode = GrinderAdjustmentMode.STEPPED
     grinder_reference_label: str = "reference"
     current_absolute_step: float | None = None
     absolute_reference_step: float | None = None
@@ -526,6 +536,7 @@ class ShotRecord:
         self.recommendation_followed = FollowThroughState(self.recommendation_followed)
         self.grinder_calibration_mode = GrinderCalibrationMode(self.grinder_calibration_mode)
         self.grinder_step_direction = GrinderStepDirection(self.grinder_step_direction)
+        self.grinder_adjustment_mode = GrinderAdjustmentMode(self.grinder_adjustment_mode)
         self.optimization_weight = float(self.optimization_weight)
         if not 0.0 <= self.optimization_weight <= 1.0:
             raise ValueError("optimization_weight must be between 0 and 1")
@@ -616,6 +627,7 @@ class ShotRecord:
             target_yield_g=self.target_yield_g,
             target_ratio=self.target_ratio,
             grinder_step_direction=self.grinder_step_direction,
+            grinder_adjustment_mode=self.grinder_adjustment_mode,
         )
 
     @property

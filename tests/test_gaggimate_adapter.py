@@ -25,6 +25,7 @@ from espresso_rl.domain.dreamer_control import (
 )
 from espresso_rl.domain.models import (
     FollowThroughState,
+    GrinderAdjustmentMode,
     Recommendation,
     RecommendationApplyStatus,
     RecommendationMode,
@@ -173,6 +174,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "profile_id": "lever",
                 "relative_grind_steps_from_reference": 42,
                 "microns_per_step": 12.5,
+                "grinder_adjustment_mode": "stepless",
                 "dose_in_g": 18,
                 "target_yield_g": 36,
             },
@@ -181,6 +183,7 @@ class GaggimateAdapterTests(unittest.TestCase):
 
         self.assertEqual(event.profile_id, "lever")
         self.assertEqual(event.current_recipe().relative_grind_steps_from_reference, 42)
+        self.assertEqual(event.current_recipe().grinder_adjustment_mode, GrinderAdjustmentMode.STEPLESS)
 
     def test_machine_state_payload_does_not_invent_current_recipe_from_defaults(self) -> None:
         client = GaggimateMQTTClient(
@@ -255,6 +258,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "bean_context_name": "Lavazza Super Crema",
                 "grinder_context_id": "grinder_1",
                 "grinder_calibration_mode": "absolute_display_calibrated",
+                "grinder_adjustment_mode": "stepless",
                 "microns_per_step": 12.5,
                 "step_direction": "higher_is_coarser",
                 "reference_label": "zero point",
@@ -302,6 +306,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.bean_context_name, "Lavazza Super Crema")
         self.assertEqual(event.grinder_context_id, "grinder_1")
         self.assertEqual(event.grinder_calibration_mode.value, "absolute_display_calibrated")
+        self.assertEqual(event.grinder_adjustment_mode, GrinderAdjustmentMode.STEPLESS)
         self.assertEqual(event.grinder_step_direction.value, "higher_is_coarser")
         self.assertEqual(event.grinder_reference_label, "zero point")
         self.assertEqual(event.relative_grind_steps_from_reference, 5)
@@ -710,10 +715,10 @@ class GaggimateAdapterTests(unittest.TestCase):
             machine_id="gaggimate:AA_BB",
             bean_context_id=None,
             grinder_context_id="grinder_1",
-            grind_delta_steps_from_current=1,
-            grind_delta_um_from_current=12.5,
-            projected_relative_step_from_reference=43,
-            projected_relative_grind_um_from_reference=537.5,
+            grind_delta_steps_from_current=0.5,
+            grind_delta_um_from_current=6.25,
+            projected_relative_step_from_reference=42.5,
+            projected_relative_grind_um_from_reference=531.25,
             next_dose_g=18.0,
             target_yield_g=36.0,
             target_ratio=2.0,
@@ -723,10 +728,11 @@ class GaggimateAdapterTests(unittest.TestCase):
             source_shot_id="shot_1",
             grinder_calibration_mode="absolute_display_calibrated",
             grinder_step_direction="higher_is_finer",
+            grinder_adjustment_mode=GrinderAdjustmentMode.STEPLESS,
             grinder_reference_label="zero point",
             current_absolute_step=42,
             absolute_reference_step=40,
-            projected_absolute_step=43,
+            projected_absolute_step=42.5,
         )
 
         client.publish_recommendation(rec)
@@ -739,12 +745,13 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(decoded["shot_id"], "shot_1")
         self.assertEqual(decoded["recommendation_id"], "rec_1")
         self.assertEqual(decoded["grinder_context_id"], "grinder_1")
-        self.assertEqual(decoded["grind_delta_steps_from_current"], 1)
-        self.assertEqual(decoded["projected_relative_step_from_reference"], 43)
+        self.assertEqual(decoded["grind_delta_steps_from_current"], 0.5)
+        self.assertEqual(decoded["grinder_adjustment_mode"], "stepless")
+        self.assertEqual(decoded["projected_relative_step_from_reference"], 42.5)
         self.assertEqual(decoded["grinder_calibration_mode"], "absolute_display_calibrated")
         self.assertEqual(decoded["current_absolute_step"], 42)
         self.assertEqual(decoded["absolute_reference_step"], 40)
-        self.assertEqual(decoded["projected_absolute_step"], 43)
+        self.assertEqual(decoded["projected_absolute_step"], 42.5)
 
     def test_publish_dreamer_live_control_target_update_uses_non_retained_command_topic(self) -> None:
         client = GaggimateMQTTClient(

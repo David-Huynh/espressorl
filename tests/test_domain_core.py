@@ -8,10 +8,12 @@ from espresso_rl.domain.events import OptimizerSettingsEvent, ShotFeedbackEvent,
 from espresso_rl.domain.follow_through import infer_follow_through
 from espresso_rl.domain.models import (
     FollowThroughState,
+    GrinderAdjustmentMode,
     Recipe,
     Recommendation,
     RecommendationDecision,
     RecommendationMode,
+    SafetyBounds,
     ShotRecord,
 )
 from espresso_rl.domain.profile import (
@@ -23,6 +25,7 @@ from espresso_rl.domain.profile import (
     resample_shot_metadata,
 )
 from espresso_rl.domain.reward import compute_reward
+from espresso_rl.domain.safety import clamp_candidate_recipe
 from espresso_rl.domain.staleness import check_recommendation_staleness
 
 
@@ -52,6 +55,36 @@ def event(**overrides) -> ShotProfileEvent:
 
 
 class DomainCoreTests(unittest.TestCase):
+    def test_candidate_clamp_uses_grinder_adjustment_resolution(self) -> None:
+        stepped = Recipe(42, 12.5, 18.0, 36.0)
+        stepped_candidate = clamp_candidate_recipe(
+            stepped,
+            candidate_relative_grind_steps_from_reference=42.4,
+            candidate_dose_g=18.24,
+            candidate_target_yield_g=36.2,
+            bounds=SafetyBounds(),
+        )
+        self.assertEqual(stepped_candidate.relative_grind_steps_from_reference, 42.0)
+        self.assertEqual(stepped_candidate.dose_g, 18.0)
+
+        stepless = Recipe(
+            42,
+            12.5,
+            18.0,
+            36.0,
+            grinder_adjustment_mode=GrinderAdjustmentMode.STEPLESS,
+        )
+        stepless_candidate = clamp_candidate_recipe(
+            stepless,
+            candidate_relative_grind_steps_from_reference=42.4,
+            candidate_dose_g=18.24,
+            candidate_target_yield_g=36.2,
+            bounds=SafetyBounds(),
+        )
+        self.assertEqual(stepless_candidate.relative_grind_steps_from_reference, 42.4)
+        self.assertEqual(stepless_candidate.dose_g, 18.2)
+        self.assertEqual(stepless_candidate.grinder_adjustment_mode, GrinderAdjustmentMode.STEPLESS)
+
     def test_optimizer_settings_event_normalizes_safe_modes(self) -> None:
         event = OptimizerSettingsEvent(
             install_id="install_1",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import Recipe, Recommendation, SafetyBounds
+from .models import GrinderAdjustmentMode, Recipe, Recommendation, SafetyBounds
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -37,12 +37,16 @@ def clamp_candidate_recipe(
     )
     target_yield_g = ratio * dose_g
     return Recipe(
-        relative_grind_steps_from_reference=round(relative_grind_steps_from_reference),
+        relative_grind_steps_from_reference=_round_grind_steps(
+            relative_grind_steps_from_reference,
+            current.grinder_adjustment_mode,
+        ),
         microns_per_step=current.microns_per_step,
-        dose_g=round(dose_g * 2.0) / 2.0,
+        dose_g=_round_dose_g(dose_g, current.grinder_adjustment_mode),
         target_yield_g=round(target_yield_g, 1),
         target_ratio=ratio,
         grinder_step_direction=current.grinder_step_direction,
+        grinder_adjustment_mode=current.grinder_adjustment_mode,
     )
 
 
@@ -64,3 +68,14 @@ def validate_recommendation(
     if not bounds.target_ratio_min <= recommendation.target_ratio <= bounds.target_ratio_max:
         raise ValueError("recommendation ratio outside global bounds")
 
+
+def _round_grind_steps(value: float, mode: GrinderAdjustmentMode) -> float:
+    if mode == GrinderAdjustmentMode.STEPLESS:
+        return round(value, 1)
+    return float(round(value))
+
+
+def _round_dose_g(value: float, mode: GrinderAdjustmentMode) -> float:
+    if mode == GrinderAdjustmentMode.STEPLESS:
+        return round(value, 1)
+    return round(value * 2.0) / 2.0

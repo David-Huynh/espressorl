@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .models import (
+    GrinderAdjustmentMode,
     GrinderCalibrationMode,
     GrinderStepDirection,
     MachineState,
@@ -138,6 +139,7 @@ class ShotProfileEvent:
     grinder_context_id: str | None = None
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
+    grinder_adjustment_mode: GrinderAdjustmentMode = GrinderAdjustmentMode.STEPPED
     grinder_reference_label: str = "reference"
     current_absolute_step: float | None = None
     absolute_reference_step: float | None = None
@@ -208,6 +210,11 @@ class ShotProfileEvent:
             self,
             "grinder_step_direction",
             GrinderStepDirection(self.grinder_step_direction),
+        )
+        object.__setattr__(
+            self,
+            "grinder_adjustment_mode",
+            GrinderAdjustmentMode(self.grinder_adjustment_mode),
         )
         object.__setattr__(
             self,
@@ -525,6 +532,7 @@ class MachineStateEvent:
     grinder_context_id: str | None = None
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
+    grinder_adjustment_mode: GrinderAdjustmentMode = GrinderAdjustmentMode.STEPPED
     grinder_reference_label: str = "reference"
     relative_grind_steps_from_reference: float | None = None
     microns_per_step: float | None = None
@@ -556,6 +564,11 @@ class MachineStateEvent:
             self,
             "grinder_step_direction",
             GrinderStepDirection(self.grinder_step_direction),
+        )
+        object.__setattr__(
+            self,
+            "grinder_adjustment_mode",
+            GrinderAdjustmentMode(self.grinder_adjustment_mode),
         )
         object.__setattr__(
             self,
@@ -600,6 +613,7 @@ class MachineStateEvent:
             dose_g=self.dose_in_g,
             target_yield_g=self.target_yield_g,
             grinder_step_direction=self.grinder_step_direction,
+            grinder_adjustment_mode=self.grinder_adjustment_mode,
         )
 
 

@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS shots (
     target_ratio DOUBLE PRECISION,
     shot_time_s DOUBLE PRECISION,
     recommendation_id TEXT,
-    recommended_grind_delta_steps_from_current INTEGER,
+    recommended_grind_delta_steps_from_current DOUBLE PRECISION,
     recommended_grind_delta_um_from_current DOUBLE PRECISION,
     recommended_projected_relative_step_from_reference DOUBLE PRECISION,
     recommended_dose_g DOUBLE PRECISION,
@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS shots (
     shot_end_state TEXT,
     grinder_calibration_mode TEXT NOT NULL DEFAULT 'relative_calibrated',
     grinder_step_direction TEXT NOT NULL DEFAULT 'higher_is_finer',
+    grinder_adjustment_mode TEXT NOT NULL DEFAULT 'stepped',
     grinder_reference_label TEXT NOT NULL DEFAULT 'reference',
     current_absolute_step DOUBLE PRECISION,
     absolute_reference_step DOUBLE PRECISION,
@@ -117,6 +118,10 @@ UPDATE shots
 SET feedback_recorded = TRUE
 WHERE feedback_recorded = FALSE AND human_rating IS NOT NULL;
 
+ALTER TABLE shots
+    ALTER COLUMN recommended_grind_delta_steps_from_current TYPE DOUBLE PRECISION
+    USING recommended_grind_delta_steps_from_current::DOUBLE PRECISION;
+
 CREATE TABLE IF NOT EXISTS recommendations (
     recommendation_id TEXT PRIMARY KEY,
     created_at BIGINT NOT NULL,
@@ -128,7 +133,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     grinder_context_id TEXT,
     profile_id TEXT,
     raw_profile_hash TEXT,
-    grind_delta_steps_from_current INTEGER NOT NULL,
+    grind_delta_steps_from_current DOUBLE PRECISION NOT NULL,
     grind_delta_um_from_current DOUBLE PRECISION NOT NULL,
     projected_relative_step_from_reference DOUBLE PRECISION NOT NULL,
     projected_relative_grind_um_from_reference DOUBLE PRECISION NOT NULL,
@@ -153,6 +158,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     apply_error TEXT,
     grinder_calibration_mode TEXT NOT NULL DEFAULT 'relative_calibrated',
     grinder_step_direction TEXT NOT NULL DEFAULT 'higher_is_finer',
+    grinder_adjustment_mode TEXT NOT NULL DEFAULT 'stepped',
     grinder_reference_label TEXT NOT NULL DEFAULT 'reference',
     current_absolute_step DOUBLE PRECISION,
     absolute_reference_step DOUBLE PRECISION,
@@ -170,6 +176,10 @@ ALTER TABLE recommendations
 
 ALTER TABLE recommendations
     ADD COLUMN IF NOT EXISTS raw_profile_hash TEXT;
+
+ALTER TABLE recommendations
+    ALTER COLUMN grind_delta_steps_from_current TYPE DOUBLE PRECISION
+    USING grind_delta_steps_from_current::DOUBLE PRECISION;
 
 CREATE INDEX IF NOT EXISTS idx_recommendations_context_grinder_time
     ON recommendations (install_id, machine_id, bean_context_id, grinder_context_id, created_at DESC);

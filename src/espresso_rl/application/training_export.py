@@ -359,7 +359,7 @@ def _recommendation_from_payload(
     if not has_recommendation:
         return None
 
-    grind_delta_steps = _integer_number(payload.get("recommended_grind_delta_steps_from_current"))
+    grind_delta_steps = _number(payload.get("recommended_grind_delta_steps_from_current"))
     if payload.get("recommended_grind_delta_steps_from_current") is not None and grind_delta_steps is None:
         return _INVALID_RECOMMENDATION
 
@@ -371,7 +371,7 @@ def _recommendation_from_payload(
     return _drop_none_values(
         {
             "recommendation_id": payload.get("recommendation_id"),
-            "grind_delta_steps_from_current": grind_delta_steps,
+            "grind_delta_steps_from_current": _rounded(grind_delta_steps, 6),
             "grind_delta_um_from_current": _rounded(payload.get("recommended_grind_delta_um_from_current"), 6),
             "projected_relative_step_from_reference": _rounded(projected_relative_step, 6),
             "projected_relative_grind_um_from_reference": _rounded(projected_relative_um, 6),
@@ -639,13 +639,6 @@ def _number(value: Any) -> float | None:
     if not math.isfinite(parsed):
         return None
     return parsed
-
-
-def _integer_number(value: Any) -> int | None:
-    parsed = _number(value)
-    if parsed is None or not parsed.is_integer():
-        return None
-    return int(parsed)
 
 
 def _rounded(value: Any, digits: int) -> float | int | None:

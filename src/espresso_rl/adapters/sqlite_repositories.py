@@ -72,7 +72,7 @@ class SQLiteStore:
                 target_ratio REAL,
                 shot_time_s REAL,
                 recommendation_id TEXT,
-                recommended_grind_delta_steps_from_current INTEGER,
+                recommended_grind_delta_steps_from_current REAL,
                 recommended_grind_delta_um_from_current REAL,
                 recommended_projected_relative_step_from_reference REAL,
                 recommended_dose_g REAL,
@@ -128,6 +128,7 @@ class SQLiteStore:
                 shot_end_state TEXT,
                 grinder_calibration_mode TEXT NOT NULL DEFAULT 'relative_calibrated',
                 grinder_step_direction TEXT NOT NULL DEFAULT 'higher_is_finer',
+                grinder_adjustment_mode TEXT NOT NULL DEFAULT 'stepped',
                 grinder_reference_label TEXT NOT NULL DEFAULT 'reference',
                 current_absolute_step REAL,
                 absolute_reference_step REAL,
@@ -149,7 +150,7 @@ class SQLiteStore:
                 grinder_context_id TEXT,
                 profile_id TEXT,
                 raw_profile_hash TEXT,
-                grind_delta_steps_from_current INTEGER NOT NULL,
+                grind_delta_steps_from_current REAL NOT NULL,
                 grind_delta_um_from_current REAL NOT NULL,
                 projected_relative_step_from_reference REAL NOT NULL,
                 projected_relative_grind_um_from_reference REAL NOT NULL,
@@ -174,6 +175,7 @@ class SQLiteStore:
                 apply_error TEXT,
                 grinder_calibration_mode TEXT NOT NULL DEFAULT 'relative_calibrated',
                 grinder_step_direction TEXT NOT NULL DEFAULT 'higher_is_finer',
+                grinder_adjustment_mode TEXT NOT NULL DEFAULT 'stepped',
                 grinder_reference_label TEXT NOT NULL DEFAULT 'reference',
                 current_absolute_step REAL,
                 absolute_reference_step REAL,
@@ -274,6 +276,7 @@ class SQLiteStore:
         self._ensure_column("recommendations", "raw_profile_hash", "TEXT")
         self._ensure_column("recommendations", "grinder_calibration_mode", "TEXT NOT NULL DEFAULT 'relative_calibrated'")
         self._ensure_column("recommendations", "grinder_step_direction", "TEXT NOT NULL DEFAULT 'higher_is_finer'")
+        self._ensure_column("recommendations", "grinder_adjustment_mode", "TEXT NOT NULL DEFAULT 'stepped'")
         self._ensure_column("recommendations", "grinder_reference_label", "TEXT NOT NULL DEFAULT 'reference'")
         self._ensure_column("recommendations", "current_absolute_step", "REAL")
         self._ensure_column("recommendations", "absolute_reference_step", "REAL")
@@ -282,6 +285,7 @@ class SQLiteStore:
         self._ensure_column("shots", "bean_context_name", "TEXT")
         self._ensure_column("shots", "grinder_calibration_mode", "TEXT NOT NULL DEFAULT 'relative_calibrated'")
         self._ensure_column("shots", "grinder_step_direction", "TEXT NOT NULL DEFAULT 'higher_is_finer'")
+        self._ensure_column("shots", "grinder_adjustment_mode", "TEXT NOT NULL DEFAULT 'stepped'")
         self._ensure_column("shots", "grinder_reference_label", "TEXT NOT NULL DEFAULT 'reference'")
         self._ensure_column("shots", "current_absolute_step", "REAL")
         self._ensure_column("shots", "absolute_reference_step", "REAL")
@@ -405,7 +409,7 @@ class SQLiteShotRepository:
                 beverage_flow_profile_blob, temperature_profile_blob, target_temperature_profile_blob,
                 pump_target_mode_profile_blob, fixed_cadence_sequence_json,
                 shot_end_state, grinder_calibration_mode,
-                grinder_step_direction, grinder_reference_label,
+                grinder_step_direction, grinder_adjustment_mode, grinder_reference_label,
                 current_absolute_step, absolute_reference_step,
                 created_at, updated_at
             ) VALUES (
@@ -437,7 +441,7 @@ class SQLiteShotRepository:
                 :beverage_flow_profile_blob, :temperature_profile_blob, :target_temperature_profile_blob,
                 :pump_target_mode_profile_blob, :fixed_cadence_sequence_json,
                 :shot_end_state, :grinder_calibration_mode,
-                :grinder_step_direction, :grinder_reference_label,
+                :grinder_step_direction, :grinder_adjustment_mode, :grinder_reference_label,
                 :current_absolute_step, :absolute_reference_step,
                 :created_at, :updated_at
             )
@@ -813,7 +817,7 @@ class SQLiteRecommendationRepository:
                 superseded_at, source_shot_id, apply_status,
                 apply_acknowledged_at, applied_fields_json, manual_fields_json,
                 apply_error, grinder_calibration_mode, grinder_step_direction,
-                grinder_reference_label, current_absolute_step,
+                grinder_adjustment_mode, grinder_reference_label, current_absolute_step,
                 absolute_reference_step, projected_absolute_step
             ) VALUES (
                 :recommendation_id, :created_at, :updated_at, :expires_at,
@@ -825,7 +829,7 @@ class SQLiteRecommendationRepository:
                 :superseded_at, :source_shot_id, :apply_status,
                 :apply_acknowledged_at, :applied_fields_json, :manual_fields_json,
                 :apply_error, :grinder_calibration_mode, :grinder_step_direction,
-                :grinder_reference_label, :current_absolute_step,
+                :grinder_adjustment_mode, :grinder_reference_label, :current_absolute_step,
                 :absolute_reference_step, :projected_absolute_step
             )
             """,
@@ -1451,6 +1455,7 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "shot_end_state": shot.shot_end_state,
         "grinder_calibration_mode": shot.grinder_calibration_mode.value,
         "grinder_step_direction": shot.grinder_step_direction.value,
+        "grinder_adjustment_mode": shot.grinder_adjustment_mode.value,
         "grinder_reference_label": shot.grinder_reference_label,
         "current_absolute_step": shot.current_absolute_step,
         "absolute_reference_step": shot.absolute_reference_step,
@@ -1542,6 +1547,7 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         shot_end_state=row["shot_end_state"],
         grinder_calibration_mode=row["grinder_calibration_mode"],
         grinder_step_direction=row["grinder_step_direction"],
+        grinder_adjustment_mode=row["grinder_adjustment_mode"],
         grinder_reference_label=row["grinder_reference_label"],
         current_absolute_step=row["current_absolute_step"],
         absolute_reference_step=row["absolute_reference_step"],
@@ -1638,6 +1644,7 @@ def _recommendation_to_row(recommendation: Recommendation) -> dict:
         "apply_error": recommendation.apply_error,
         "grinder_calibration_mode": recommendation.grinder_calibration_mode.value,
         "grinder_step_direction": recommendation.grinder_step_direction.value,
+        "grinder_adjustment_mode": recommendation.grinder_adjustment_mode.value,
         "grinder_reference_label": recommendation.grinder_reference_label,
         "current_absolute_step": recommendation.current_absolute_step,
         "absolute_reference_step": recommendation.absolute_reference_step,
@@ -1682,6 +1689,7 @@ def _row_to_recommendation(row: sqlite3.Row) -> Recommendation:
         apply_error=row["apply_error"],
         grinder_calibration_mode=row["grinder_calibration_mode"],
         grinder_step_direction=row["grinder_step_direction"],
+        grinder_adjustment_mode=row["grinder_adjustment_mode"],
         grinder_reference_label=row["grinder_reference_label"],
         current_absolute_step=row["current_absolute_step"],
         absolute_reference_step=row["absolute_reference_step"],

@@ -40,6 +40,7 @@ def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
         "raw_profile_available": shot.raw_profile_available,
         "raw_profile_hash": shot.raw_profile_hash,
         "grinder_calibration_mode": shot.grinder_calibration_mode.value,
+        "grinder_adjustment_mode": shot.grinder_adjustment_mode.value,
         "microns_per_step": shot.microns_per_step,
         "step_direction": shot.grinder_step_direction.value,
         "reference_label": shot.grinder_reference_label,
@@ -137,6 +138,7 @@ def recommendation_upload_payload(recommendation: Recommendation) -> dict[str, A
         "projected_relative_step_from_reference": recommendation.projected_relative_step_from_reference,
         "projected_relative_grind_um_from_reference": recommendation.projected_relative_grind_um_from_reference,
         "grinder_calibration_mode": recommendation.grinder_calibration_mode.value,
+        "grinder_adjustment_mode": recommendation.grinder_adjustment_mode.value,
         "microns_per_step": (
             abs(recommendation.grind_delta_um_from_current / recommendation.grind_delta_steps_from_current)
             if recommendation.grind_delta_steps_from_current

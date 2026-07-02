@@ -4,6 +4,7 @@ import math
 
 from espresso_rl.domain.models import (
     FollowThroughState,
+    GrinderAdjustmentMode,
     Recommendation,
     RecommendationDecision,
     RecommendationMode,
@@ -72,6 +73,7 @@ class ConservativeBOOptimizer:
                 confidence = min(0.65, confidence + 0.05)
             source_shot_id = shots[-1].shot_id
 
+        grind_delta_steps = recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference
         recommendation = Recommendation(
             recommendation_id=new_id("rec"),
             created_at=context.now,
@@ -81,8 +83,8 @@ class ConservativeBOOptimizer:
             machine_id=context.machine_id,
             bean_context_id=context.bean_context_id,
             grinder_context_id=context.grinder_context_id,
-            grind_delta_steps_from_current=round(recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference),
-            grind_delta_um_from_current=(recipe.relative_grind_steps_from_reference - current.relative_grind_steps_from_reference)
+            grind_delta_steps_from_current=grind_delta_steps,
+            grind_delta_um_from_current=grind_delta_steps
             * current.microns_per_step
             * current.grinder_direction_sign,
             projected_relative_step_from_reference=recipe.relative_grind_steps_from_reference,
@@ -96,6 +98,7 @@ class ConservativeBOOptimizer:
             status=RecommendationStatus.PENDING,
             source_shot_id=source_shot_id,
             grinder_step_direction=current.grinder_step_direction,
+            grinder_adjustment_mode=current.grinder_adjustment_mode,
         )
         validate_recommendation(current, recommendation, context.safety_bounds)
         return recommendation
@@ -166,7 +169,7 @@ class ConservativeBOOptimizer:
     ):
         current = context.current_recipe
         if len(shots) == 1 and not prior_points and not prior_signals:
-            grind_delta, yield_delta = self._single_point_probe()
+            grind_delta, yield_delta = self._single_point_probe(context)
             return clamp_candidate_recipe(
                 current=current,
                 candidate_relative_grind_steps_from_reference=current.relative_grind_steps_from_reference + grind_delta,
@@ -182,12 +185,13 @@ class ConservativeBOOptimizer:
         )
         center_dose = center.dose_in_g if center.dose_observed else current.dose_g
         center_yield = center.realized_yield_g if center.realized_yield_observed else current.target_yield_g
-        dose_offsets = [0.0] if dose_radius_g == 0 else [-dose_radius_g, 0.0, dose_radius_g]
-        yield_offsets = self._yield_offsets(radius_yield_g)
+        dose_offsets = self._dose_offsets(dose_radius_g, context)
+        grind_offsets = self._grind_offsets(radius_steps, context)
+        yield_offsets = self._yield_offsets(radius_yield_g, context)
 
         best_recipe = current
         best_score = -math.inf
-        for step_offset in range(-radius_steps, radius_steps + 1):
+        for step_offset in grind_offsets:
             for dose_offset in dose_offsets:
                 for yield_offset in yield_offsets:
                     candidate = clamp_candidate_recipe(
@@ -225,8 +229,10 @@ class ConservativeBOOptimizer:
             and shot.reward is not None
         ]
 
-    def _single_point_probe(self) -> tuple[int, float]:
-        return 1, 0.0
+    def _single_point_probe(self, context: OptimizationContext) -> tuple[float, float]:
+        if context.current_recipe.grinder_adjustment_mode == GrinderAdjustmentMode.STEPLESS:
+            return 0.5, 0.0
+        return 1.0, 0.0
 
     def _near_good_signal(self, shot: ShotRecord | None) -> bool:
         if shot is None:
@@ -248,12 +254,28 @@ class ConservativeBOOptimizer:
             strength = max(strength, point_strength)
         return strength
 
-    def _yield_offsets(self, radius_yield_g: float) -> list[float]:
+    def _grind_offsets(self, radius_steps: int, context: OptimizationContext) -> list[float]:
+        if context.current_recipe.grinder_adjustment_mode != GrinderAdjustmentMode.STEPLESS:
+            return [float(value) for value in range(-radius_steps, radius_steps + 1)]
+        spacing = 0.5
+        count = int(round(radius_steps / spacing))
+        return [round(index * spacing, 1) for index in range(-count, count + 1)]
+
+    def _dose_offsets(self, radius_dose_g: float, context: OptimizationContext) -> list[float]:
+        if radius_dose_g <= 0:
+            return [0.0]
+        if context.current_recipe.grinder_adjustment_mode != GrinderAdjustmentMode.STEPLESS:
+            return [-radius_dose_g, 0.0, radius_dose_g]
+        spacing = 0.1
+        count = int(round(radius_dose_g / spacing))
+        return [round(index * spacing, 1) for index in range(-count, count + 1)]
+
+    def _yield_offsets(self, radius_yield_g: float, context: OptimizationContext) -> list[float]:
         values: list[float] = []
-        step = 2.0
+        step = 0.5 if context.current_recipe.grinder_adjustment_mode == GrinderAdjustmentMode.STEPLESS else 2.0
         k = int(radius_yield_g / step)
         for i in range(-k, k + 1):
-            values.append(i * step)
+            values.append(round(i * step, 1))
         return values
 
     def _candidate_score(
