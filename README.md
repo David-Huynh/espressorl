@@ -538,7 +538,7 @@ metadata and are never expanded into fabricated live telemetry.
 episodes into deterministic tensors for offline training: observations,
 resolved controls plus observation masks, capability masks, constraints,
 static context, terminal features, rewards,
-continuations, and step padding masks. The batch includes feature-name metadata
+continuations, masked taste-outcome labels, and step padding masks. The batch includes feature-name metadata
 so external trainers can audit the numeric layout instead of relying on
 implicit column order. `elapsed_seconds` advances by 0.25 on every valid step,
 and `step_duration_seconds` is 0.25 for valid steps and zero for padding.
@@ -646,6 +646,11 @@ pressure/flow so an inactive stale target cannot cause a jump. Resulting
 targets are clamped to the control-spec safety envelope before the world model
 receives the dynamic target tensor. A
 taste-conditioned symlog/two-hot critic supplies lambda-return targets. The
+critic also owns terminal reward and taste-outcome heads: auto objectives use
+the scalar terminal reward, while custom objectives blend scalar reward with
+the predicted match for explicitly selected taste attributes. Taste tags only
+supervise masked attribute labels, so unmentioned attributes remain unknown
+rather than negative evidence. The
 preview stage now performs a bounded
 deterministic actor/critic training loop in latent imagination and records
 actor loss, critic loss, entropy, imagined return, and dynamic-control mask
@@ -708,9 +713,9 @@ bytes may be safe for shadow evaluation without being a release-approved active
 policy. `dreamer_v3_shadow` remains the default Dreamer-compatible mode while
 Bayesian Optimization serves recommendations.
 
-Checkpoint architecture v4 also authenticates the exact world-model,
-factorized pre-shot actor, taste-objective spec, and critic reconstruction
-configuration. The trainer records a deterministic
+Checkpoint architecture v5 also authenticates the exact world-model,
+factorized pre-shot actor, taste-objective spec, terminal reward/taste heads,
+and critic reconstruction configuration. The trainer records a deterministic
 inference-probe hash from the original modules, serializes the checkpoint,
 reloads it through the same strict runtime loader, and requires the reloaded
 modules to reproduce both that probe and the held-out validation inference

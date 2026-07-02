@@ -84,12 +84,16 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         self.assertEqual(len(first["actor_critic_train_curve"]), 3)
         self.assertIn("actor_loss", first["actor_critic_train_curve"][0])
         self.assertIn("critic_loss", first["actor_critic_train_curve"][0])
+        self.assertIn("terminal_reward_loss", first["actor_critic_train_curve"][0])
+        self.assertIn("taste_outcome_loss", first["actor_critic_train_curve"][0])
         self.assertIn("imagined_return_mean", first["actor_critic_train_curve"][0])
         evaluation = first["evaluation_report"]
         self.assertEqual(evaluation["format"], "espresso_rl_dreamer_v3_offline_evaluation_report_v2")
         self.assertFalse(evaluation["inference_ready"])
         self.assertIn("loss_total", evaluation["world_model_validation"])
         self.assertIn("rmse", evaluation["reward_prediction"])
+        self.assertIn("rmse", evaluation["terminal_reward_prediction"])
+        self.assertIn("taste_outcome_mae", evaluation["terminal_reward_prediction"])
         self.assertIn("rmse", evaluation["continuation_prediction"])
         self.assertIn("rmse", evaluation["critic_value"])
         self.assertIn("imagined_return_mean", evaluation["actor"])
@@ -142,6 +146,29 @@ class DreamerWorldModelSmokeTests(unittest.TestCase):
         evaluation = result["evaluation_report"]
         self.assertTrue(evaluation["gates"]["action_mask_ok"])
         self.assertEqual(evaluation["actor"]["unsupported_live_action_abs_max"], 0.0)
+
+    def test_training_rejects_missing_taste_outcome_tensors(self) -> None:
+        batch = smoke_batch(batch_size=2)
+        batch.pop("taste_outcomes")
+        config = WorldModelTrainPreviewConfig(
+            seed=19,
+            epochs=1,
+            batch_size=1,
+            learning_rate=0.001,
+            gradient_steps_per_epoch=1,
+            model=default_world_model_config("espresso_debug"),
+            validation_split=0.25,
+            early_stop_patience=1,
+            control_spec=DEFAULT_DREAMER_CONTROL_SPEC,
+        )
+
+        with self.assertRaisesRegex(FixedCadenceWorldModelTrainingError, "taste_outcomes"):
+            run_fixed_cadence_world_model_train_preview(
+                train_batch=batch,
+                validation_batch=smoke_batch(batch_size=1),
+                config=config,
+                dataset_split={"strategy": "test"},
+            )
 
     def test_release_candidate_training_reports_explicit_release_requirement(self) -> None:
         config = WorldModelReleaseCandidateConfig(
@@ -232,6 +259,8 @@ def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
         "pre_shot_action_mask": torch.ones((1, 9), dtype=torch.float32),
         "pre_shot_capability_mask": torch.ones((1, 9), dtype=torch.float32),
         "taste_objective": torch.tensor([[1.0] + [0.0] * 8], dtype=torch.float32),
+        "taste_outcomes": torch.tensor([[0.0, 1.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        "taste_outcome_mask": torch.tensor([[0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
         "decision_step_mask": torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
         "rewards": torch.tensor([[0.0, 0.0, 0.0, 0.8]], dtype=torch.float32),
         "continuations": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),

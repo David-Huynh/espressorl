@@ -15,6 +15,7 @@ from espresso_rl.dreamer.dataset import (
     DREAMER_RESOLVED_CONTROL_FEATURES,
     DREAMER_OBSERVATION_FEATURES,
     DREAMER_STATIC_CONTEXT_FEATURES,
+    DREAMER_TASTE_OUTCOME_FEATURES,
     DREAMER_TERMINAL_FEATURES,
     DreamerEpisodeDatasetError,
     build_dreamer_episode_batch,
@@ -327,6 +328,8 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(tuple(batch["control_action_mask"].shape), (2, 4, len(DREAMER_RESOLVED_CONTROL_FEATURES)))
         self.assertEqual(tuple(batch["decision_step_mask"].shape), (2, 4))
         self.assertEqual(tuple(batch["static_context"].shape), (2, len(DREAMER_STATIC_CONTEXT_FEATURES)))
+        self.assertEqual(tuple(batch["taste_outcomes"].shape), (2, len(DREAMER_TASTE_OUTCOME_FEATURES)))
+        self.assertEqual(tuple(batch["taste_outcome_mask"].shape), (2, len(DREAMER_TASTE_OUTCOME_FEATURES)))
         self.assertEqual(tuple(batch["context_static"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE, len(DREAMER_STATIC_CONTEXT_FEATURES)))
         self.assertEqual(tuple(batch["context_terminal"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE, len(DREAMER_TERMINAL_FEATURES)))
         self.assertEqual(tuple(batch["context_time"].shape), (2, DREAMER_CONTEXT_WINDOW_SIZE, 1))
@@ -341,6 +344,8 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(batch["feature_names"]["resolved_control_mask"], DREAMER_RESOLVED_CONTROL_FEATURES)
         self.assertEqual(batch["feature_names"]["control_action_mask"], DREAMER_RESOLVED_CONTROL_FEATURES)
         self.assertEqual(batch["feature_names"]["context_static"], DREAMER_STATIC_CONTEXT_FEATURES)
+        self.assertEqual(batch["feature_names"]["taste_outcomes"], DREAMER_TASTE_OUTCOME_FEATURES)
+        self.assertEqual(batch["feature_names"]["taste_outcome_mask"], DREAMER_TASTE_OUTCOME_FEATURES)
         self.assertEqual(batch["feature_names"]["context_terminal"], DREAMER_TERMINAL_FEATURES)
         self.assertEqual(
             batch["feature_names"]["context_trajectory_embedding"],
@@ -357,6 +362,9 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         initial_yield_index = DREAMER_STATIC_CONTEXT_FEATURES.index("initial_target_yield_g")
         direction_index = DREAMER_STATIC_CONTEXT_FEATURES.index("step_direction_sign")
         auto_index = DREAMER_STATIC_CONTEXT_FEATURES.index("taste_objective_auto")
+        sweetness_outcome_index = DREAMER_TASTE_OUTCOME_FEATURES.index("sweetness")
+        bitterness_outcome_index = DREAMER_TASTE_OUTCOME_FEATURES.index("bitterness")
+        roastiness_outcome_index = DREAMER_TASTE_OUTCOME_FEATURES.index("roastiness")
 
         self.assertEqual(batch["observations"][0, 0, pressure_index].item(), 1.0)
         self.assertAlmostEqual(batch["observations"][0, 2, weight_index].item(), 0.72, places=6)
@@ -369,6 +377,10 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(batch["static_context"][0, initial_yield_index].item(), 36.0)
         self.assertEqual(batch["static_context"][0, direction_index].item(), 1.0)
         self.assertEqual(batch["static_context"][0, auto_index].item(), 1.0)
+        self.assertAlmostEqual(batch["taste_outcomes"][0, sweetness_outcome_index].item(), 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(batch["taste_outcomes"][0, bitterness_outcome_index].item(), 1.0 / 3.0, places=6)
+        self.assertEqual(batch["taste_outcome_mask"][0, sweetness_outcome_index].item(), 1.0)
+        self.assertEqual(batch["taste_outcome_mask"][0, roastiness_outcome_index].item(), 0.0)
         self.assertAlmostEqual(batch["rewards"][0, 3].item(), 0.8, places=6)
         self.assertEqual(batch["continuations"][0, 2].item(), 1.0)
         self.assertEqual(batch["continuations"][0, 3].item(), 0.0)

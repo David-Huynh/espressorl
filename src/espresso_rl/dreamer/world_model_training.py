@@ -465,6 +465,8 @@ def _cpu_float_batch(batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         "step_mask",
         "static_context",
         "taste_objective",
+        "taste_outcomes",
+        "taste_outcome_mask",
     )
     converted: dict[str, torch.Tensor] = {}
     for key in required:
@@ -520,6 +522,10 @@ def _validate_batch_shapes(batch: dict[str, torch.Tensor]) -> None:
     taste_objective = batch["taste_objective"]
     if taste_objective.ndim != 2 or taste_objective.shape[0] != batch_size:
         raise FixedCadenceWorldModelTrainingError("world model training taste_objective shape is invalid")
+    for key in ("taste_outcomes", "taste_outcome_mask"):
+        tensor = batch[key]
+        if tensor.ndim != 2 or tensor.shape[0] != batch_size or tensor.shape[1] != taste_objective.shape[1] - 1:
+            raise FixedCadenceWorldModelTrainingError(f"world model training {key} shape is invalid")
     pre_shot_actions = batch["pre_shot_actions"]
     for key in (
         "pre_shot_action_indexes",
@@ -818,6 +824,17 @@ def _offline_evaluation_report(
     reward_error = (reward_prediction - batch["rewards"]) * step_mask
     reward_mae = reward_error.abs().sum() / valid_count
     reward_rmse = torch.sqrt((reward_error.square().sum() / valid_count).clamp_min(0.0))
+    terminal_mask = step_mask * (1.0 - batch["continuations"])
+    terminal_count = terminal_mask.sum().clamp_min(1.0)
+    terminal_reward_prediction = critic.terminal_reward(features, batch["taste_objective"])
+    terminal_reward_error = (terminal_reward_prediction - batch["rewards"]) * terminal_mask
+    terminal_reward_mae = terminal_reward_error.abs().sum() / terminal_count
+    terminal_reward_rmse = torch.sqrt((terminal_reward_error.square().sum() / terminal_count).clamp_min(0.0))
+    taste_prediction = critic.taste_outcomes(features)
+    taste_mask = batch["taste_outcome_mask"].unsqueeze(1).expand_as(taste_prediction) * terminal_mask.unsqueeze(-1)
+    taste_error = (taste_prediction - batch["taste_outcomes"].unsqueeze(1).expand_as(taste_prediction)) * taste_mask
+    taste_count = taste_mask.sum().clamp_min(1.0)
+    taste_mae = taste_error.abs().sum() / taste_count
     continuation_prediction = world_model.continuation_probability(features)
     continuation_error = (continuation_prediction - batch["continuations"]) * step_mask
     continuation_mae = continuation_error.abs().sum() / valid_count
@@ -859,6 +876,12 @@ def _offline_evaluation_report(
         "reward_prediction": {
             "mae": _rounded_scalar(reward_mae),
             "rmse": _rounded_scalar(reward_rmse),
+        },
+        "terminal_reward_prediction": {
+            "mae": _rounded_scalar(terminal_reward_mae),
+            "rmse": _rounded_scalar(terminal_reward_rmse),
+            "taste_outcome_mae": _rounded_scalar(taste_mae),
+            "taste_target_count": _rounded_scalar(taste_mask.sum()),
         },
         "continuation_prediction": {
             "mae": _rounded_scalar(continuation_mae),
@@ -920,19 +943,35 @@ def _train_critic_step(
             actor=actor,
             critic=critic,
         )
+        observed = world_model.observe(
+            batch,
+            context_state=_context_state(context_encoder, batch),
+            sample=False,
+        )
     optimizer.zero_grad()
     step_mask = torch.ones_like(rollout["lambda_returns"])
-    critic_loss = critic.loss(
+    value_loss = critic.loss(
         rollout["imagined_features"].detach(),
         rollout["taste_objective"].detach(),
         rollout["lambda_returns"].detach(),
         step_mask,
     )
+    terminal_losses = critic.terminal_reward_loss(
+        observed["features"].detach(),
+        batch["rewards"].detach(),
+        (batch["step_mask"] * (1.0 - batch["continuations"])).detach(),
+        batch["taste_outcomes"].detach(),
+        batch["taste_outcome_mask"].detach(),
+    )
+    critic_loss = value_loss + terminal_losses["loss_terminal_total"]
     critic_loss.backward()
     grad_norm = nn.utils.clip_grad_norm_(critic.parameters(), gradient_clip_norm)
     optimizer.step()
     return {
         "critic_loss": _rounded_scalar(critic_loss),
+        "critic_value_loss": _rounded_scalar(value_loss),
+        "terminal_reward_loss": _rounded_scalar(terminal_losses["loss_terminal_reward"]),
+        "taste_outcome_loss": _rounded_scalar(terminal_losses["loss_taste_outcome"]),
         "critic_grad_norm": _rounded_scalar(grad_norm),
     }
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
 from espresso_rl.adapters.sqlite_repositories import SQLiteRecommendationRepository, SQLiteShotRepository, SQLiteStore
+from espresso_rl.application.dreamer_live_acknowledgements import DreamerLiveControlAcknowledgementService
 from espresso_rl.application.dreamer_live_control import DreamerLiveControlApplication
 from espresso_rl.application.dreamer_live_telemetry import DreamerLiveTelemetryApplication
 from espresso_rl.application.services import EspressoRLService
@@ -32,6 +33,37 @@ class RecordingPublisher:
 
     def publish_status(self, *args, **kwargs) -> None:
         raise AssertionError("status publishing is outside this test")
+
+
+class MQTTBackedRuntimePublisher:
+    def __init__(
+        self,
+        *,
+        client: GaggimateMQTTClient,
+        acknowledgements: DreamerLiveControlAcknowledgementService,
+    ) -> None:
+        self.client = client
+        self.acknowledgements = acknowledgements
+        self.publications = []
+
+    def publish_recommendation(self, recommendation) -> None:
+        raise AssertionError("recommendation publishing is outside this test")
+
+    def publish_dreamer_live_control(self, publication) -> None:
+        self.publications.append(publication)
+        self.acknowledgements.record_publication(publication)
+        self.client.publish_dreamer_live_control(publication)
+
+    def publish_status(self, *args, **kwargs) -> None:
+        raise AssertionError("status publishing is outside this test")
+
+
+class FakeMQTT:
+    def __init__(self) -> None:
+        self.published = []
+
+    def publish(self, topic, payload=None, qos=0, retain=False):
+        self.published.append((topic, payload, qos, retain))
 
 
 class RecordingInference:
@@ -83,6 +115,70 @@ class StaticContextProvider:
 
 
 class DreamerLiveIntegrationTests(unittest.TestCase):
+    def test_mqtt_closed_loop_publishes_live_targets_and_accepts_firmware_acks(self) -> None:
+        fake_mqtt = FakeMQTT()
+        acknowledgements = DreamerLiveControlAcknowledgementService(clock_ms=lambda: 10_000)
+        inference = RecordingInference()
+        results = []
+        with tempfile.TemporaryDirectory() as tmp:
+            client = GaggimateMQTTClient(
+                config=Config(mqtt_host="localhost", data_dir=Path(tmp), install_id="install_1"),
+                on_shot=lambda event: None,
+                on_feedback=lambda event: None,
+                on_correction=lambda event: None,
+                on_upload_maintenance=lambda event: None,
+                on_decision=lambda event: None,
+                on_apply=lambda event: None,
+                on_machine_state=lambda event: None,
+                on_dreamer_live_ack=acknowledgements.record_acknowledgement,
+            )
+            client._client = fake_mqtt  # type: ignore[assignment]
+            runtime_publisher = MQTTBackedRuntimePublisher(
+                client=client,
+                acknowledgements=acknowledgements,
+            )
+            app = DreamerLiveTelemetryApplication(
+                inference=inference,
+                live_control=DreamerLiveControlApplication(runtime_publisher),
+                context_provider=StaticContextProvider(),
+                enabled=True,
+            )
+            client._on_dreamer_live_telemetry = lambda event: results.append(app.handle_telemetry(event))
+
+            _dispatch_telemetry(client, _telemetry_payload(step_index=0, profile_id="dreamer_auto"))
+            _dispatch_firmware_ack(client, json.loads(fake_mqtt.published[-1][1]))
+            _dispatch_telemetry(client, _telemetry_payload(step_index=1, profile_id="dreamer_auto"))
+            _dispatch_telemetry(client, _telemetry_payload(step_index=4, profile_id="dreamer_auto"))
+            _dispatch_firmware_ack(client, json.loads(fake_mqtt.published[-1][1]))
+
+        self.assertEqual(
+            [result.outcome for result in results],
+            ["decision_published", "observation_accepted", "decision_published"],
+        )
+        self.assertEqual(inference.started, [("gaggimate:AA_BB|shot_1|dreamer_auto", "dreamer_auto")])
+        self.assertEqual(inference.observed, [0, 1, 4])
+        self.assertEqual([publication.sequence for publication in runtime_publisher.publications], [1, 2])
+        self.assertEqual([publication.step_index for publication in runtime_publisher.publications], [0, 4])
+        published_topics = [topic for topic, _payload, _qos, retain in fake_mqtt.published if not retain]
+        self.assertEqual(
+            published_topics,
+            [
+                "gaggimate/AA_BB/rl/dreamer/live_target",
+                "gaggimate/AA_BB/rl/dreamer/live_target",
+            ],
+        )
+        first_payload = json.loads(fake_mqtt.published[0][1])
+        self.assertEqual(first_payload["event_type"], "dreamer_live_target_update")
+        self.assertEqual(first_payload["publication_id"], "gaggimate:AA_BB:1")
+        self.assertEqual(first_payload["ack_scope"], "esp32_received")
+        self.assertEqual(first_payload["target_update"], {"pressure_target_bar": 8.0})
+        self.assertFalse(first_payload["fail_safe_required"])
+        summary = acknowledgements.status_summary("gaggimate:AA_BB")
+        self.assertEqual(summary["health"], "healthy")
+        self.assertEqual(summary["accepted_count"], 2)
+        self.assertEqual(summary["pending_count"], 0)
+        self.assertNotIn("publication_id", summary)
+
     def test_gaggimate_live_telemetry_reaches_control_only_for_automatic_profile(self) -> None:
         publisher = RecordingPublisher()
         inference = RecordingInference()
@@ -198,6 +294,32 @@ def _dispatch_telemetry(client: GaggimateMQTTClient, payload: dict) -> None:
         (),
         {
             "topic": "gaggimate/AA_BB/rl/dreamer/telemetry",
+            "payload": json.dumps(payload).encode(),
+        },
+    )()
+    client._on_message(client._client, None, message)
+
+
+def _dispatch_firmware_ack(client: GaggimateMQTTClient, command_payload: dict) -> None:
+    payload = {
+        "event_type": "dreamer_live_ack",
+        "schema_version": 1,
+        "machine_id": command_payload["machine_id"],
+        "publication_id": command_payload["publication_id"],
+        "sequence": command_payload["sequence"],
+        "step_index": command_payload["step_index"],
+        "ack_scope": "esp32_received",
+        "accepted": True,
+        "status": "accepted",
+        "reason": "accepted",
+        "source": "gaggimate_mqtt",
+        "timestamp": 20,
+    }
+    message = type(
+        "Message",
+        (),
+        {
+            "topic": "gaggimate/AA_BB/rl/dreamer/ack",
             "payload": json.dumps(payload).encode(),
         },
     )()

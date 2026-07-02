@@ -264,6 +264,63 @@ class DreamerImaginationTests(unittest.TestCase):
 
         self.assertFalse(torch.equal(auto, custom))
 
+    def test_terminal_reward_uses_taste_match_only_for_custom_objectives(self) -> None:
+        critic = DreamerV3ImaginationCritic(
+            feature_dim=4,
+            taste_objective_dim=9,
+            config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
+        )
+        with torch.no_grad():
+            for parameter in critic.terminal_reward_net.parameters():
+                parameter.zero_()
+            for parameter in critic.taste_outcome_net.parameters():
+                parameter.zero_()
+            critic.taste_outcome_net[-1].bias[1] = 8.0
+
+        features = torch.ones((1, 4), dtype=torch.float32)
+        auto = critic.terminal_reward(features, _auto_taste(1))
+        custom = critic.terminal_reward(
+            features,
+            torch.tensor([[0.0, 0.0, 1.0] + [0.0] * 6], dtype=torch.float32),
+        )
+
+        self.assertTrue(torch.allclose(auto, critic.base_terminal_reward(features)))
+        self.assertGreater(custom.item(), auto.item() + 0.2)
+
+    def test_terminal_reward_loss_masks_unobserved_taste_attributes(self) -> None:
+        critic = DreamerV3ImaginationCritic(
+            feature_dim=4,
+            taste_objective_dim=9,
+            config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
+        )
+        features = torch.ones((1, 2, 4), dtype=torch.float32)
+        rewards = torch.tensor([[0.0, 0.8]], dtype=torch.float32)
+        terminal_mask = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
+        taste_targets = torch.tensor([[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+        taste_mask = torch.tensor([[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+
+        losses = critic.terminal_reward_loss(features, rewards, terminal_mask, taste_targets, taste_mask)
+        zero_taste_losses = critic.terminal_reward_loss(
+            features,
+            rewards,
+            terminal_mask,
+            taste_targets,
+            torch.zeros_like(taste_mask),
+        )
+
+        self.assertGreater(losses["loss_terminal_reward"].item(), 0.0)
+        self.assertGreater(losses["loss_taste_outcome"].item(), 0.0)
+        self.assertEqual(zero_taste_losses["loss_taste_outcome"].item(), 0.0)
+
+        with self.assertRaisesRegex(ValueError, "taste targets"):
+            critic.terminal_reward_loss(
+                features,
+                rewards,
+                terminal_mask,
+                torch.zeros((1, 7), dtype=torch.float32),
+                taste_mask,
+            )
+
     def test_selected_pre_shot_plan_is_held_and_changes_imagined_trajectory(self) -> None:
         batch = _dynamic_control_batch(batch_size=1)
         model = _world_model_for_batch(batch)

@@ -354,8 +354,8 @@ def checkpoint_bundle(
     taste_objective_spec_sha256 = sha256_json(DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict())
     live_action_spec_sha256 = sha256_json(DEFAULT_DREAMER_LIVE_ACTION_SPEC.to_dict())
     architecture = {
-        "format": "espresso_rl_dreamer_v3_checkpoint_architecture_v4",
-        "schema_version": 4,
+        "format": "espresso_rl_dreamer_v3_checkpoint_architecture_v5",
+        "schema_version": 5,
         "observation_dim": 5,
         "behavior_dim": 56,
         "static_dim": 18,

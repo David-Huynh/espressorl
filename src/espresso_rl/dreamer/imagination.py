@@ -352,7 +352,10 @@ class DreamerV3ImaginationCritic(nn.Module):
         self.taste_objective_spec = taste_objective_spec
         if taste_objective_dim != 1 + len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES):
             raise ValueError("Dreamer critic taste-objective dimension does not match its spec")
+        self.taste_attribute_count = len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES)
         self.net = _mlp(feature_dim + taste_objective_dim, config.critic_hidden_dim, config.value_bins)
+        self.terminal_reward_net = _mlp(feature_dim, config.critic_hidden_dim, config.value_bins)
+        self.taste_outcome_net = _mlp(feature_dim, config.critic_hidden_dim, self.taste_attribute_count)
         self.register_buffer("value_bins", symexp_twohot_bins(config.value_bins), persistent=False)
 
     def forward(self, features: torch.Tensor, taste_objective: torch.Tensor) -> torch.Tensor:
@@ -360,6 +363,30 @@ class DreamerV3ImaginationCritic(nn.Module):
 
     def value(self, features: torch.Tensor, taste_objective: torch.Tensor) -> torch.Tensor:
         return twohot_prediction(self(features, taste_objective), self.value_bins)
+
+    def terminal_reward_logits(self, features: torch.Tensor) -> torch.Tensor:
+        return self.terminal_reward_net(features)
+
+    def base_terminal_reward(self, features: torch.Tensor) -> torch.Tensor:
+        return twohot_prediction(self.terminal_reward_logits(features), self.value_bins)
+
+    def taste_outcomes(self, features: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(self.taste_outcome_net(features))
+
+    def terminal_reward(self, features: torch.Tensor, taste_objective: torch.Tensor) -> torch.Tensor:
+        base_reward = self.base_terminal_reward(features)
+        taste_objective = _expand_taste_objective(features, taste_objective, self.taste_objective_dim)
+        predicted_outcomes = self.taste_outcomes(features)
+        target = taste_objective[..., 1:]
+        selected = target > 0.0
+        selected_count = selected.to(dtype=features.dtype).sum(dim=-1).clamp_min(1.0)
+        taste_match = (
+            (1.0 - torch.abs(predicted_outcomes - target)).clamp(0.0, 1.0)
+            * selected.to(dtype=features.dtype)
+        ).sum(dim=-1) / selected_count
+        custom = (taste_objective[..., 0] < 0.5) & selected.any(dim=-1)
+        custom_reward = (0.65 * base_reward.clamp(0.0, 1.0) + 0.35 * taste_match).clamp(0.0, 1.0)
+        return torch.where(custom, custom_reward, base_reward)
 
     def loss(
         self,
@@ -370,6 +397,30 @@ class DreamerV3ImaginationCritic(nn.Module):
     ) -> torch.Tensor:
         losses = twohot_cross_entropy(self(features, taste_objective), target_returns, self.value_bins)
         return (losses * step_mask).sum() / step_mask.sum().clamp_min(1.0)
+
+    def terminal_reward_loss(
+        self,
+        features: torch.Tensor,
+        target_rewards: torch.Tensor,
+        terminal_mask: torch.Tensor,
+        taste_targets: torch.Tensor,
+        taste_target_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        if target_rewards.shape != features.shape[:-1] or terminal_mask.shape != target_rewards.shape:
+            raise ValueError("Dreamer terminal reward targets have incompatible shapes")
+        taste_targets = _expand_taste_targets(features, taste_targets, self.taste_attribute_count)
+        taste_target_mask = _expand_taste_targets(features, taste_target_mask, self.taste_attribute_count)
+        terminal_mask = (terminal_mask > 0.5).to(dtype=features.dtype)
+        reward_losses = twohot_cross_entropy(self.terminal_reward_logits(features), target_rewards, self.value_bins)
+        reward_loss = (reward_losses * terminal_mask).sum() / terminal_mask.sum().clamp_min(1.0)
+        taste_mask = (taste_target_mask > 0.5).to(dtype=features.dtype) * terminal_mask.unsqueeze(-1)
+        taste_error = (self.taste_outcomes(features) - taste_targets).square() * taste_mask
+        taste_loss = taste_error.sum() / taste_mask.sum().clamp_min(1.0)
+        return {
+            "loss_terminal_reward": reward_loss,
+            "loss_taste_outcome": taste_loss,
+            "loss_terminal_total": reward_loss + taste_loss,
+        }
 
 
 def masked_pre_shot_behavior_loss(
@@ -591,7 +642,7 @@ def dreamer_v3_imagination_rollout(
         deter = imagined["deter"]
         stoch = imagined["stoch"]
         features = imagined["features"]
-        rewards.append(world_model.reward_prediction(features))
+        rewards.append(critic.terminal_reward(features, taste_objective))
         continuations.append(world_model.continuation_probability(features))
         values.append(critic.value(features, taste_objective))
         value_logits.append(critic(features, taste_objective))
@@ -835,6 +886,20 @@ def _condition_on_taste(
     taste_objective: torch.Tensor,
     taste_objective_dim: int,
 ) -> torch.Tensor:
+    return torch.cat(
+        [
+            features,
+            _expand_taste_objective(features, taste_objective, taste_objective_dim).to(dtype=features.dtype),
+        ],
+        dim=-1,
+    )
+
+
+def _expand_taste_objective(
+    features: torch.Tensor,
+    taste_objective: torch.Tensor,
+    taste_objective_dim: int,
+) -> torch.Tensor:
     if taste_objective.ndim == 2 and features.ndim > 2:
         taste_objective = taste_objective.unsqueeze(1).expand(
             *features.shape[:-1],
@@ -842,7 +907,24 @@ def _condition_on_taste(
         )
     if taste_objective.shape != (*features.shape[:-1], taste_objective_dim):
         raise ValueError("Dreamer critic taste-objective shape is incompatible with features")
-    return torch.cat([features, taste_objective.to(dtype=features.dtype)], dim=-1)
+    return taste_objective
+
+
+def _expand_taste_targets(
+    features: torch.Tensor,
+    targets: torch.Tensor,
+    taste_attribute_count: int,
+) -> torch.Tensor:
+    if targets.ndim < 2 or targets.shape[-1] != taste_attribute_count:
+        raise ValueError("Dreamer terminal taste targets have incompatible shapes")
+    if targets.ndim == 2 and features.ndim > 2:
+        targets = targets.unsqueeze(1).expand(
+            *features.shape[:-1],
+            taste_attribute_count,
+        )
+    if targets.shape != (*features.shape[:-1], taste_attribute_count):
+        raise ValueError("Dreamer terminal taste targets have incompatible shapes")
+    return targets.to(dtype=features.dtype)
 
 
 def _mlp(input_dim: int, hidden_dim: int, output_dim: int) -> nn.Sequential:
