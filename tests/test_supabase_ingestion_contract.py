@@ -153,7 +153,16 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("'action_observed'", source)
         self.assertIn("optionalActionObserved(payload, errors)", source)
         self.assertIn("action_observed.grind cannot be true without a grind measurement", source)
+        self.assertIn("'grinder_adjustment_mode'", source)
+        self.assertGreaterEqual(
+            source.count("optionalEnum(payload, 'grinder_adjustment_mode', ['stepped', 'stepless']"),
+            2,
+        )
+        self.assertIn("optionalString(payload, 'profile_id', 120", source)
+        self.assertIn("optionalSha256(payload, 'raw_profile_hash'", source)
         self.assertIn("optionalNumberRange(payload, 'optimization_weight', 0, 1", source)
+        self.assertIn("[0, 20, 'pressure']", source)
+        self.assertIn("[0, 15, 'target_pressure']", source)
         self.assertIn("[-1, 120, 'weight']", source)
         self.assertIn("profile_resampled must have 5 channels", source)
         self.assertIn("profile_resampled ${label} channel must have exactly 100 samples", source)

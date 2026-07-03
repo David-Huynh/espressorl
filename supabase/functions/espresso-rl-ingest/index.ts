@@ -16,8 +16,9 @@ type JsonRecord = Record<string, unknown>;
 const allowedShotFields = new Set([
   'event_type', 'schema_version', 'shot_id', 'timestamp', 'install_id', 'machine_id',
   'machine_adapter', 'bean_context_id', 'grinder_context_id', 'profile_resampled',
-  'raw_profile_available', 'raw_profile_hash', 'grinder_calibration_mode', 'microns_per_step',
-  'step_direction', 'reference_label', 'relative_grind_steps_from_reference',
+  'raw_profile_available', 'raw_profile_hash', 'grinder_calibration_mode',
+  'grinder_adjustment_mode', 'microns_per_step', 'step_direction', 'reference_label',
+  'relative_grind_steps_from_reference',
   'relative_grind_um_from_reference', 'current_absolute_step', 'absolute_reference_step',
   'action_observed',
   'dose_in_g', 'beverage_out_g', 'brew_ratio', 'target_yield_g', 'target_ratio',
@@ -42,9 +43,11 @@ const allowedShotFields = new Set([
 const allowedRecommendationFields = new Set([
   'event_type', 'schema_version', 'recommendation_id', 'created_at', 'updated_at',
   'expires_at', 'install_id', 'machine_id', 'bean_context_id', 'grinder_context_id',
+  'profile_id', 'raw_profile_hash',
   'grind_delta_steps_from_current', 'grind_delta_um_from_current',
   'projected_relative_step_from_reference', 'projected_relative_grind_um_from_reference',
-  'grinder_calibration_mode', 'microns_per_step', 'step_direction', 'reference_label',
+  'grinder_calibration_mode', 'grinder_adjustment_mode', 'microns_per_step',
+  'step_direction', 'reference_label',
   'current_absolute_step', 'absolute_reference_step', 'projected_absolute_step',
   'next_dose_g', 'target_yield_g', 'target_ratio', 'mode', 'confidence', 'reason',
   'status', 'shown_count', 'accepted_at', 'ignored_at', 'edited_at', 'used_at',
@@ -259,6 +262,7 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalBoolean(payload, 'raw_profile_available', errors);
   optionalSha256(payload, 'raw_profile_hash', errors);
   optionalEnum(payload, 'grinder_calibration_mode', ['uncalibrated', 'relative_calibrated', 'absolute_display_calibrated'], errors);
+  optionalEnum(payload, 'grinder_adjustment_mode', ['stepped', 'stepless'], errors);
   optionalEnum(payload, 'step_direction', ['higher_is_finer', 'higher_is_coarser'], errors);
   optionalString(payload, 'reference_label', 80, errors);
   optionalNumberRange(payload, 'microns_per_step', 0.1, 100, errors);
@@ -345,6 +349,8 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   requireIdentifier(payload, 'machine_id', errors);
   optionalIdentifier(payload, 'bean_context_id', errors);
   optionalString(payload, 'grinder_context_id', 120, errors);
+  optionalString(payload, 'profile_id', 120, errors);
+  optionalSha256(payload, 'raw_profile_hash', errors);
   optionalNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalNumberRange(payload, 'updated_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalNumberRange(payload, 'expires_at', 0, Number.MAX_SAFE_INTEGER, errors);
@@ -353,6 +359,7 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   optionalNumberRange(payload, 'projected_relative_step_from_reference', -10_000, 10_000, errors);
   optionalNumberRange(payload, 'projected_relative_grind_um_from_reference', -1_000_000, 1_000_000, errors);
   optionalEnum(payload, 'grinder_calibration_mode', ['uncalibrated', 'relative_calibrated', 'absolute_display_calibrated'], errors);
+  optionalEnum(payload, 'grinder_adjustment_mode', ['stepped', 'stepless'], errors);
   optionalEnum(payload, 'step_direction', ['higher_is_finer', 'higher_is_coarser'], errors);
   optionalString(payload, 'reference_label', 80, errors);
   optionalNumberRange(payload, 'microns_per_step', 0.1, 100, errors);
@@ -573,7 +580,7 @@ function optionalActionObserved(payload: JsonRecord, errors: string[]) {
 
 function validateProfileResampled(profile: unknown[], errors: string[]) {
   const ranges: Array<[number, number, string]> = [
-    [0, 15, 'pressure'],
+    [0, 20, 'pressure'],
     [0, 15, 'target_pressure'],
     [0, 20, 'pump_flow'],
     [0, 20, 'target_flow'],
