@@ -5,19 +5,12 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-DREAMER_TASTE_OBJECTIVE_SPEC_FORMAT = "espresso_rl_dreamer_taste_objective_spec_v1"
-DREAMER_TASTE_OBJECTIVE_SPEC_SCHEMA_VERSION = 1
+from espresso_rl.domain.taste import USER_TASTE_TAGS, normalize_taste_tag
+
+DREAMER_TASTE_OBJECTIVE_SPEC_FORMAT = "espresso_rl_dreamer_taste_objective_spec_v2"
+DREAMER_TASTE_OBJECTIVE_SPEC_SCHEMA_VERSION = 2
 DREAMER_TASTE_OBJECTIVE_MODES = ("auto", "custom")
-DREAMER_TASTE_OBJECTIVE_ATTRIBUTES = (
-    "acidity",
-    "sweetness",
-    "clarity",
-    "body",
-    "bitterness",
-    "chocolatiness",
-    "fruitiness",
-    "roastiness",
-)
+DREAMER_TASTE_OBJECTIVE_ATTRIBUTES = USER_TASTE_TAGS
 DREAMER_TASTE_OBJECTIVE_LEVELS = ("unspecified", "low", "medium", "high")
 DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING = {
     "unspecified": 0.0,
@@ -100,21 +93,20 @@ DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC_SHA256 = dreamer_taste_objective_spec_sha25
 def validate_dreamer_taste_objective(value: object, *, path: str = "taste_objective") -> list[str]:
     if not isinstance(value, dict):
         return [f"{path} must be an object"]
-    allowed = {"mode", *DREAMER_TASTE_OBJECTIVE_ATTRIBUTES}
-    unknown = sorted(str(key) for key in value if key not in allowed)
+    normalized, unknown = _canonical_objective_fields(value)
     errors = [f"{path} contains unsupported fields: {', '.join(unknown[:5])}"] if unknown else []
-    if value.get("mode") not in DREAMER_TASTE_OBJECTIVE_MODES:
+    if normalized.get("mode") not in DREAMER_TASTE_OBJECTIVE_MODES:
         errors.append(f"{path}.mode is invalid")
     selected_count = 0
     for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES:
-        level = value.get(attribute)
+        level = normalized.get(attribute)
         if level is not None and level not in DREAMER_TASTE_OBJECTIVE_LEVELS:
             errors.append(f"{path}.{attribute} is invalid")
         elif level in {"low", "medium", "high"}:
             selected_count += 1
-    if value.get("mode") == "auto" and selected_count:
+    if normalized.get("mode") == "auto" and selected_count:
         errors.append(f"{path} auto mode must not include custom targets")
-    if value.get("mode") == "custom" and selected_count == 0:
+    if normalized.get("mode") == "custom" and selected_count == 0:
         errors.append(f"{path} custom mode requires at least one target")
     return errors
 
@@ -124,14 +116,15 @@ def normalize_dreamer_taste_objective(value: object) -> dict[str, str]:
     if errors:
         raise ValueError("; ".join(errors[:10]))
     assert isinstance(value, dict)
-    if value["mode"] == "auto":
+    objective, _ = _canonical_objective_fields(value)
+    if objective["mode"] == "auto":
         return {"mode": "auto"}
     return {
         "mode": "custom",
         **{
-            attribute: str(value[attribute])
+            attribute: str(objective[attribute])
             for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES
-            if value.get(attribute) in {"low", "medium", "high"}
+            if objective.get(attribute) in {"low", "medium", "high"}
         },
     }
 
@@ -145,3 +138,18 @@ def encode_dreamer_taste_objective(value: object) -> tuple[float, ...]:
             for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES
         ),
     )
+
+
+def _canonical_objective_fields(value: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    normalized: dict[str, Any] = {"mode": value.get("mode")}
+    unknown: list[str] = []
+    for key, level in value.items():
+        if key == "mode":
+            continue
+        tag = normalize_taste_tag(str(key), allow_system=False)
+        if tag is None:
+            unknown.append(str(key))
+            continue
+        if tag not in normalized or normalized[tag] in (None, "unspecified"):
+            normalized[tag] = level
+    return normalized, sorted(unknown)

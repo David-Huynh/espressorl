@@ -213,7 +213,7 @@ class WarmStartPriorTests(unittest.TestCase):
                     timestamp=1,
                     reward=0.25,
                     rating=2,
-                    taste_tags=["sour", "too_fast"],
+                    taste_tags=["sour"],
                     shot_time_s=18.0,
                 )
             ],
@@ -269,7 +269,7 @@ class WarmStartPriorTests(unittest.TestCase):
                     timestamp=1,
                     reward=0.8,
                     rating=4,
-                    taste_tags=["balanced"],
+                    taste_tags=["sweet"],
                     shot_time_s=30.0,
                 )
             ],
@@ -432,7 +432,7 @@ class WarmStartPriorTests(unittest.TestCase):
             current_recipe=current,
             shots=[
                 shot_record("shot_1", timestamp=1, reward=0.5, rating=3, taste_tags=["sour"]),
-                shot_record("shot_2", timestamp=2, reward=0.5, rating=3, taste_tags=["thin"]),
+                shot_record("shot_2", timestamp=2, reward=0.5, rating=3, taste_tags=["green_vegetative"]),
             ],
             safety_bounds=SafetyBounds(),
             now=100,
@@ -637,7 +637,7 @@ class WarmStartPriorTests(unittest.TestCase):
                     timestamp=1,
                     reward=None,
                     rating=None,
-                    taste_tags=["too_fast"],
+                    taste_tags=["sour"],
                     shot_time_s=18.0,
                 )
             ],

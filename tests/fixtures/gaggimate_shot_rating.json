@@ -5,7 +5,7 @@
   "machine_id": "gaggimate:AA_BB",
   "timestamp": 1700000010,
   "rating": 4,
-  "taste_tags": ["sweet", "balanced"],
+  "taste_tags": ["sweet", "fruity"],
   "skipped": false,
   "source": "gaggimate_webui"
 }

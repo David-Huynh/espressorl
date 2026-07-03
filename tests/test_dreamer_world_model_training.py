@@ -5,6 +5,12 @@ import unittest
 import torch
 
 from espresso_rl.domain.dreamer_control import DEFAULT_DREAMER_CONTROL_SPEC
+from espresso_rl.domain.dreamer_taste import DREAMER_TASTE_OBJECTIVE_ATTRIBUTES
+from espresso_rl.dreamer.dataset import (
+    DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES,
+    DREAMER_STATIC_CONTEXT_FEATURES,
+    DREAMER_TERMINAL_FEATURES,
+)
 from espresso_rl.dreamer.reference_world_model import default_world_model_config
 from espresso_rl.dreamer.world_model_training import (
     FixedCadenceWorldModelTrainingError,
@@ -248,6 +254,10 @@ def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
         [[[1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0]] * 4],
         dtype=torch.float32,
     )
+    taste_outcomes = torch.zeros((1, len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES)), dtype=torch.float32)
+    taste_outcome_mask = torch.zeros_like(taste_outcomes)
+    taste_outcomes[:, DREAMER_TASTE_OBJECTIVE_ATTRIBUTES.index("sweet")] = 1.0
+    taste_outcome_mask[:, DREAMER_TASTE_OBJECTIVE_ATTRIBUTES.index("sweet")] = 1.0
     batch = {
         "observations": observations,
         "resolved_controls": resolved_controls,
@@ -258,18 +268,24 @@ def smoke_batch(batch_size: int = 1) -> dict[str, torch.Tensor]:
         "pre_shot_action_indexes": torch.zeros((1, 9), dtype=torch.long),
         "pre_shot_action_mask": torch.ones((1, 9), dtype=torch.float32),
         "pre_shot_capability_mask": torch.ones((1, 9), dtype=torch.float32),
-        "taste_objective": torch.tensor([[1.0] + [0.0] * 8], dtype=torch.float32),
-        "taste_outcomes": torch.tensor([[0.0, 1.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
-        "taste_outcome_mask": torch.tensor([[0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        "taste_objective": torch.tensor(
+            [[1.0] + [0.0] * len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES)],
+            dtype=torch.float32,
+        ),
+        "taste_outcomes": taste_outcomes,
+        "taste_outcome_mask": taste_outcome_mask,
         "decision_step_mask": torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
         "rewards": torch.tensor([[0.0, 0.0, 0.0, 0.8]], dtype=torch.float32),
         "continuations": torch.tensor([[1.0, 1.0, 1.0, 0.0]], dtype=torch.float32),
         "step_mask": torch.ones((1, 4), dtype=torch.float32),
-        "static_context": torch.zeros((1, 18), dtype=torch.float32),
-        "context_static": torch.zeros((1, 16, 18), dtype=torch.float32),
-        "context_terminal": torch.zeros((1, 16, 18), dtype=torch.float32),
+        "static_context": torch.zeros((1, len(DREAMER_STATIC_CONTEXT_FEATURES)), dtype=torch.float32),
+        "context_static": torch.zeros((1, 16, len(DREAMER_STATIC_CONTEXT_FEATURES)), dtype=torch.float32),
+        "context_terminal": torch.zeros((1, 16, len(DREAMER_TERMINAL_FEATURES)), dtype=torch.float32),
         "context_time": torch.zeros((1, 16, 1), dtype=torch.float32),
-        "context_trajectory_embedding": torch.zeros((1, 16, 77), dtype=torch.float32),
+        "context_trajectory_embedding": torch.zeros(
+            (1, 16, len(DREAMER_CONTEXT_TRAJECTORY_EMBEDDING_FEATURES)),
+            dtype=torch.float32,
+        ),
         "context_mask": torch.tensor([[1.0] + [0.0] * 15], dtype=torch.float32),
     }
     if batch_size == 1:

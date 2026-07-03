@@ -151,7 +151,7 @@ class RuntimeOptimizerTests(unittest.TestCase):
         optimizer = RuntimeOptimizer(bo_optimizer=bo)
         status = optimizer.configure(
             optimizer_mode=DEFAULT_OPTIMIZER_MODE,
-            taste_objective={"mode": "custom", "sweetness": "high"},
+            taste_objective={"mode": "custom", "sweet": "high"},
         )
         context = OptimizationContext(
             install_id="install_1",
@@ -173,7 +173,7 @@ class RuntimeOptimizerTests(unittest.TestCase):
 
         optimizer.recommend(context)
 
-        self.assertEqual(status.taste_objective, {"mode": "custom", "sweetness": "high"})
+        self.assertEqual(status.taste_objective, {"mode": "custom", "sweet": "high"})
         self.assertEqual(bo.contexts[0].taste_objective, status.taste_objective)
         self.assertEqual(bo.contexts[0].bean_context_id, context.bean_context_id)
         self.assertEqual(bo.contexts[0].grinder_context_id, context.grinder_context_id)

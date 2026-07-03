@@ -314,7 +314,7 @@ def shot_payload(
         "profile_temperature_c": 93.0,
         "final_phase_temperature_c": 92.5,
         "human_rating": rating,
-        "taste_tags": ["balanced"],
+        "taste_tags": ["sweet"],
         "reward": reward if reward is not None else (rating - 1.0) / 4.0,
         "reward_confidence": 1.0,
         "optimization_weight": 1.0,

@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from espresso_rl.domain.taste import VALID_TASTE_TAGS, normalize_taste_tags
+
 PROFILE_SHAPE = (5, 100)
 PROFILE_DTYPE = np.float32
 AUX_PROFILE_SHAPE = (PROFILE_SHAPE[1],)
@@ -119,24 +121,6 @@ class GrinderStepDirection(str, Enum):
 class GrinderAdjustmentMode(str, Enum):
     STEPPED = "stepped"
     STEPLESS = "stepless"
-
-
-VALID_TASTE_TAGS = {
-    "sour",
-    "bitter",
-    "weak",
-    "harsh",
-    "thin",
-    "channeling_suspected",
-    "balanced",
-    "astringent",
-    "too_fast",
-    "too_slow",
-    "muddy",
-    "dry",
-    "sweet",
-    "good_body",
-}
 
 
 def new_id(prefix: str) -> str:
@@ -563,6 +547,7 @@ class ShotRecord:
             self.brew_ratio = self.beverage_out_g / self.dose_in_g
         if self.target_ratio is None:
             self.target_ratio = self.target_yield_g / self.dose_in_g
+        self.taste_tags = normalize_taste_tags(self.taste_tags)
         invalid_tags = set(self.taste_tags) - VALID_TASTE_TAGS
         if invalid_tags:
             raise ValueError(f"invalid taste tags: {sorted(invalid_tags)}")

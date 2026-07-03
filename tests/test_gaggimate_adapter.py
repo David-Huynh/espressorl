@@ -158,7 +158,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 ],
                 "model_artifact_path": "models/dreamer-v3.pt",
                 "model_artifact_sha256": "a" * 64,
-                "taste_objective": {"mode": "custom", "sweetness": "high"},
+                "taste_objective": {"mode": "custom", "sweet": "high"},
                 "source": "gaggimate_webui",
             },
             mac="AA_BB",
@@ -168,7 +168,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.machine_id, "gaggimate:AA_BB")
         self.assertEqual(event.bean_context_id, "bean_1")
         self.assertEqual(event.grinder_context_id, "grinder_1")
-        self.assertEqual(event.taste_objective, {"mode": "custom", "sweetness": "high"})
+        self.assertEqual(event.taste_objective, {"mode": "custom", "sweet": "high"})
         self.assertEqual(event.prior_mode.value, "rules_and_community")
         self.assertEqual(len(event.prior_rules), 1)
         self.assertEqual(event.prior_rules[0].condition_value, "bitter")

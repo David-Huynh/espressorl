@@ -18,10 +18,13 @@ from espresso_rl.domain.dreamer_telemetry import (
     DreamerLiveTelemetry,
     DreamerLiveTelemetryCapabilities,
 )
+from espresso_rl.domain.dreamer_taste import DREAMER_TASTE_OBJECTIVE_ATTRIBUTES
 from espresso_rl.dreamer.dataset import build_dreamer_episode_batch, build_dreamer_episodes_from_training_rows
 from espresso_rl.dreamer.imagination import DreamerV3ImaginationActor, DreamerV3ImaginationConfig
 from espresso_rl.dreamer.live_inference import resolved_control_tensors_from_telemetry
 from test_trainer_artifacts import training_row
+
+TASTE_OBJECTIVE_DIM = 1 + len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES)
 
 
 class DreamerResolvedControlTests(unittest.TestCase):
@@ -100,13 +103,13 @@ class DreamerResolvedControlTests(unittest.TestCase):
 
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         _select_noop_pressure_action(actor)
         imagined = actor.select_dynamic(
             torch.ones((1, 6), dtype=torch.float32),
-            torch.tensor([[1.0] + [0.0] * 8], dtype=torch.float32),
+            torch.tensor([[1.0] + [0.0] * len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES)], dtype=torch.float32),
             torch.ones((1, len(DREAMER_RESOLVED_CONTROL_FIELDS)), dtype=torch.float32),
             live_values,
             live_mask,

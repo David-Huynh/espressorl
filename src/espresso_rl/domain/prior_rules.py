@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from espresso_rl.domain.taste import normalize_taste_tag
+
 
 MAX_PRIOR_RULES = 16
 MAX_RULE_NAME_LENGTH = 80
@@ -191,9 +193,10 @@ def _short_text(value: object, field_name: str, max_length: int) -> str:
 def _normalized_tag(value: object) -> str:
     parsed = _short_text(value, "condition_value", MAX_RULE_TAG_LENGTH).lower()
     parsed = re.sub(r"[^a-z0-9_ -]+", "", parsed).strip().replace(" ", "_")
-    if not parsed:
+    canonical = normalize_taste_tag(parsed, allow_system=False)
+    if canonical is None:
         raise ValueError("taste tag condition is invalid")
-    return parsed
+    return canonical
 
 
 def _finite_number(value: object, field_name: str) -> float:

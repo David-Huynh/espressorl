@@ -16,8 +16,11 @@ from espresso_rl.dreamer.imagination import (
 )
 from espresso_rl.domain.dreamer_live_action import DREAMER_LIVE_ACTION_FIELDS
 from espresso_rl.domain.dreamer_pre_shot import DREAMER_PRE_SHOT_ACTION_FIELDS
+from espresso_rl.domain.dreamer_taste import DREAMER_TASTE_OBJECTIVE_ATTRIBUTES
 from espresso_rl.dreamer.reference_world_model import DreamerV3VectorWorldModel, default_world_model_config
 from tests.test_dreamer_world_model_training import smoke_batch
+
+TASTE_OBJECTIVE_DIM = 1 + len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES)
 
 
 class DreamerImaginationTests(unittest.TestCase):
@@ -25,7 +28,7 @@ class DreamerImaginationTests(unittest.TestCase):
         torch.manual_seed(3)
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         features = torch.ones((2, 6), dtype=torch.float32)
@@ -61,7 +64,7 @@ class DreamerImaginationTests(unittest.TestCase):
     def test_actor_forward_applies_categorical_live_deltas_and_clamps_target_state(self) -> None:
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         with torch.no_grad():
@@ -79,7 +82,14 @@ class DreamerImaginationTests(unittest.TestCase):
         control_mask = torch.ones((1, len(DREAMER_RESOLVED_CONTROL_FEATURES)), dtype=torch.float32)
         control_state = torch.tensor([[1.0, 10.0, 18.0, 1.0, 98.0, 88.0, 0.0]], dtype=torch.float32)
 
-        output = actor(features, _auto_taste(1), torch.ones((1, 9)), control_mask, control_state, torch.ones_like(control_state))
+        output = actor(
+            features,
+            _auto_taste(1),
+            torch.ones((1, 9)),
+            control_mask,
+            control_state,
+            torch.ones_like(control_state),
+        )
         actions = output["resolved_controls"][0]
 
         self.assertEqual(actions[DREAMER_RESOLVED_CONTROL_FEATURES.index("pressure_target_bar")].item(), 12.0)
@@ -94,7 +104,7 @@ class DreamerImaginationTests(unittest.TestCase):
     def test_actor_forward_allows_low_temperature_targets_down_to_twenty_c(self) -> None:
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         with torch.no_grad():
@@ -107,7 +117,14 @@ class DreamerImaginationTests(unittest.TestCase):
         control_mask = torch.ones((1, len(DREAMER_RESOLVED_CONTROL_FEATURES)), dtype=torch.float32)
         control_state = torch.tensor([[1.0, 1.0, 0.2, 1.0, 22.0, 12.0, 0.0]], dtype=torch.float32)
 
-        output = actor(features, _auto_taste(1), torch.ones((1, 9)), control_mask, control_state, torch.ones_like(control_state))
+        output = actor(
+            features,
+            _auto_taste(1),
+            torch.ones((1, 9)),
+            control_mask,
+            control_state,
+            torch.ones_like(control_state),
+        )
         actions = output["resolved_controls"][0]
 
         self.assertEqual(actions[DREAMER_RESOLVED_CONTROL_FEATURES.index("temperature_target_c")].item(), 20.0)
@@ -115,7 +132,7 @@ class DreamerImaginationTests(unittest.TestCase):
     def test_actor_mode_switch_anchors_delta_to_current_pump_measurement(self) -> None:
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         with torch.no_grad():
@@ -216,7 +233,7 @@ class DreamerImaginationTests(unittest.TestCase):
     def test_masked_behavior_loss_only_trains_observed_supported_heads(self) -> None:
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         output = actor.select_pre_shot(
@@ -253,13 +270,13 @@ class DreamerImaginationTests(unittest.TestCase):
     def test_taste_objective_conditions_pre_shot_policy_without_changing_context(self) -> None:
         actor = DreamerV3ImaginationActor(
             feature_dim=6,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         features = torch.ones((1, 6), dtype=torch.float32)
         capability = torch.ones((1, 9), dtype=torch.float32)
         auto = actor.select_pre_shot(features, _auto_taste(1), capability)["pre_shot_logits"]
-        custom_taste = torch.tensor([[0.0, 1.0] + [0.0] * 7], dtype=torch.float32)
+        custom_taste = torch.tensor([[0.0, 1.0] + [0.0] * (TASTE_OBJECTIVE_DIM - 2)], dtype=torch.float32)
         custom = actor.select_pre_shot(features, custom_taste, capability)["pre_shot_logits"]
 
         self.assertFalse(torch.equal(auto, custom))
@@ -267,7 +284,7 @@ class DreamerImaginationTests(unittest.TestCase):
     def test_terminal_reward_uses_taste_match_only_for_custom_objectives(self) -> None:
         critic = DreamerV3ImaginationCritic(
             feature_dim=4,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         with torch.no_grad():
@@ -281,7 +298,7 @@ class DreamerImaginationTests(unittest.TestCase):
         auto = critic.terminal_reward(features, _auto_taste(1))
         custom = critic.terminal_reward(
             features,
-            torch.tensor([[0.0, 0.0, 1.0] + [0.0] * 6], dtype=torch.float32),
+            torch.tensor([[0.0, 0.0, 1.0] + [0.0] * (TASTE_OBJECTIVE_DIM - 3)], dtype=torch.float32),
         )
 
         self.assertTrue(torch.allclose(auto, critic.base_terminal_reward(features)))
@@ -290,14 +307,16 @@ class DreamerImaginationTests(unittest.TestCase):
     def test_terminal_reward_loss_masks_unobserved_taste_attributes(self) -> None:
         critic = DreamerV3ImaginationCritic(
             feature_dim=4,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=DreamerV3ImaginationConfig(actor_hidden_dim=8, critic_hidden_dim=8),
         )
         features = torch.ones((1, 2, 4), dtype=torch.float32)
         rewards = torch.tensor([[0.0, 0.8]], dtype=torch.float32)
         terminal_mask = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
-        taste_targets = torch.tensor([[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
-        taste_mask = torch.tensor([[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+        taste_targets = torch.zeros((1, len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES)), dtype=torch.float32)
+        taste_mask = torch.zeros_like(taste_targets)
+        taste_targets[:, 1] = 1.0
+        taste_mask[:, 1] = 1.0
 
         losses = critic.terminal_reward_loss(features, rewards, terminal_mask, taste_targets, taste_mask)
         zero_taste_losses = critic.terminal_reward_loss(
@@ -327,12 +346,12 @@ class DreamerImaginationTests(unittest.TestCase):
         config = DreamerV3ImaginationConfig(horizon=3, actor_hidden_dim=8, critic_hidden_dim=8)
         actor = DreamerV3ImaginationActor(
             feature_dim=model.feature_dim,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=config,
         )
         critic = DreamerV3ImaginationCritic(
             feature_dim=model.feature_dim,
-            taste_objective_dim=9,
+            taste_objective_dim=TASTE_OBJECTIVE_DIM,
             config=config,
         )
 
@@ -394,7 +413,7 @@ def _world_model_for_batch(batch: dict[str, torch.Tensor]) -> DreamerV3VectorWor
 
 
 def _auto_taste(batch_size: int) -> torch.Tensor:
-    return torch.tensor([[1.0] + [0.0] * 8] * batch_size, dtype=torch.float32)
+    return torch.tensor([[1.0] + [0.0] * len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES)] * batch_size, dtype=torch.float32)
 
 
 if __name__ == "__main__":

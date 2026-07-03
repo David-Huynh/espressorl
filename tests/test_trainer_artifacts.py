@@ -109,9 +109,18 @@ class TrainerArtifactTests(unittest.TestCase):
         self.assertEqual(tensor_contract["tensor_shapes"]["pre_shot_action_indexes"], [1, 9])
         self.assertEqual(tensor_contract["tensor_shapes"]["pre_shot_action_mask"], [1, 9])
         self.assertEqual(tensor_contract["tensor_shapes"]["pre_shot_capability_mask"], [1, 9])
-        self.assertEqual(tensor_contract["tensor_shapes"]["context_static"], [1, 16, 20])
-        self.assertEqual(tensor_contract["tensor_shapes"]["context_terminal"], [1, 16, 18])
-        self.assertEqual(tensor_contract["tensor_shapes"]["context_trajectory_embedding"], [1, 16, 77])
+        self.assertEqual(
+            tensor_contract["tensor_shapes"]["context_static"],
+            [1, 16, len(tensor_contract["feature_names"]["context_static"])],
+        )
+        self.assertEqual(
+            tensor_contract["tensor_shapes"]["context_terminal"],
+            [1, 16, len(tensor_contract["feature_names"]["context_terminal"])],
+        )
+        self.assertEqual(
+            tensor_contract["tensor_shapes"]["context_trajectory_embedding"],
+            [1, 16, len(tensor_contract["feature_names"]["context_trajectory_embedding"])],
+        )
         self.assertEqual(tensor_contract["tensor_shapes"]["context_mask"], [1, 16])
         self.assertIn("temperature_c", tensor_contract["feature_names"]["observations"])
         self.assertIn("yield_stop_target_g", tensor_contract["feature_names"]["resolved_controls"])
@@ -841,7 +850,7 @@ def training_row(row_id: int) -> dict:
         },
         "reward": {
             "human_rating": 4,
-            "taste_tags": ["balanced"],
+            "taste_tags": ["sweet"],
             "reward": 0.8,
             "confidence": 1.0,
             "feedback_recorded": True,

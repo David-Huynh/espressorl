@@ -1118,7 +1118,7 @@ class ApplicationServiceTests(unittest.TestCase):
                 timestamp=4,
                 recommendation_id=first.recommendation_id,
                 rating=5,
-                taste_tags=["balanced"],
+                taste_tags=["sweet"],
             )
         )
         self.assertGreater(updated.shot.reward or 0.0, 0.8)

@@ -142,27 +142,11 @@ _TASTE_LEVEL_VALUES = {
     **DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING,
 }
 _TASTE_TAG_OUTCOME_TARGETS = {
-    "sour": {"acidity": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["high"]},
-    "bitter": {"bitterness": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["high"]},
-    "harsh": {"bitterness": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["high"]},
-    "astringent": {"bitterness": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["high"]},
-    "dry": {
-        "bitterness": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["high"],
-        "body": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["low"],
-    },
-    "weak": {"body": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["low"]},
-    "thin": {"body": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["low"]},
-    "muddy": {"clarity": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["low"]},
-    "channeling_suspected": {"clarity": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["low"]},
-    "sweet": {"sweetness": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["high"]},
-    "good_body": {"body": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["high"]},
-    "balanced": {
-        "acidity": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["medium"],
-        "sweetness": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["medium"],
-        "clarity": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["medium"],
-        "body": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["medium"],
-        "bitterness": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["low"],
-    },
+    attribute: {attribute: DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["high"]}
+    for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES
+}
+_TASTE_TAG_OUTCOME_TARGETS["channeling_suspected"] = {
+    "astringent_harsh": DREAMER_TASTE_OBJECTIVE_LEVEL_ENCODING["medium"],
 }
 
 
@@ -761,16 +745,7 @@ def _encode_static_context(static_context: dict[str, Any]) -> np.ndarray:
     encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, "taste_objective_auto")] = (
         1.0 if taste_objective.get("mode") == "auto" else 0.0
     )
-    for attribute in (
-        "acidity",
-        "sweetness",
-        "clarity",
-        "body",
-        "bitterness",
-        "chocolatiness",
-        "fruitiness",
-        "roastiness",
-    ):
+    for attribute in DREAMER_TASTE_OBJECTIVE_ATTRIBUTES:
         encoded[_feature_index(DREAMER_STATIC_CONTEXT_FEATURES, f"taste_objective_{attribute}")] = _TASTE_LEVEL_VALUES[
             taste_objective.get(attribute)
         ]

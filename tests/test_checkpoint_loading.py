@@ -360,7 +360,7 @@ def checkpoint_bundle(
         "behavior_dim": 56,
         "static_dim": 18,
         "live_action_dim": 7,
-        "taste_objective_dim": 9,
+        "taste_objective_dim": 1 + len(DEFAULT_DREAMER_TASTE_OBJECTIVE_SPEC.to_dict()["attributes"]),
         "control_spec": control_spec,
         "pre_shot_action_spec": DEFAULT_DREAMER_PRE_SHOT_ACTION_SPEC.to_dict(),
         "live_action_spec": DEFAULT_DREAMER_LIVE_ACTION_SPEC.to_dict(),

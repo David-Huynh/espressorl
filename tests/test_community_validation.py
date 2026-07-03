@@ -320,7 +320,7 @@ def shot_payload() -> dict[str, Any]:
         "profile_temperature_c": 93.0,
         "final_phase_temperature_c": 92.5,
         "human_rating": 4,
-        "taste_tags": ["balanced"],
+        "taste_tags": ["sweet"],
         "reward_confidence": 1.0,
         "optimization_weight": 1.0,
         "recommendation_followed": "followed",

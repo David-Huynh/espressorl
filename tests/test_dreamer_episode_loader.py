@@ -362,9 +362,9 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         initial_yield_index = DREAMER_STATIC_CONTEXT_FEATURES.index("initial_target_yield_g")
         direction_index = DREAMER_STATIC_CONTEXT_FEATURES.index("step_direction_sign")
         auto_index = DREAMER_STATIC_CONTEXT_FEATURES.index("taste_objective_auto")
-        sweetness_outcome_index = DREAMER_TASTE_OUTCOME_FEATURES.index("sweetness")
-        bitterness_outcome_index = DREAMER_TASTE_OUTCOME_FEATURES.index("bitterness")
-        roastiness_outcome_index = DREAMER_TASTE_OUTCOME_FEATURES.index("roastiness")
+        sweet_outcome_index = DREAMER_TASTE_OUTCOME_FEATURES.index("sweet")
+        bitter_outcome_index = DREAMER_TASTE_OUTCOME_FEATURES.index("bitter")
+        roasted_outcome_index = DREAMER_TASTE_OUTCOME_FEATURES.index("roasted")
 
         self.assertEqual(batch["observations"][0, 0, pressure_index].item(), 1.0)
         self.assertAlmostEqual(batch["observations"][0, 2, weight_index].item(), 0.72, places=6)
@@ -377,10 +377,10 @@ class DreamerEpisodeLoaderTests(unittest.TestCase):
         self.assertEqual(batch["static_context"][0, initial_yield_index].item(), 36.0)
         self.assertEqual(batch["static_context"][0, direction_index].item(), 1.0)
         self.assertEqual(batch["static_context"][0, auto_index].item(), 1.0)
-        self.assertAlmostEqual(batch["taste_outcomes"][0, sweetness_outcome_index].item(), 2.0 / 3.0, places=6)
-        self.assertAlmostEqual(batch["taste_outcomes"][0, bitterness_outcome_index].item(), 1.0 / 3.0, places=6)
-        self.assertEqual(batch["taste_outcome_mask"][0, sweetness_outcome_index].item(), 1.0)
-        self.assertEqual(batch["taste_outcome_mask"][0, roastiness_outcome_index].item(), 0.0)
+        self.assertAlmostEqual(batch["taste_outcomes"][0, sweet_outcome_index].item(), 1.0, places=6)
+        self.assertAlmostEqual(batch["taste_outcomes"][0, bitter_outcome_index].item(), 1.0, places=6)
+        self.assertEqual(batch["taste_outcome_mask"][0, sweet_outcome_index].item(), 1.0)
+        self.assertEqual(batch["taste_outcome_mask"][0, roasted_outcome_index].item(), 0.0)
         self.assertAlmostEqual(batch["rewards"][0, 3].item(), 0.8, places=6)
         self.assertEqual(batch["continuations"][0, 2].item(), 1.0)
         self.assertEqual(batch["continuations"][0, 3].item(), 0.0)
@@ -713,7 +713,7 @@ def training_row(
         "observation": observation,
         "reward": {
             "human_rating": 4,
-            "taste_tags": ["balanced"],
+            "taste_tags": ["sweet", "bitter"],
             "reward": 0.8,
             "confidence": 1.0,
             "feedback_recorded": True,

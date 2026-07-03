@@ -100,9 +100,9 @@ class DomainCoreTests(unittest.TestCase):
             install_id="install_1",
             machine_id="machine_1",
             timestamp=1,
-            taste_objective={"mode": "custom", "sweetness": "high", "clarity": "unspecified"},
+            taste_objective={"mode": "custom", "sweet": "high"},
         )
-        self.assertEqual(custom.taste_objective, {"mode": "custom", "sweetness": "high"})
+        self.assertEqual(custom.taste_objective, {"mode": "custom", "sweet": "high"})
 
     def test_optimizer_settings_event_rejects_invalid_mode_and_digest(self) -> None:
         with self.assertRaises(ValueError):
@@ -126,6 +126,27 @@ class DomainCoreTests(unittest.TestCase):
                 machine_id="machine_1",
                 timestamp=1,
                 taste_objective={"mode": "custom"},
+            )
+
+    def test_feedback_event_normalizes_canonical_taste_tags_and_rejects_unknowns(self) -> None:
+        feedback = ShotFeedbackEvent(
+            shot_id="shot_1",
+            install_id="install_1",
+            machine_id="machine_1",
+            timestamp=1,
+            rating=4,
+            taste_tags=["Sweet", "balanced", "astringent"],
+        )
+
+        self.assertEqual(feedback.taste_tags, ["sweet", "astringent_harsh"])
+        with self.assertRaisesRegex(ValueError, "invalid taste tags"):
+            ShotFeedbackEvent(
+                shot_id="shot_1",
+                install_id="install_1",
+                machine_id="machine_1",
+                timestamp=1,
+                rating=4,
+                taste_tags=["remote_exec"],
             )
 
     def test_feedback_requires_rating_or_explicit_skip(self) -> None:
@@ -366,7 +387,7 @@ class DomainCoreTests(unittest.TestCase):
             human_rating=5,
             profile_score=0.1,
             follow_through=FollowThroughState.NOT_FOLLOWED,
-            taste_tags=["balanced"],
+            taste_tags=["sweet"],
         )
         self.assertGreater(result.reward, 0.8)
         self.assertEqual(result.confidence, 1.0)
@@ -381,7 +402,7 @@ class DomainCoreTests(unittest.TestCase):
             human_rating=None,
             profile_score=0.8,
             follow_through=FollowThroughState.UNKNOWN,
-            taste_tags=["balanced"],
+            taste_tags=["sweet"],
         )
         channeling = compute_reward(
             human_rating=None,

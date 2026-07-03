@@ -220,7 +220,7 @@ class GaggimateEndToEndTests(unittest.TestCase):
 
                 rated = harness.shots.get("shot_integration_1")
                 self.assertEqual(rated.human_rating, 4)
-                self.assertEqual(rated.taste_tags, ["sweet", "balanced"])
+                self.assertEqual(rated.taste_tags, ["sweet", "fruity"])
                 self.assertTrue(rated.feedback_recorded)
 
                 recommendation = harness.last_feedback_result.recommendation
@@ -239,7 +239,7 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 shot_upload = next(item for item in pending if item.local_record_type == "shot")
                 queued_shot = json.loads(shot_upload.payload_json)
                 self.assertEqual(queued_shot["human_rating"], 4)
-                self.assertEqual(queued_shot["taste_tags"], ["sweet", "balanced"])
+                self.assertEqual(queued_shot["taste_tags"], ["sweet", "fruity"])
 
                 recommendations = harness.publications("gaggimate/AA_BB/rl/recommendation")
                 self.assertEqual(len(recommendations), 1)
@@ -310,7 +310,7 @@ class GaggimateEndToEndTests(unittest.TestCase):
                         "shot_partial_action",
                         timestamp=1_700_000_210,
                         rating=3,
-                        taste_tags=["thin"],
+                        taste_tags=["green_vegetative"],
                     ),
                 )
 

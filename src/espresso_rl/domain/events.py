@@ -18,6 +18,7 @@ from .models import (
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
 from .dreamer_taste import normalize_dreamer_taste_objective
 from .prior_rules import PriorRule, PriorSelectionMode, parse_prior_rules
+from .taste import normalize_taste_tags
 
 VALID_CORRECTION_TAGS = {
     "changed_manually",
@@ -370,6 +371,8 @@ class ShotFeedbackEvent:
             raise ValueError("skipped feedback cannot include a rating or taste tags")
         if not self.skipped and self.rating is None:
             raise ValueError("rating is required unless feedback is skipped")
+        normalized_tags = normalize_taste_tags(self.taste_tags)
+        object.__setattr__(self, "taste_tags", normalized_tags)
         invalid_tags = set(self.taste_tags) - VALID_TASTE_TAGS
         if invalid_tags:
             raise ValueError(f"invalid taste tags: {sorted(invalid_tags)}")

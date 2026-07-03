@@ -19,6 +19,7 @@ from espresso_rl.domain.dreamer_telemetry import (
 )
 from espresso_rl.domain.events import MachineStateEvent, OptimizerSettingsEvent
 from espresso_rl.domain.models import MachineState
+from espresso_rl.domain.dreamer_taste import DREAMER_TASTE_OBJECTIVE_ATTRIBUTES
 from espresso_rl.dreamer.checkpoint_inference import (
     DreamerShadowModels,
     checkpoint_architecture_from_models,
@@ -43,6 +44,8 @@ from espresso_rl.dreamer.reference_world_model import (
 )
 from tests.test_application_service import MemoryShotRepository
 from tests.test_dreamer_recommendations import local_shot
+
+TASTE_OBJECTIVE_DIM = 1 + len(DREAMER_TASTE_OBJECTIVE_ATTRIBUTES)
 
 
 class DreamerLiveInferenceTests(unittest.TestCase):
@@ -114,7 +117,7 @@ class DreamerLiveInferenceTests(unittest.TestCase):
                 install_id="install_local",
                 machine_id="MACHINE_LOCAL",
                 timestamp=450,
-                taste_objective={"mode": "custom", "sweetness": "high"},
+                taste_objective={"mode": "custom", "sweet": "high"},
             )
         )
 
@@ -125,7 +128,7 @@ class DreamerLiveInferenceTests(unittest.TestCase):
             {episode["group_key"]["bean_context_id"] for episode in context.historical_episodes},
             {"bean_cafe_1", "bean_cafe_2"},
         )
-        self.assertEqual(context.taste_objective, {"mode": "custom", "sweetness": "high"})
+        self.assertEqual(context.taste_objective, {"mode": "custom", "sweet": "high"})
 
 
 def _inference() -> tuple[CheckpointDreamerLiveInference, DreamerV3ImaginationActor]:
@@ -153,14 +156,14 @@ def _inference() -> tuple[CheckpointDreamerLiveInference, DreamerV3ImaginationAc
     live_action_spec = DreamerLiveActionSpec()
     actor = DreamerV3ImaginationActor(
         feature_dim=world_model.feature_dim,
-        taste_objective_dim=9,
+        taste_objective_dim=TASTE_OBJECTIVE_DIM,
         config=imagination_config,
         control_spec=control_spec,
         live_action_spec=live_action_spec,
     )
     critic = DreamerV3ImaginationCritic(
         feature_dim=world_model.feature_dim,
-        taste_objective_dim=9,
+        taste_objective_dim=TASTE_OBJECTIVE_DIM,
         config=imagination_config,
     )
     architecture = checkpoint_architecture_from_models(
