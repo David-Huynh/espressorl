@@ -22,6 +22,14 @@ class UploadRejected(Exception):
         self.status = status
 
 
+class UploadCredentialRejected(Exception):
+    """Upload credentials are invalid or revoked; local records must be retained."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class UploadRateLimited(Exception):
     """Server backpressure (HTTP 429). Retry after ``retry_after`` seconds."""
 
@@ -89,11 +97,15 @@ class SignedSupabaseUploadClient:
         try:
             with request.urlopen(req, timeout=self._config.timeout_s) as response:
                 if response.status >= 400:
+                    if response.status in (401, 403):
+                        raise UploadCredentialRejected(response.status, response.reason)
                     raise UploadRejected(response.status, response.reason)
         except error.HTTPError as exc:
             message = _read_error_message(exc)
             if exc.code == 429:
                 raise UploadRateLimited(_retry_after_seconds(exc), message) from exc
+            if exc.code in (401, 403):
+                raise UploadCredentialRejected(exc.code, message) from exc
             if 400 <= exc.code < 500:
                 raise UploadRejected(exc.code, message) from exc
             raise RuntimeError(f"upload failed with HTTP {exc.code}: {message}") from exc
@@ -138,6 +150,22 @@ class UploadQueueWorker:
                     now=int(self._clock()),
                 )
                 uploaded += 1
+            except UploadCredentialRejected as exc:
+                now = int(self._clock())
+                attempts = item.attempt_count + 1
+                retry_at = now + _retry_delay_s(attempts)
+                self._queue.update_status(
+                    item.upload_id,
+                    UploadQueueStatus.FAILED,
+                    now=now,
+                    error_message=f"upload credential rejected: HTTP {exc.status}: {exc}",
+                    next_retry_at=retry_at,
+                )
+                logger.warning(
+                    "Upload credential rejected for %s; retaining local record and retrying at %s",
+                    item.upload_id,
+                    retry_at,
+                )
             except UploadRejected as exc:
                 rejected_at = int(self._clock())
                 self._queue.update_status(

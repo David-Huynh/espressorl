@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
+from urllib import error
 
 from espresso_rl.config import Config
 from espresso_rl.adapters.sqlite_repositories import (
@@ -24,6 +27,7 @@ from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
 from espresso_rl.adapters.supabase_upload import (
     SignedSupabaseUploadClient,
     SignedUploadConfig,
+    UploadCredentialRejected,
     UploadRejected,
     UploadQueueWorker,
     UploadRateLimited,
@@ -867,6 +871,29 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertEqual(raised.exception.status, 422)
         self.assertIn("install_id", str(raised.exception))
 
+    def test_signed_client_classifies_credential_rejection_separately_from_payload_rejection(self) -> None:
+        client = SignedSupabaseUploadClient(
+            SignedUploadConfig(
+                ingest_url="https://example.invalid/ingest",
+                install_id="install_1",
+                upload_secret="x" * 32,
+            )
+        )
+        response = error.HTTPError(
+            "https://example.invalid/ingest",
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b'{"error":"unknown or revoked upload credential"}'),
+        )
+
+        with mock.patch("espresso_rl.adapters.supabase_upload.request.urlopen", side_effect=response):
+            with self.assertRaises(UploadCredentialRejected) as raised:
+                client.upload(uploadable_queue_item("upload_1"))
+
+        self.assertEqual(raised.exception.status, 403)
+        self.assertIn("unknown or revoked", str(raised.exception))
+
     def test_enqueue_coalesces_pending_versions_of_same_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
@@ -987,9 +1014,11 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 shots = SQLiteShotRepository(store)
                 queue = SQLiteUploadQueueRepository(store)
-                EspressoRLService(shots, SQLiteRecommendationRepository(store), ConservativeBOOptimizer()).ingest_shot_profile(
-                    shot_event()
-                )
+                EspressoRLService(
+                    shots,
+                    SQLiteRecommendationRepository(store),
+                    ConservativeBOOptimizer(),
+                ).ingest_shot_profile(shot_event())
                 queue.enqueue(uploadable_queue_item("u_a"))
                 worker = UploadQueueWorker(queue, RejectingClient(), clock=lambda: 100)
 
@@ -1000,6 +1029,32 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                     store.conn.execute("SELECT COUNT(*) AS c FROM upload_queue").fetchone()["c"],
                     0,
                 )
+
+    def test_worker_retains_local_shot_when_upload_credential_is_rejected(self) -> None:
+        class CredentialRejectingClient:
+            def upload(self, item: UploadQueueItem) -> None:
+                raise UploadCredentialRejected(403, "unknown or revoked upload credential")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                queue = SQLiteUploadQueueRepository(store)
+                EspressoRLService(shots, SQLiteRecommendationRepository(store), ConservativeBOOptimizer()).ingest_shot_profile(
+                    shot_event()
+                )
+                queue.enqueue(uploadable_queue_item("u_a"))
+                worker = UploadQueueWorker(queue, CredentialRejectingClient(), clock=lambda: 100)
+
+                worker.run_once()
+
+                self.assertIsNotNone(shots.get("shot_1"))
+                row = store.conn.execute(
+                    "SELECT status, attempt_count, next_retry_at, error_message FROM upload_queue WHERE upload_id='u_a'"
+                ).fetchone()
+                self.assertEqual(row["status"], "failed")
+                self.assertEqual(row["attempt_count"], 1)
+                self.assertGreater(row["next_retry_at"], 100)
+                self.assertIn("credential rejected", row["error_message"])
 
     def test_worker_defers_rate_limited_upload_without_charging_attempt(self) -> None:
         class LimitedClient:
