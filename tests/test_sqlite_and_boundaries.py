@@ -15,7 +15,7 @@ from espresso_rl.adapters.sqlite_repositories import (
     SQLiteUploadQueueRepository,
     _shot_to_row,
 )
-from espresso_rl.adapters.postgres_repositories import PostgresStore, _upsert
+from espresso_rl.adapters.postgres_repositories import PostgresStore, PostgresUploadQueueRepository, _upsert
 from espresso_rl.application.upload_payloads import payload_hash as hash_payload_json
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.domain.events import RecommendationApplyEvent, ShotFeedbackEvent, ShotProfileEvent
@@ -1097,12 +1097,35 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("normalized_alias TEXT NOT NULL", schema)
         self.assertIn("feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE", schema)
         self.assertIn("ADD COLUMN IF NOT EXISTS feedback_recorded", schema)
+        self.assertIn("ADD COLUMN IF NOT EXISTS relative_grind_steps_from_reference", schema)
+        self.assertIn("ADD COLUMN IF NOT EXISTS relative_grind_um_from_reference", schema)
+        self.assertIn("ADD COLUMN IF NOT EXISTS microns_per_step", schema)
         self.assertIn(
             "ADD COLUMN IF NOT EXISTS recommended_grind_delta_steps_from_current",
             schema,
         )
         self.assertIn(
+            "ADD COLUMN IF NOT EXISTS recommended_grind_delta_um_from_current",
+            schema,
+        )
+        self.assertIn(
+            "ADD COLUMN IF NOT EXISTS recommended_projected_relative_step_from_reference",
+            schema,
+        )
+        self.assertIn(
             "ADD COLUMN IF NOT EXISTS grind_delta_steps_from_current",
+            schema,
+        )
+        self.assertIn(
+            "ADD COLUMN IF NOT EXISTS grind_delta_um_from_current",
+            schema,
+        )
+        self.assertIn(
+            "ADD COLUMN IF NOT EXISTS projected_relative_step_from_reference",
+            schema,
+        )
+        self.assertIn(
+            "ADD COLUMN IF NOT EXISTS projected_relative_grind_um_from_reference",
             schema,
         )
 
@@ -1112,9 +1135,13 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.statements: list[str] = []
                 self.committed = False
 
-            def execute(self, statement: str) -> RecordingConnection:
+            def execute(self, statement: str, params: tuple[object, ...] | None = None) -> RecordingConnection:
                 self.statements.append(statement)
+                self.params = params
                 return self
+
+            def fetchone(self) -> dict[str, bool]:
+                return {"exists": True}
 
             def commit(self) -> None:
                 self.committed = True
@@ -1148,13 +1175,41 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             "ALTER TABLE shots",
             "ADD COLUMN IF NOT EXISTS recommended_grind_delta_steps_from_current",
         )
+        shot_relative_grind_add = statement_index(
+            "ALTER TABLE shots",
+            "ADD COLUMN IF NOT EXISTS relative_grind_steps_from_reference",
+        )
+        shot_microns_add = statement_index(
+            "ALTER TABLE shots",
+            "ADD COLUMN IF NOT EXISTS microns_per_step",
+        )
         shot_grind_delta_type = statement_index(
             "ALTER TABLE shots",
             "ALTER COLUMN recommended_grind_delta_steps_from_current TYPE DOUBLE PRECISION",
         )
+        legacy_grinder_step_size_nullable = statement_index(
+            "ALTER TABLE shots",
+            "ALTER COLUMN grinder_step_size_um DROP NOT NULL",
+        )
+        legacy_grinder_step_size_default = statement_index(
+            "ALTER TABLE shots",
+            "ALTER COLUMN grinder_step_size_um SET DEFAULT 12.5",
+        )
         recommendation_grind_delta_add = statement_index(
             "ALTER TABLE recommendations",
             "ADD COLUMN IF NOT EXISTS grind_delta_steps_from_current",
+        )
+        recommendation_grind_delta_um_add = statement_index(
+            "ALTER TABLE recommendations",
+            "ADD COLUMN IF NOT EXISTS grind_delta_um_from_current",
+        )
+        recommendation_projected_relative_add = statement_index(
+            "ALTER TABLE recommendations",
+            "ADD COLUMN IF NOT EXISTS projected_relative_step_from_reference",
+        )
+        legacy_recommendation_next_grind_nullable = statement_index(
+            "ALTER TABLE recommendations",
+            "ALTER COLUMN next_grind_steps DROP NOT NULL",
         )
         recommendation_grind_delta_type = statement_index(
             "ALTER TABLE recommendations",
@@ -1163,9 +1218,94 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
 
         self.assertLess(shadow_eval_migration, shadow_eval_index)
         self.assertLess(shadow_quality_migration, shadow_quality_index)
+        self.assertLess(shot_relative_grind_add, shot_grind_delta_type)
+        self.assertLess(shot_microns_add, shot_grind_delta_type)
         self.assertLess(shot_grind_delta_add, shot_grind_delta_type)
+        self.assertLess(shot_microns_add, legacy_grinder_step_size_nullable)
+        self.assertLess(legacy_grinder_step_size_nullable, legacy_grinder_step_size_default)
         self.assertLess(recommendation_grind_delta_add, recommendation_grind_delta_type)
+        self.assertLess(recommendation_grind_delta_um_add, recommendation_grind_delta_type)
+        self.assertLess(recommendation_projected_relative_add, recommendation_grind_delta_type)
+        self.assertLess(recommendation_projected_relative_add, legacy_recommendation_next_grind_nullable)
         self.assertTrue(store.conn.committed)
+
+    def test_postgres_upload_queue_ready_read_commits_transaction(self) -> None:
+        class EmptyResult:
+            def fetchall(self) -> list[dict[str, object]]:
+                return []
+
+        class RecordingConnection:
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+                self.commits = 0
+                self.rollbacks = 0
+
+            def execute(self, statement: str, params: tuple[object, ...]) -> EmptyResult:
+                self.statements.append(statement)
+                self.params = params
+                return EmptyResult()
+
+            def commit(self) -> None:
+                self.commits += 1
+
+            def rollback(self) -> None:
+                self.rollbacks += 1
+
+        class RecordingStore:
+            def __init__(self) -> None:
+                self.conn = RecordingConnection()
+
+        store = RecordingStore()
+        repo = PostgresUploadQueueRepository(store)  # type: ignore[arg-type]
+
+        self.assertEqual([], repo.list_ready(now=123, limit=10))
+        self.assertEqual(1, store.conn.commits)
+        self.assertEqual(0, store.conn.rollbacks)
+        self.assertIn("SELECT * FROM upload_queue", store.conn.statements[0])
+
+    def test_postgres_upload_queue_ready_reopens_closed_connection(self) -> None:
+        class ClosedConnection:
+            closed = True
+
+        class EmptyResult:
+            def fetchall(self) -> list[dict[str, object]]:
+                return []
+
+        class OpenConnection:
+            closed = False
+
+            def __init__(self) -> None:
+                self.statements: list[str] = []
+                self.commits = 0
+
+            def execute(self, statement: str, params: tuple[object, ...]) -> EmptyResult:
+                self.statements.append(statement)
+                self.params = params
+                return EmptyResult()
+
+            def commit(self) -> None:
+                self.commits += 1
+
+            def rollback(self) -> None:
+                raise AssertionError("rollback should not be called")
+
+        store = object.__new__(PostgresStore)
+        open_connection = OpenConnection()
+        reconnects = 0
+
+        def reconnect() -> None:
+            nonlocal reconnects
+            reconnects += 1
+            store.conn = open_connection
+
+        store.conn = ClosedConnection()
+        store._connect = reconnect  # type: ignore[attr-defined]
+        repo = PostgresUploadQueueRepository(store)
+
+        self.assertEqual([], repo.list_ready(now=123, limit=10))
+        self.assertEqual(1, reconnects)
+        self.assertEqual(1, open_connection.commits)
+        self.assertIn("SELECT * FROM upload_queue", open_connection.statements[0])
 
     def test_core_layers_do_not_import_adapters_or_infrastructure(self) -> None:
         root = Path(__file__).resolve().parents[1] / "src" / "espresso_rl"

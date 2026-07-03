@@ -69,6 +69,31 @@ class FakeStartupMQTT:
 
 
 class GaggimateAdapterTests(unittest.TestCase):
+    def test_empty_mqtt_payload_is_ignored(self) -> None:
+        received = []
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=received.append,
+            on_feedback=received.append,
+            on_correction=received.append,
+            on_upload_maintenance=received.append,
+            on_decision=received.append,
+            on_apply=received.append,
+            on_machine_state=received.append,
+        )
+        message = type(
+            "Message",
+            (),
+            {
+                "topic": "gaggimate/AA_BB/machine/state",
+                "payload": b"",
+            },
+        )()
+
+        client._on_message(client._client, None, message)
+
+        self.assertEqual(received, [])
+
     def test_local_reset_payload_translates_to_canonical_event(self) -> None:
         client = GaggimateMQTTClient(
             config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),

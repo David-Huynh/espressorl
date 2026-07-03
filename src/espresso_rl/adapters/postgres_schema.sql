@@ -94,6 +94,21 @@ ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS grinder_context_id TEXT;
 
 ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS relative_grind_steps_from_reference DOUBLE PRECISION;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS relative_grind_um_from_reference DOUBLE PRECISION;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS microns_per_step DOUBLE PRECISION NOT NULL DEFAULT 12.5;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS recommended_grind_delta_um_from_current DOUBLE PRECISION;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS recommended_projected_relative_step_from_reference DOUBLE PRECISION;
+
+ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS beverage_flow_profile_blob BYTEA;
 
 ALTER TABLE shots
@@ -182,6 +197,15 @@ ALTER TABLE recommendations
 
 ALTER TABLE recommendations
     ADD COLUMN IF NOT EXISTS grind_delta_steps_from_current DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+
+ALTER TABLE recommendations
+    ADD COLUMN IF NOT EXISTS grind_delta_um_from_current DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+
+ALTER TABLE recommendations
+    ADD COLUMN IF NOT EXISTS projected_relative_step_from_reference DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+
+ALTER TABLE recommendations
+    ADD COLUMN IF NOT EXISTS projected_relative_grind_um_from_reference DOUBLE PRECISION NOT NULL DEFAULT 0.0;
 
 ALTER TABLE recommendations
     ALTER COLUMN grind_delta_steps_from_current TYPE DOUBLE PRECISION

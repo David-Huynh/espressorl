@@ -208,6 +208,31 @@ class UploadMaintenanceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.errors, [])
 
+    def test_preflight_accepts_observed_pressure_overshoot_without_relaxing_target_pressure(self) -> None:
+        profile = valid_profile()
+        profile[0] = [15.4 for _ in range(100)]
+        profile[1] = [10.0 for _ in range(100)]
+
+        result = validate_upload_payload_json(payload(profile_resampled=profile))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, [])
+
+        profile[1] = [15.1 for _ in range(100)]
+        result = validate_upload_payload_json(payload(profile_resampled=profile))
+
+        self.assertFalse(result.ok)
+        self.assertIn("profile_resampled target_pressure out of range", result.errors)
+
+    def test_preflight_rejects_impossible_observed_pressure(self) -> None:
+        profile = valid_profile()
+        profile[0] = [20.1 for _ in range(100)]
+
+        result = validate_upload_payload_json(payload(profile_resampled=profile))
+
+        self.assertFalse(result.ok)
+        self.assertIn("profile_resampled pressure out of range", result.errors)
+
     def test_preflight_rejects_invalid_execution_metadata(self) -> None:
         result = validate_upload_payload_json(
             payload(

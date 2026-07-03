@@ -300,7 +300,11 @@ class GaggimateMQTTClient:
         try:
             parts = msg.topic.split("/")
             mac = parts[1] if len(parts) > 1 else "unknown"
-            payload = json.loads(msg.payload.decode())
+            payload_text = msg.payload.decode().strip()
+            if not payload_text:
+                logger.debug("Ignoring empty MQTT payload on %s", msg.topic)
+                return
+            payload = json.loads(payload_text)
             if msg.topic.endswith("/shot/profile"):
                 self._on_shot(self.translate_shot_payload(payload, mac))
             elif msg.topic.endswith("/rl/rating"):

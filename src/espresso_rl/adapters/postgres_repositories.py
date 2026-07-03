@@ -43,9 +43,28 @@ class PostgresStore:
         except ImportError as exc:
             raise RuntimeError("psycopg[binary] is required for Postgres storage") from exc
 
-        self.conn = psycopg.connect(dsn, row_factory=dict_row)
-        self.conn.autocommit = False
+        self._dsn = dsn
+        self._psycopg = psycopg
+        self._row_factory = dict_row
+        self._conn = None
+        self._connect()
         self._create_tables()
+
+    @property
+    def conn(self):
+        conn = getattr(self, "_conn", None)
+        if conn is None or getattr(conn, "closed", False):
+            self._connect()
+        return self._conn
+
+    @conn.setter
+    def conn(self, value) -> None:
+        self._conn = value
+
+    def _connect(self) -> None:
+        conn = self._psycopg.connect(self._dsn, row_factory=self._row_factory)
+        conn.autocommit = False
+        self._conn = conn
 
     def _create_tables(self) -> None:
         schema_path = Path(__file__).with_name("postgres_schema.sql")
@@ -78,6 +97,9 @@ class PostgresStore:
         for column, definition in {
             "bean_context_name": "TEXT",
             "grinder_context_id": "TEXT",
+            "relative_grind_steps_from_reference": "DOUBLE PRECISION",
+            "relative_grind_um_from_reference": "DOUBLE PRECISION",
+            "microns_per_step": "DOUBLE PRECISION NOT NULL DEFAULT 12.5",
             "shot_type": "TEXT NOT NULL DEFAULT 'espresso'",
             "exclude_from_local_optimization": "BOOLEAN NOT NULL DEFAULT FALSE",
             "optimization_weight": "DOUBLE PRECISION NOT NULL DEFAULT 1.0",
@@ -126,11 +148,21 @@ class PostgresStore:
             "current_absolute_step": "DOUBLE PRECISION",
             "absolute_reference_step": "DOUBLE PRECISION",
             "recommended_grind_delta_steps_from_current": "DOUBLE PRECISION",
+            "recommended_grind_delta_um_from_current": "DOUBLE PRECISION",
+            "recommended_projected_relative_step_from_reference": "DOUBLE PRECISION",
         }.items():
             self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
+        if self._column_exists("shots", "grinder_step_size_um"):
+            # Legacy name for microns_per_step. Keep it nullable/defaulted so old
+            # databases do not reject current inserts that no longer write it.
+            self.conn.execute("ALTER TABLE shots ALTER COLUMN grinder_step_size_um DROP NOT NULL")
+            self.conn.execute("ALTER TABLE shots ALTER COLUMN grinder_step_size_um SET DEFAULT 12.5")
         self.conn.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS grinder_context_id TEXT")
         for column, definition in {
             "grind_delta_steps_from_current": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+            "grind_delta_um_from_current": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+            "projected_relative_step_from_reference": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
+            "projected_relative_grind_um_from_reference": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
             "profile_id": "TEXT",
             "raw_profile_hash": "TEXT",
             "grinder_calibration_mode": "TEXT NOT NULL DEFAULT 'relative_calibrated'",
@@ -142,6 +174,15 @@ class PostgresStore:
             "projected_absolute_step": "DOUBLE PRECISION",
         }.items():
             self.conn.execute(f"ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS {column} {definition}")
+        for column, default in {
+            "grind_delta_steps": "0",
+            "grind_delta_um": "0.0",
+            "next_grind_steps": "0.0",
+            "next_grind_um": "0.0",
+        }.items():
+            if self._column_exists("recommendations", column):
+                self.conn.execute(f"ALTER TABLE recommendations ALTER COLUMN {column} DROP NOT NULL")
+                self.conn.execute(f"ALTER TABLE recommendations ALTER COLUMN {column} SET DEFAULT {default}")
         self.conn.execute(
             "ALTER TABLE shots "
             "ALTER COLUMN recommended_grind_delta_steps_from_current TYPE DOUBLE PRECISION "
@@ -169,6 +210,19 @@ class PostgresStore:
             self.conn.execute(
                 f"ALTER TABLE community_raw_uploads ADD COLUMN IF NOT EXISTS {column} {definition}"
             )
+
+    def _column_exists(self, table: str, column: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema='public' AND table_name=%s AND column_name=%s
+            ) AS exists
+            """,
+            (table, column),
+        ).fetchone()
+        return bool(row["exists"])
 
 
 def _is_postgres_index_statement(statement: str) -> bool:
@@ -905,16 +959,21 @@ class PostgresUploadQueueRepository:
             raise
 
     def list_ready(self, now: int, limit: int = 100) -> list[UploadQueueItem]:
-        rows = self._store.conn.execute(
-            """
-            SELECT * FROM upload_queue
-            WHERE status IN ('pending', 'failed')
-              AND (next_retry_at IS NULL OR next_retry_at <= %s)
-            ORDER BY created_at ASC
-            LIMIT %s
-            """,
-            (now, limit),
-        ).fetchall()
+        try:
+            rows = self._store.conn.execute(
+                """
+                SELECT * FROM upload_queue
+                WHERE status IN ('pending', 'failed')
+                  AND (next_retry_at IS NULL OR next_retry_at <= %s)
+                ORDER BY created_at ASC
+                LIMIT %s
+                """,
+                (now, limit),
+            ).fetchall()
+            self._store.conn.commit()
+        except Exception:
+            self._store.conn.rollback()
+            raise
         return [_row_to_upload_item(row) for row in rows]
 
     def update_status(
@@ -958,21 +1017,31 @@ class PostgresUploadQueueRepository:
         self._store.conn.commit()
 
     def count_by_status(self) -> dict[UploadQueueStatus, int]:
-        rows = self._store.conn.execute(
-            "SELECT status, COUNT(*) AS count FROM upload_queue GROUP BY status"
-        ).fetchall()
+        try:
+            rows = self._store.conn.execute(
+                "SELECT status, COUNT(*) AS count FROM upload_queue GROUP BY status"
+            ).fetchall()
+            self._store.conn.commit()
+        except Exception:
+            self._store.conn.rollback()
+            raise
         return {UploadQueueStatus(row["status"]): int(row["count"]) for row in rows}
 
     def list_by_status(self, status: UploadQueueStatus, limit: int = 100) -> list[UploadQueueItem]:
-        rows = self._store.conn.execute(
-            """
-            SELECT * FROM upload_queue
-            WHERE status=%s
-            ORDER BY updated_at DESC, created_at DESC
-            LIMIT %s
-            """,
-            (UploadQueueStatus(status).value, limit),
-        ).fetchall()
+        try:
+            rows = self._store.conn.execute(
+                """
+                SELECT * FROM upload_queue
+                WHERE status=%s
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT %s
+                """,
+                (UploadQueueStatus(status).value, limit),
+            ).fetchall()
+            self._store.conn.commit()
+        except Exception:
+            self._store.conn.rollback()
+            raise
         return [_row_to_upload_item(row) for row in rows]
 
     def requeue(

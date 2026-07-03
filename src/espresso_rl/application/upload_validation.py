@@ -463,7 +463,7 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
 
 def _validate_profile_resampled(profile: Any, errors: list[str]) -> None:
     ranges = [
-        (0, 15, "pressure"),
+        (0, 20, "pressure"),
         (0, 15, "target_pressure"),
         (0, 20, "pump_flow"),
         (0, 20, "target_flow"),
