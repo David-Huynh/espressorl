@@ -304,6 +304,9 @@ payloads.
 
 Community upload is optional. Local recommendations and local Postgres data
 collection work without Supabase.
+The upload worker is best-effort: transient network/server failures retry in
+the background, while schema or credential rejections discard only the queued
+upload snapshot and retain local optimizer evidence.
 
 `community_upload_enabled` is the backend deployment gate. It must be true for
 the container to register upload credentials and run the upload worker, but it

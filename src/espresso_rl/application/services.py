@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import re
 from dataclasses import dataclass
 from typing import Callable
@@ -61,6 +62,8 @@ LOCAL_BEAN_HISTORY_LOOKBACK = 500
 MAX_LOCAL_BEAN_HISTORY_PRIORS = 64
 MIN_LOCAL_BEAN_HISTORY_RANK_SCALE = 0.35
 MAX_LOCAL_BEAN_HISTORY_OBSERVATION_NOISE = 0.75
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -1102,7 +1105,14 @@ class EspressoRLService:
             and self.community_upload_enabled_for(shot.install_id, shot.machine_id)
             and _shot_is_community_uploadable(shot)
         ):
-            self._upload_queue.enqueue(make_shot_upload_item(shot, now))
+            try:
+                self._upload_queue.enqueue(make_shot_upload_item(shot, now))
+            except Exception as exc:
+                logger.warning(
+                    "Community upload enqueue failed for shot %s; local shot was retained: %s",
+                    shot.shot_id,
+                    exc,
+                )
 
     def _store_recommendation(
         self,
@@ -1120,7 +1130,14 @@ class EspressoRLService:
         # repeated shown_count bumps, updated_at-only changes, and idle re-marks.
         if prior is not None and _recommendation_signature(prior) == _recommendation_signature(recommendation):
             return
-        self._upload_queue.enqueue(make_recommendation_upload_item(recommendation, now))
+        try:
+            self._upload_queue.enqueue(make_recommendation_upload_item(recommendation, now))
+        except Exception as exc:
+            logger.warning(
+                "Community upload enqueue failed for recommendation %s; local recommendation was retained: %s",
+                recommendation.recommendation_id,
+                exc,
+            )
 
 
 def _shot_is_community_uploadable(shot: ShotRecord) -> bool:

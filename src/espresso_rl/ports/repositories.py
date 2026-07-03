@@ -113,6 +113,7 @@ class UploadQueueRepository(Protocol):
         now: int,
         limit: int = 100,
         local_record_id: str | None = None,
+        delete_linked_records: bool = True,
     ) -> dict[str, int]:
         ...
 

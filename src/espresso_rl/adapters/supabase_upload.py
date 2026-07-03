@@ -155,20 +155,22 @@ class UploadQueueWorker:
                 )
                 uploaded += 1
             except UploadCredentialRejected as exc:
-                now = int(self._clock())
-                attempts = item.attempt_count + 1
-                retry_at = now + _retry_delay_s(attempts)
+                rejected_at = int(self._clock())
                 self._queue.update_status(
                     item.upload_id,
-                    UploadQueueStatus.FAILED,
-                    now=now,
+                    UploadQueueStatus.REJECTED,
+                    now=rejected_at,
                     error_message=f"upload credential rejected: HTTP {exc.status}: {exc}",
-                    next_retry_at=retry_at,
+                )
+                self._queue.purge_rejected_artifacts(
+                    now=rejected_at,
+                    limit=1,
+                    local_record_id=item.local_record_id,
+                    delete_linked_records=False,
                 )
                 logger.warning(
-                    "Upload credential rejected for %s; retaining local record and retrying at %s",
+                    "Upload credential rejected for %s; discarded queued upload snapshot and retained local record",
                     item.upload_id,
-                    retry_at,
                 )
             except UploadRejected as exc:
                 rejected_at = int(self._clock())
@@ -182,8 +184,14 @@ class UploadQueueWorker:
                     now=rejected_at,
                     limit=1,
                     local_record_id=item.local_record_id,
+                    delete_linked_records=False,
                 )
-                logger.warning("Upload rejected for %s: HTTP %d %s", item.upload_id, exc.status, exc)
+                logger.warning(
+                    "Upload rejected for %s: HTTP %d %s; discarded queued upload snapshot and retained local record",
+                    item.upload_id,
+                    exc.status,
+                    exc,
+                )
             except UploadRateLimited as exc:
                 # Backpressure, not a failure: defer until the bucket resets and do
                 # not charge an attempt, so rate limiting can never dead-letter.

@@ -1300,6 +1300,7 @@ class SQLiteUploadQueueRepository:
         now: int,
         limit: int = 100,
         local_record_id: str | None = None,
+        delete_linked_records: bool = True,
     ) -> dict[str, int]:
         del now
         conn = self._store.conn
@@ -1330,7 +1331,9 @@ class SQLiteUploadQueueRepository:
             record_type = row["local_record_type"]
             record_id = row["local_record_id"]
             deleted_linked = False
-            if record_type == "shot":
+            if not delete_linked_records:
+                pass
+            elif record_type == "shot":
                 cursor = conn.execute(
                     "DELETE FROM shots WHERE shot_id=?",
                     (record_id,),

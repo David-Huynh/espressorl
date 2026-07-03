@@ -254,6 +254,11 @@ class RecordingUploadQueue:
         ]
 
 
+class FailingUploadQueue:
+    def enqueue(self, item: UploadQueueItem) -> None:
+        raise RuntimeError(f"upload queue unavailable for {item.local_record_id}")
+
+
 class CapturingOptimizer:
     def __init__(self) -> None:
         self.contexts: list[OptimizationContext] = []
@@ -1508,6 +1513,28 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertTrue(
             any(feedback.recommendation.recommendation_id in payload for payload in payloads)
         )
+
+    def test_upload_queue_failure_does_not_block_local_shot_feedback_or_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(
+            shots,
+            recs,
+            optimizer,
+            upload_queue=FailingUploadQueue(),
+            clock=lambda: 10,
+            community_upload_enabled_default=True,
+        )
+
+        result = service.ingest_shot_profile(shot_event("shot_1", 1))
+        feedback = service.record_feedback(feedback_event("shot_1", 2, rating=4))
+
+        self.assertIsNotNone(result.shot)
+        self.assertIsNotNone(shots.get("shot_1"))
+        self.assertIsNotNone(feedback.recommendation)
+        self.assertIsNotNone(recs.get(feedback.recommendation.recommendation_id))
+        self.assertEqual(len(optimizer.contexts), 1)
 
     def test_community_upload_requires_explicit_consent_before_queueing(self) -> None:
         shots = MemoryShotRepository()

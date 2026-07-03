@@ -1054,7 +1054,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
 
                 self.assertEqual(notifications, [])
 
-    def test_worker_purges_local_shot_after_permanent_rejection(self) -> None:
+    def test_worker_discards_rejected_upload_snapshot_without_deleting_local_shot(self) -> None:
         class RejectingClient:
             def upload(self, item: UploadQueueItem) -> None:
                 raise UploadRejected(422, "schema")
@@ -1073,13 +1073,13 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
 
                 worker.run_once()
 
-                self.assertIsNone(shots.get("shot_1"))
+                self.assertIsNotNone(shots.get("shot_1"))
                 self.assertEqual(
                     store.conn.execute("SELECT COUNT(*) AS c FROM upload_queue").fetchone()["c"],
                     0,
                 )
 
-    def test_worker_retains_local_shot_when_upload_credential_is_rejected(self) -> None:
+    def test_worker_discards_credential_rejected_upload_snapshot_without_deleting_local_shot(self) -> None:
         class CredentialRejectingClient:
             def upload(self, item: UploadQueueItem) -> None:
                 raise UploadCredentialRejected(403, "unknown or revoked upload credential")
@@ -1097,13 +1097,10 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 worker.run_once()
 
                 self.assertIsNotNone(shots.get("shot_1"))
-                row = store.conn.execute(
-                    "SELECT status, attempt_count, next_retry_at, error_message FROM upload_queue WHERE upload_id='u_a'"
-                ).fetchone()
-                self.assertEqual(row["status"], "failed")
-                self.assertEqual(row["attempt_count"], 1)
-                self.assertGreater(row["next_retry_at"], 100)
-                self.assertIn("credential rejected", row["error_message"])
+                self.assertEqual(
+                    store.conn.execute("SELECT COUNT(*) AS c FROM upload_queue").fetchone()["c"],
+                    0,
+                )
 
     def test_worker_defers_rate_limited_upload_without_charging_attempt(self) -> None:
         class LimitedClient:
