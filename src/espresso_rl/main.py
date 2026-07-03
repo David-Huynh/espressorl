@@ -4,6 +4,7 @@ import logging
 import signal
 import sys
 import threading
+from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
@@ -228,7 +229,7 @@ def main() -> None:
 
     stop_event = threading.Event()
     admin_pipeline = maybe_build_admin_pipeline_service(config)
-    upload_thread = maybe_start_upload_worker(config, upload_queue_repo, stop_event)
+    upload_thread: threading.Thread | None = None
     collector_thread = maybe_start_admin_collector_worker(
         config,
         stop_event,
@@ -247,6 +248,12 @@ def main() -> None:
     )
 
     mqtt_client: GaggimateMQTTClient
+    status_context_lock = threading.Lock()
+    status_context: dict[str, str | None] = {
+        "machine_id": config.machine_id,
+        "bean_context_id": config.bean_context_id,
+        "grinder_context_id": config.grinder_context_id,
+    }
 
     def record_shadow_evaluation(shot, recommendation) -> None:
         result = try_record_shadow_evaluation(
@@ -271,6 +278,10 @@ def main() -> None:
         last_recommendation_at: int | None = None,
         mode: str | None = None,
     ) -> None:
+        with status_context_lock:
+            status_context["machine_id"] = machine_id
+            status_context["bean_context_id"] = bean_context_id
+            status_context["grinder_context_id"] = grinder_context_id
         status = build_status_payload(
             config=config,
             service=service,
@@ -293,6 +304,13 @@ def main() -> None:
             dreamer_live_ack_summary=dreamer_live_acknowledgements.status_summary(machine_id),
         )
         mqtt_client.publish_status(machine_id, status)
+
+    def publish_upload_queue_status() -> None:
+        with status_context_lock:
+            machine_id = status_context["machine_id"] or config.machine_id
+            bean_context_id = status_context["bean_context_id"]
+            grinder_context_id = status_context["grinder_context_id"]
+        publish_status(machine_id, bean_context_id, grinder_context_id)
 
     class RuntimePublisher:
         def publish_recommendation(self, recommendation: Recommendation) -> None:
@@ -537,6 +555,12 @@ def main() -> None:
     signal.signal(signal.SIGINT, shutdown)
 
     mqtt_client.start()
+    upload_thread = maybe_start_upload_worker(
+        config,
+        upload_queue_repo,
+        stop_event,
+        on_queue_changed=publish_upload_queue_status,
+    )
     maybe_publish_startup_recommendation(
         config,
         service,
@@ -1394,6 +1418,8 @@ def maybe_start_upload_worker(
     config: Config,
     upload_queue_repo: UploadQueueRepository,
     stop_event: threading.Event,
+    *,
+    on_queue_changed: Callable[[], None] | None = None,
 ) -> threading.Thread | None:
     if config.deployment_role == "admin":
         logger.info("Admin deployment role selected; community upload push is disabled to prevent duplicate data.")
@@ -1416,7 +1442,12 @@ def maybe_start_upload_worker(
             max_payload_bytes=config.upload_max_payload_bytes,
         )
     )
-    worker = UploadQueueWorker(upload_queue_repo, client, clock=config.now)
+    worker = UploadQueueWorker(
+        upload_queue_repo,
+        client,
+        clock=config.now,
+        on_queue_changed=on_queue_changed,
+    )
 
     def loop() -> None:
         logger.info("Community upload worker started")

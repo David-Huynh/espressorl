@@ -125,15 +125,19 @@ class UploadQueueWorker:
         queue: UploadQueueRepository,
         client: SignedSupabaseUploadClient,
         clock: Callable[[], int] = lambda: int(time.time()),
+        on_queue_changed: Callable[[], None] | None = None,
     ) -> None:
         self._queue = queue
         self._client = client
         self._clock = clock
+        self._on_queue_changed = on_queue_changed
 
     def run_once(self, limit: int = 25) -> int:
         now = int(self._clock())
         uploaded = 0
+        attempted = False
         for item in self._queue.list_ready(now=now, limit=limit):
+            attempted = True
             try:
                 validation = validate_upload_envelope(item.payload_json, item.payload_hash)
                 if not validation.ok:
@@ -206,6 +210,11 @@ class UploadQueueWorker:
                     next_retry_at=retry_at,
                 )
                 logger.warning("Upload failed for %s; retry at %s", item.upload_id, retry_at)
+        if attempted and self._on_queue_changed is not None:
+            try:
+                self._on_queue_changed()
+            except Exception:
+                logger.exception("Upload queue status callback failed")
         return uploaded
 
 

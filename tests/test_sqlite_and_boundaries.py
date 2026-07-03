@@ -1005,6 +1005,55 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertGreater(row["next_retry_at"], 100)
                 self.assertEqual([item.upload_id for item in queue.list_ready(now=10_000)], ["u_a"])
 
+    def test_worker_notifies_once_after_each_queue_changing_cycle(self) -> None:
+        class SuccessfulClient:
+            def upload(self, item: UploadQueueItem) -> None:
+                return None
+
+        class RejectingClient:
+            def upload(self, item: UploadQueueItem) -> None:
+                raise UploadRejected(422, "schema")
+
+        class FailingClient:
+            def upload(self, item: UploadQueueItem) -> None:
+                raise RuntimeError("network")
+
+        for label, client in (
+            ("uploaded", SuccessfulClient()),
+            ("rejected", RejectingClient()),
+            ("failed", FailingClient()),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                    queue = SQLiteUploadQueueRepository(store)
+                    queue.enqueue(uploadable_queue_item("u_a"))
+                    notifications: list[str] = []
+                    worker = UploadQueueWorker(
+                        queue,
+                        client,
+                        clock=lambda: 100,
+                        on_queue_changed=lambda: notifications.append("changed"),
+                    )
+
+                    worker.run_once()
+
+                    self.assertEqual(notifications, ["changed"])
+
+    def test_worker_does_not_notify_when_queue_is_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                notifications: list[str] = []
+                worker = UploadQueueWorker(
+                    SQLiteUploadQueueRepository(store),
+                    object(),
+                    clock=lambda: 100,
+                    on_queue_changed=lambda: notifications.append("changed"),
+                )
+
+                worker.run_once()
+
+                self.assertEqual(notifications, [])
+
     def test_worker_purges_local_shot_after_permanent_rejection(self) -> None:
         class RejectingClient:
             def upload(self, item: UploadQueueItem) -> None:
