@@ -119,6 +119,9 @@ SET feedback_recorded = TRUE
 WHERE feedback_recorded = FALSE AND human_rating IS NOT NULL;
 
 ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS recommended_grind_delta_steps_from_current DOUBLE PRECISION;
+
+ALTER TABLE shots
     ALTER COLUMN recommended_grind_delta_steps_from_current TYPE DOUBLE PRECISION
     USING recommended_grind_delta_steps_from_current::DOUBLE PRECISION;
 
@@ -176,6 +179,9 @@ ALTER TABLE recommendations
 
 ALTER TABLE recommendations
     ADD COLUMN IF NOT EXISTS raw_profile_hash TEXT;
+
+ALTER TABLE recommendations
+    ADD COLUMN IF NOT EXISTS grind_delta_steps_from_current DOUBLE PRECISION NOT NULL DEFAULT 0.0;
 
 ALTER TABLE recommendations
     ALTER COLUMN grind_delta_steps_from_current TYPE DOUBLE PRECISION

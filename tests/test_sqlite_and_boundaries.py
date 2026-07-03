@@ -1097,6 +1097,14 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("normalized_alias TEXT NOT NULL", schema)
         self.assertIn("feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE", schema)
         self.assertIn("ADD COLUMN IF NOT EXISTS feedback_recorded", schema)
+        self.assertIn(
+            "ADD COLUMN IF NOT EXISTS recommended_grind_delta_steps_from_current",
+            schema,
+        )
+        self.assertIn(
+            "ADD COLUMN IF NOT EXISTS grind_delta_steps_from_current",
+            schema,
+        )
 
     def test_postgres_store_runs_legacy_migrations_before_indexes(self) -> None:
         class RecordingConnection:
@@ -1136,9 +1144,27 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         shadow_quality_index = statement_index(
             "CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context_contract"
         )
+        shot_grind_delta_add = statement_index(
+            "ALTER TABLE shots",
+            "ADD COLUMN IF NOT EXISTS recommended_grind_delta_steps_from_current",
+        )
+        shot_grind_delta_type = statement_index(
+            "ALTER TABLE shots",
+            "ALTER COLUMN recommended_grind_delta_steps_from_current TYPE DOUBLE PRECISION",
+        )
+        recommendation_grind_delta_add = statement_index(
+            "ALTER TABLE recommendations",
+            "ADD COLUMN IF NOT EXISTS grind_delta_steps_from_current",
+        )
+        recommendation_grind_delta_type = statement_index(
+            "ALTER TABLE recommendations",
+            "ALTER COLUMN grind_delta_steps_from_current TYPE DOUBLE PRECISION",
+        )
 
         self.assertLess(shadow_eval_migration, shadow_eval_index)
         self.assertLess(shadow_quality_migration, shadow_quality_index)
+        self.assertLess(shot_grind_delta_add, shot_grind_delta_type)
+        self.assertLess(recommendation_grind_delta_add, recommendation_grind_delta_type)
         self.assertTrue(store.conn.committed)
 
     def test_core_layers_do_not_import_adapters_or_infrastructure(self) -> None:

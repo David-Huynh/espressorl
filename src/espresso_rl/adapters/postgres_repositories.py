@@ -125,10 +125,12 @@ class PostgresStore:
             "grinder_reference_label": "TEXT NOT NULL DEFAULT 'reference'",
             "current_absolute_step": "DOUBLE PRECISION",
             "absolute_reference_step": "DOUBLE PRECISION",
+            "recommended_grind_delta_steps_from_current": "DOUBLE PRECISION",
         }.items():
             self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
         self.conn.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS grinder_context_id TEXT")
         for column, definition in {
+            "grind_delta_steps_from_current": "DOUBLE PRECISION NOT NULL DEFAULT 0.0",
             "profile_id": "TEXT",
             "raw_profile_hash": "TEXT",
             "grinder_calibration_mode": "TEXT NOT NULL DEFAULT 'relative_calibrated'",
