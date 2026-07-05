@@ -1124,6 +1124,38 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertGreater(updated.shot.reward or 0.0, 0.8)
         self.assertEqual(updated.shot.reward_confidence, 1.0)
 
+    def test_changed_recipe_shot_keeps_recommendation_association(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+
+        first = ingest_and_feedback(service, shot_event("shot_1", 1))
+        service.record_recommendation_decision(
+            RecommendationDecisionEvent(
+                recommendation_id=first.recommendation_id,
+                decision=RecommendationDecision.ACCEPTED,
+                timestamp=2,
+            )
+        )
+
+        service.ingest_shot_profile(
+            shot_event(
+                "shot_2",
+                3,
+                recommendation_id=first.recommendation_id,
+                relative_grind_steps_from_reference=first.projected_relative_step_from_reference + 10,
+                dose_in_g=first.next_dose_g + 2.0,
+                target_yield_g=first.target_yield_g + 12.0,
+                beverage_out_g=first.target_yield_g + 12.0,
+            )
+        )
+        shot = shots.get("shot_2")
+
+        self.assertIsNotNone(shot)
+        self.assertEqual(shot.recommendation_id, first.recommendation_id)  # type: ignore[union-attr]
+        self.assertEqual(shot.recommendation_followed, FollowThroughState.NOT_FOLLOWED)  # type: ignore[union-attr]
+        self.assertEqual(shot.recommendation_attribution_weight, 0.0)  # type: ignore[union-attr]
+
     def test_close_yield_and_small_negative_tare_remain_valid_training_data(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
@@ -1340,13 +1372,13 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(shown.status, RecommendationStatus.SHOWN)  # type: ignore[union-attr]
         self.assertEqual(shown.shown_count, 1)  # type: ignore[union-attr]
 
-    def test_stale_manual_recipe_change_expires_old_recommendation(self) -> None:
+    def test_machine_state_recipe_change_does_not_expire_current_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
         service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
 
         old = ingest_and_feedback(service, shot_event("shot_1", 1))
-        new = service.handle_machine_state(
+        shown = service.handle_machine_state(
             MachineStateEvent(
                 install_id="install_1",
                 machine_id="machine_1",
@@ -1361,9 +1393,9 @@ class ApplicationServiceTests(unittest.TestCase):
             )
         )
 
-        self.assertIsNotNone(new)
-        self.assertNotEqual(new.recommendation_id, old.recommendation_id)  # type: ignore[union-attr]
-        self.assertEqual(recs.get(old.recommendation_id).status, RecommendationStatus.EXPIRED)  # type: ignore[union-attr]
+        self.assertIsNotNone(shown)
+        self.assertEqual(shown.recommendation_id, old.recommendation_id)  # type: ignore[union-attr]
+        self.assertEqual(recs.get(old.recommendation_id).status, RecommendationStatus.SHOWN)  # type: ignore[union-attr]
 
     def test_accepted_recommendation_is_not_reprompted_as_shown_on_wake(self) -> None:
         shots = MemoryShotRepository()

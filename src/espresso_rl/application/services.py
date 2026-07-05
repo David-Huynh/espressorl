@@ -709,7 +709,6 @@ class EspressoRLService:
                 now=now,
                 bean_context_id=event.bean_context_id,
                 grinder_context_id=event.grinder_context_id,
-                current_recipe=current_recipe,
             )
             if stale.stale:
                 self._expire_recommendation(current, now)
@@ -932,16 +931,6 @@ class EspressoRLService:
         raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         profile_scope = _profile_scope_key(profile_id=event.profile_id, raw_profile_hash=raw_profile_hash)
-        current_recipe = None
-        if event.relative_grind_steps_from_reference is not None:
-            current_recipe = Recipe(
-                relative_grind_steps_from_reference=event.relative_grind_steps_from_reference,
-                microns_per_step=event.microns_per_step,
-                dose_g=event.dose_in_g,
-                target_yield_g=event.target_yield_g,
-                grinder_step_direction=event.grinder_step_direction,
-                grinder_adjustment_mode=event.grinder_adjustment_mode,
-            )
         if event.recommendation_id:
             recommendation = self._recommendations.get(event.recommendation_id)
             if (
@@ -952,7 +941,6 @@ class EspressoRLService:
                     now=now,
                     bean_context_id=event.bean_context_id,
                     grinder_context_id=event.grinder_context_id,
-                    current_recipe=current_recipe,
                 ).stale
             ):
                 return recommendation
@@ -972,7 +960,6 @@ class EspressoRLService:
             now=now,
             bean_context_id=event.bean_context_id,
             grinder_context_id=event.grinder_context_id,
-            current_recipe=current_recipe,
         ).stale:
             return None
         return recommendation
