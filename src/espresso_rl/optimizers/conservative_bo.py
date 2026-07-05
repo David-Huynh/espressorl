@@ -17,6 +17,11 @@ from espresso_rl.domain.optimization import OptimizationContext, PriorPoint, Pri
 from espresso_rl.domain.safety import clamp_candidate_recipe, validate_recommendation
 
 MAX_USABLE_PRIOR_POINTS = 64
+MIN_RESPONSE_IMPROVEMENT = 0.03
+WORSENED_RESPONSE_DELTA = -0.02
+FLAT_RESPONSE_SEVERITY = 0.6
+WORSE_RESPONSE_SEVERITY = 1.0
+REPEATED_BAD_DIRECTION_PENALTY = 0.08
 
 
 class ConservativeBOOptimizer:
@@ -33,6 +38,8 @@ class ConservativeBOOptimizer:
         shots = self._optimizer_shots(list(context.shots))
         prior_points = self._usable_prior_points(context, len(shots))
         prior_signals = self._usable_prior_signals(context, len(shots))
+        response_evidence = self._non_improving_response_evidence(shots)
+        prior_signals = self._damp_prior_signals_for_response(prior_signals, response_evidence)
         current = context.current_recipe
 
         if not shots:
@@ -55,6 +62,7 @@ class ConservativeBOOptimizer:
                 shots=shots,
                 prior_points=prior_points,
                 prior_signals=prior_signals,
+                response_evidence=response_evidence,
                 context=context,
                 center=center,
                 radius_steps=radius_steps,
@@ -161,6 +169,7 @@ class ConservativeBOOptimizer:
         shots: list[ShotRecord],
         prior_points: list[PriorPoint],
         prior_signals: list[PriorSignal],
+        response_evidence: dict[str, tuple[int, float]],
         context: OptimizationContext,
         center: ShotRecord,
         radius_steps: int,
@@ -206,6 +215,7 @@ class ConservativeBOOptimizer:
                         shots,
                         prior_points,
                         prior_signals,
+                        response_evidence,
                         context,
                         radius_steps,
                         radius_yield_g,
@@ -284,6 +294,7 @@ class ConservativeBOOptimizer:
         shots: list[ShotRecord],
         prior_points: list[PriorPoint],
         prior_signals: list[PriorSignal],
+        response_evidence: dict[str, tuple[int, float]],
         context: OptimizationContext,
         radius_steps: int,
         radius_yield_g: float,
@@ -323,9 +334,14 @@ class ConservativeBOOptimizer:
             dose_radius_g=dose_radius_g,
         )
 
-        distance_from_current = abs(candidate.relative_grind_steps_from_reference - context.current_recipe.relative_grind_steps_from_reference) / max(radius_steps, 1)
-        distance_from_current += abs(candidate.target_yield_g - context.current_recipe.target_yield_g) / max(radius_yield_g, 1.0)
-        distance_from_current += abs(candidate.dose_g - context.current_recipe.dose_g) / max(dose_radius_g, 0.5)
+        movements = self._normalized_movements(
+            candidate,
+            context,
+            radius_steps=radius_steps,
+            radius_yield_g=radius_yield_g,
+            dose_radius_g=dose_radius_g,
+        )
+        distance_from_current = abs(movements["grind"]) + abs(movements["ratio"]) + abs(movements["dose"])
 
         exploration_bonus = 0.05 * min(min_distance if math.isfinite(min_distance) else 0.0, 1.0)
         evidence_strength = max(
@@ -335,7 +351,8 @@ class ConservativeBOOptimizer:
         distance_penalty_rate = 0.03 - 0.015 * evidence_strength
         distance_penalty = distance_penalty_rate * distance_from_current
         oscillation_penalty = self._oscillation_penalty(candidate, context)
-        return predicted_reward + exploration_bonus - distance_penalty - oscillation_penalty
+        response_penalty = self._non_improving_response_penalty(movements, response_evidence)
+        return predicted_reward + exploration_bonus - distance_penalty - oscillation_penalty - response_penalty
 
     def _blend_prior_reward(
         self,
@@ -473,27 +490,13 @@ class ConservativeBOOptimizer:
         if prior_decay <= 0:
             return 0.0
 
-        current = context.current_recipe
-        numeric_grind_delta = (
-            candidate.relative_grind_steps_from_reference
-            - current.relative_grind_steps_from_reference
+        normalized_movements = self._normalized_movements(
+            candidate,
+            context,
+            radius_steps=radius_steps,
+            radius_yield_g=radius_yield_g,
+            dose_radius_g=dose_radius_g,
         )
-        physical_grind_delta = numeric_grind_delta * current.grinder_direction_sign
-        normalized_movements = {
-            "grind": max(-1.0, min(1.0, physical_grind_delta / max(radius_steps, 1))),
-            "ratio": max(
-                -1.0,
-                min(
-                    1.0,
-                    ((candidate.target_ratio or candidate.target_yield_g / candidate.dose_g) - (current.target_ratio or current.target_yield_g / current.dose_g))
-                    / max(radius_yield_g / current.dose_g, 0.1),
-                ),
-            ),
-            "dose": max(
-                -1.0,
-                min(1.0, (candidate.dose_g - current.dose_g) / max(dose_radius_g, 0.5)),
-            ),
-        }
 
         weighted_alignment = 0.0
         total_weight = 0.0
@@ -518,6 +521,164 @@ class ConservativeBOOptimizer:
         if total_weight <= 0:
             return 0.0
         return 0.12 * prior_decay * weighted_alignment / total_weight
+
+    def _non_improving_response_evidence(self, shots: list[ShotRecord]) -> dict[str, tuple[int, float]]:
+        eligible = self._eligible_shots(shots)
+        if len(eligible) < 2:
+            return {}
+        previous, latest = eligible[-2], eligible[-1]
+        if latest.recommendation_followed not in {
+            FollowThroughState.FOLLOWED,
+            FollowThroughState.PARTIALLY_FOLLOWED,
+        }:
+            return {}
+        outcome_delta = self._outcome_delta(previous, latest)
+        if outcome_delta is None or outcome_delta > MIN_RESPONSE_IMPROVEMENT:
+            return {}
+
+        severity = WORSE_RESPONSE_SEVERITY if outcome_delta < WORSENED_RESPONSE_DELTA else FLAT_RESPONSE_SEVERITY
+        evidence: dict[str, tuple[int, float]] = {}
+        for axis, direction in {
+            "grind": self._followed_grind_direction(latest),
+            "ratio": self._followed_ratio_direction(previous, latest),
+            "dose": self._followed_dose_direction(previous, latest),
+        }.items():
+            if direction:
+                evidence[axis] = (direction, severity)
+        return evidence
+
+    def _outcome_delta(self, previous: ShotRecord, latest: ShotRecord) -> float | None:
+        if previous.human_rating is not None and latest.human_rating is not None:
+            rating_delta = (latest.human_rating - previous.human_rating) / 4.0
+            if abs(rating_delta) > 1e-9:
+                return rating_delta
+        if previous.reward is not None and latest.reward is not None:
+            return latest.reward - previous.reward
+        return None
+
+    def _followed_grind_direction(self, shot: ShotRecord) -> int:
+        delta_um = shot.recommended_grind_delta_um_from_current
+        if delta_um is None and shot.recommended_grind_delta_steps_from_current is not None:
+            delta_um = (
+                shot.recommended_grind_delta_steps_from_current
+                * shot.microns_per_step
+                * shot.grinder_direction_sign
+            )
+        return self._direction(delta_um)
+
+    def _followed_ratio_direction(self, previous: ShotRecord, latest: ShotRecord) -> int:
+        target_ratio = latest.recommended_target_ratio
+        if target_ratio is None and latest.recommended_target_yield_g is not None:
+            dose = latest.recommended_dose_g or previous.dose_in_g
+            target_ratio = latest.recommended_target_yield_g / dose
+        if target_ratio is None:
+            target_ratio = latest.target_ratio
+        previous_ratio = previous.target_ratio or previous.target_yield_g / previous.dose_in_g
+        return self._direction(None if target_ratio is None else target_ratio - previous_ratio)
+
+    def _followed_dose_direction(self, previous: ShotRecord, latest: ShotRecord) -> int:
+        if latest.recommended_dose_g is None:
+            return 0
+        return self._direction(latest.recommended_dose_g - previous.dose_in_g)
+
+    def _damp_prior_signals_for_response(
+        self,
+        signals: list[PriorSignal],
+        response_evidence: dict[str, tuple[int, float]],
+    ) -> list[PriorSignal]:
+        if not response_evidence:
+            return signals
+
+        damped: list[PriorSignal] = []
+        for signal in signals:
+            grind_direction, grind_scale = self._damped_signal_axis(
+                signal.grind_direction,
+                response_evidence.get("grind"),
+            )
+            ratio_direction, ratio_scale = self._damped_signal_axis(
+                signal.ratio_direction,
+                response_evidence.get("ratio"),
+            )
+            dose_direction, dose_scale = self._damped_signal_axis(
+                signal.dose_direction,
+                response_evidence.get("dose"),
+            )
+            if not any((grind_direction, ratio_direction, dose_direction)):
+                continue
+            confidence_scale = min(grind_scale, ratio_scale, dose_scale)
+            damped.append(
+                PriorSignal(
+                    grind_direction=grind_direction,
+                    ratio_direction=ratio_direction,
+                    dose_direction=dose_direction,
+                    confidence=max(0.01, signal.confidence * confidence_scale),
+                    observation_noise=signal.observation_noise,
+                    source=signal.source,
+                    reason=signal.reason,
+                )
+            )
+        return damped
+
+    def _damped_signal_axis(self, signal_direction: int, evidence: tuple[int, float] | None) -> tuple[int, float]:
+        if not signal_direction or evidence is None:
+            return signal_direction, 1.0
+        evidence_direction, severity = evidence
+        if signal_direction != evidence_direction:
+            return signal_direction, 1.0
+        if severity >= WORSE_RESPONSE_SEVERITY:
+            return 0, 0.0
+        return signal_direction, 0.25
+
+    def _normalized_movements(
+        self,
+        candidate,
+        context: OptimizationContext,
+        *,
+        radius_steps: int,
+        radius_yield_g: float,
+        dose_radius_g: float,
+    ) -> dict[str, float]:
+        current = context.current_recipe
+        numeric_grind_delta = (
+            candidate.relative_grind_steps_from_reference
+            - current.relative_grind_steps_from_reference
+        )
+        physical_grind_delta = numeric_grind_delta * current.grinder_direction_sign
+        return {
+            "grind": max(-1.0, min(1.0, physical_grind_delta / max(radius_steps, 1))),
+            "ratio": max(
+                -1.0,
+                min(
+                    1.0,
+                    (
+                        (candidate.target_ratio or candidate.target_yield_g / candidate.dose_g)
+                        - (current.target_ratio or current.target_yield_g / current.dose_g)
+                    )
+                    / max(radius_yield_g / current.dose_g, 0.1),
+                ),
+            ),
+            "dose": max(
+                -1.0,
+                min(1.0, (candidate.dose_g - current.dose_g) / max(dose_radius_g, 0.5)),
+            ),
+        }
+
+    def _non_improving_response_penalty(
+        self,
+        movements: dict[str, float],
+        response_evidence: dict[str, tuple[int, float]],
+    ) -> float:
+        penalty = 0.0
+        for axis, (direction, severity) in response_evidence.items():
+            aligned_movement = movements.get(axis, 0.0) * direction
+            if aligned_movement > 0:
+                penalty += REPEATED_BAD_DIRECTION_PENALTY * severity * min(1.0, aligned_movement)
+        return penalty
+
+    def _direction(self, value: float | None) -> int:
+        if value is None or abs(value) < 1e-9:
+            return 0
+        return 1 if value > 0 else -1
 
     def _prior_source_scale(self, source: str) -> float:
         if source == "local_bean_history":

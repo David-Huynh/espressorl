@@ -227,6 +227,118 @@ class WarmStartPriorTests(unittest.TestCase):
         self.assertLessEqual(abs(recommendation.grind_delta_steps_from_current), 2)
         self.assertLessEqual(abs(recommendation.target_yield_g - current.target_yield_g), 4.0)
 
+    def test_flat_followed_rule_move_damps_same_direction_prior(self) -> None:
+        optimizer = ConservativeBOOptimizer()
+        current = Recipe(40, 12.5, 18.0, 34.0)
+        first = shot_record(
+            "shot_1",
+            timestamp=1,
+            reward=0.25,
+            rating=2,
+            taste_tags=["bitter"],
+        )
+        latest = shot_record(
+            "shot_2",
+            timestamp=2,
+            reward=0.25,
+            rating=2,
+            taste_tags=["bitter"],
+        )
+        latest.relative_grind_steps_from_reference = 40
+        latest.relative_grind_um_from_reference = -25.0
+        latest.target_yield_g = 34.0
+        latest.beverage_out_g = 34.0
+        latest.target_ratio = 34.0 / 18.0
+        latest.recommended_grind_delta_steps_from_current = -2.0
+        latest.recommended_grind_delta_um_from_current = -25.0
+        latest.recommended_target_yield_g = 34.0
+        latest.recommended_target_ratio = 34.0 / 18.0
+        latest.recommendation_followed = FollowThroughState.FOLLOWED
+        signal = bitter_coarser_shorter_signal()
+
+        evidence = optimizer._non_improving_response_evidence([first, latest])
+        damped = optimizer._damp_prior_signals_for_response([signal], evidence)
+        recommendation = optimizer.recommend(
+            OptimizationContext(
+                install_id="install_1",
+                machine_id="machine_1",
+                bean_context_id="bean_1",
+                machine_adapter="gaggimate",
+                current_recipe=current,
+                shots=[first, latest],
+                safety_bounds=SafetyBounds(),
+                now=100,
+                prior_signals=[signal],
+            )
+        )
+
+        self.assertEqual(evidence["grind"][0], -1)
+        self.assertEqual(evidence["ratio"][0], -1)
+        self.assertEqual(len(damped), 1)
+        self.assertLess(damped[0].confidence, signal.confidence)
+        self.assertFalse(
+            recommendation.grind_delta_steps_from_current < 0
+            and recommendation.target_yield_g < current.target_yield_g
+        )
+
+    def test_worse_followed_rule_move_removes_same_direction_prior(self) -> None:
+        optimizer = ConservativeBOOptimizer()
+        first = shot_record("shot_1", timestamp=1, reward=0.35, rating=2, taste_tags=["bitter"])
+        latest = shot_record("shot_2", timestamp=2, reward=0.15, rating=1, taste_tags=["bitter"])
+        latest.relative_grind_steps_from_reference = 40
+        latest.relative_grind_um_from_reference = -25.0
+        latest.target_yield_g = 34.0
+        latest.beverage_out_g = 34.0
+        latest.target_ratio = 34.0 / 18.0
+        latest.recommended_grind_delta_steps_from_current = -2.0
+        latest.recommended_grind_delta_um_from_current = -25.0
+        latest.recommended_target_yield_g = 34.0
+        latest.recommended_target_ratio = 34.0 / 18.0
+        latest.recommendation_followed = FollowThroughState.FOLLOWED
+        signal = bitter_coarser_shorter_signal()
+
+        evidence = optimizer._non_improving_response_evidence([first, latest])
+        damped = optimizer._damp_prior_signals_for_response([signal], evidence)
+
+        self.assertEqual(evidence["grind"][0], -1)
+        self.assertEqual(evidence["ratio"][0], -1)
+        self.assertEqual(damped, [])
+
+    def test_improving_followed_rule_move_keeps_prior_active(self) -> None:
+        optimizer = ConservativeBOOptimizer()
+        current = Recipe(40, 12.5, 18.0, 34.0)
+        first = shot_record("shot_1", timestamp=1, reward=0.15, rating=1, taste_tags=["bitter"])
+        latest = shot_record("shot_2", timestamp=2, reward=0.55, rating=3, taste_tags=["bitter"])
+        latest.relative_grind_steps_from_reference = 40
+        latest.relative_grind_um_from_reference = -25.0
+        latest.target_yield_g = 34.0
+        latest.beverage_out_g = 34.0
+        latest.target_ratio = 34.0 / 18.0
+        latest.recommended_grind_delta_steps_from_current = -2.0
+        latest.recommended_grind_delta_um_from_current = -25.0
+        latest.recommended_target_yield_g = 34.0
+        latest.recommended_target_ratio = 34.0 / 18.0
+        latest.recommendation_followed = FollowThroughState.FOLLOWED
+        signal = bitter_coarser_shorter_signal()
+
+        evidence = optimizer._non_improving_response_evidence([first, latest])
+        recommendation = optimizer.recommend(
+            OptimizationContext(
+                install_id="install_1",
+                machine_id="machine_1",
+                bean_context_id="bean_1",
+                machine_adapter="gaggimate",
+                current_recipe=current,
+                shots=[first, latest],
+                safety_bounds=SafetyBounds(),
+                now=100,
+                prior_signals=[signal],
+            )
+        )
+
+        self.assertEqual(evidence, {})
+        self.assertEqual(recommendation.mode, RecommendationMode.WARM_STARTED_BO)
+
     def test_first_short_shot_without_directional_feedback_stays_small(self) -> None:
         current = Recipe(42, 12.5, 18.0, 36.0)
         context = OptimizationContext(
@@ -725,6 +837,17 @@ def shot_record(
         taste_tags=taste_tags or [],
         feedback_recorded=True,
         recommendation_followed=FollowThroughState.FOLLOWED,
+    )
+
+
+def bitter_coarser_shorter_signal() -> PriorSignal:
+    return PriorSignal(
+        grind_direction=-1,
+        ratio_direction=-1,
+        dose_direction=0,
+        confidence=0.65,
+        observation_noise=0.3,
+        source="user_rule",
     )
 
 
