@@ -804,6 +804,7 @@ def build_status_payload(
         machine_id=machine_id,
         bean_context_id=bean_context_id,
         grinder_context_id=grinder_context_id,
+        profile_id=profile_id,
     )
     last_shot_record = (
         next((shot for shot in reversed(all_recent) if shot.shot_id == last_shot_id), None)

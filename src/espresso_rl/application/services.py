@@ -303,7 +303,7 @@ class EspressoRLService:
         fixed_cadence_sequence = build_fixed_cadence_sequence(event)
         profile = profile_quality.profile
         raw_profile_hash = profile_hash(profile)
-        recommendation = self._recommendation_for_event(event, now)
+        recommendation = self._recommendation_for_event(event, now, raw_profile_hash=event.raw_profile_hash)
         mse = profile_mse(profile)
         score = profile_score(profile)
 
@@ -474,6 +474,7 @@ class EspressoRLService:
             bean_context_id=shot.bean_context_id,
             now=now,
             grinder_context_id=shot.grinder_context_id,
+            profile_id=shot.profile_id,
         )
         if not feedback_changed and current is not None and current.source_shot_id == shot.shot_id:
             return FeedbackResult(shot=shot, recommendation=current)
@@ -659,6 +660,8 @@ class EspressoRLService:
         machine_id: str,
         bean_context_id: str | None,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         return self._recommendations.get_current(
             install_id=install_id,
@@ -666,6 +669,8 @@ class EspressoRLService:
             bean_context_id=bean_context_id,
             now=self._clock(),
             grinder_context_id=grinder_context_id,
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash if profile_id is None else None,
         )
 
     def handle_machine_state(self, event: MachineStateEvent) -> Recommendation | None:
@@ -699,10 +704,9 @@ class EspressoRLService:
             bean_context_id=event.bean_context_id,
             now=now,
             grinder_context_id=event.grinder_context_id,
+            profile_id=event.profile_id,
+            raw_profile_hash=event.raw_profile_hash if event.profile_id is None else None,
         )
-        if current is not None and not _recommendation_matches_profile_scope(current, profile_scope):
-            self._expire_recommendation(current, now)
-            current = None
         if current is not None:
             stale = check_recommendation_staleness(
                 current,
@@ -780,17 +784,16 @@ class EspressoRLService:
             bean_context_id=bean_context_id,
             now=timestamp,
             grinder_context_id=grinder_context_id,
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash if profile_id is None else None,
         ) or self._recommendations.get_latest(
             install_id=install_id,
             machine_id=machine_id,
             bean_context_id=bean_context_id,
             grinder_context_id=grinder_context_id,
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash if profile_id is None else None,
         )
-        if last_recommendation is not None and not _recommendation_matches_profile_scope(
-            last_recommendation,
-            profile_scope,
-        ):
-            last_recommendation = None
         context = OptimizationContext(
             install_id=install_id,
             machine_id=machine_id,
@@ -867,6 +870,8 @@ class EspressoRLService:
             now=timestamp,
             except_recommendation_id=recommendation.recommendation_id,
             grinder_context_id=grinder_context_id,
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash if profile_id is None else None,
         )
         self._store_recommendation(recommendation, timestamp)
         return recommendation
@@ -950,6 +955,8 @@ class EspressoRLService:
             bean_context_id=event.bean_context_id,
             now=now,
             grinder_context_id=event.grinder_context_id,
+            profile_id=event.profile_id,
+            raw_profile_hash=raw_profile_hash if event.profile_id is None else None,
         )
         if recommendation is None:
             return None

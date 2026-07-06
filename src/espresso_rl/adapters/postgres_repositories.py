@@ -242,6 +242,21 @@ def _nullable_clause(
     return f"{column}={placeholder}"
 
 
+def _profile_scope_clause(
+    params: list[object],
+    *,
+    profile_id: str | None = None,
+    raw_profile_hash: str | None = None,
+) -> str:
+    if profile_id is not None:
+        params.append(profile_id)
+        return "profile_id=%s"
+    if raw_profile_hash is not None:
+        params.append(raw_profile_hash)
+        return "raw_profile_hash=%s"
+    return "TRUE"
+
+
 class PostgresShotRepository:
     def __init__(self, store: PostgresStore) -> None:
         self._store = store
@@ -636,14 +651,22 @@ class PostgresRecommendationRepository:
         machine_id: str,
         bean_context_id: str | None,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         params: list[object] = [install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
         grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params)
+        profile_clause = _profile_scope_clause(
+            params,
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash,
+        )
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
             WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
+              AND {profile_clause}
             ORDER BY created_at DESC
             LIMIT 1
             """,
@@ -658,15 +681,23 @@ class PostgresRecommendationRepository:
         bean_context_id: str | None,
         now: int,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         params: list[object] = [install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
         grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params)
+        profile_clause = _profile_scope_clause(
+            params,
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash,
+        )
         params.append(now)
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
             WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
+              AND {profile_clause}
               AND status IN ('pending', 'shown', 'accepted', 'edited')
               AND (expires_at IS NULL OR expires_at > %s)
             ORDER BY created_at DESC
@@ -684,10 +715,17 @@ class PostgresRecommendationRepository:
         now: int,
         except_recommendation_id: str | None = None,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> None:
         params: list[Any] = [now, now, install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
         grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params)
+        profile_clause = _profile_scope_clause(
+            params,
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash,
+        )
         except_clause = ""
         if except_recommendation_id is not None:
             except_clause = "AND recommendation_id != %s"
@@ -697,6 +735,7 @@ class PostgresRecommendationRepository:
             UPDATE recommendations
             SET status='superseded', superseded_at=%s, updated_at=%s
             WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
+              AND {profile_clause}
               AND status IN ('pending', 'shown')
               {except_clause}
             """,

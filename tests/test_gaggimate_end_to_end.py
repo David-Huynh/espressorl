@@ -439,11 +439,8 @@ class GaggimateEndToEndTests(unittest.TestCase):
 
                 restored = harness.last_machine_state_recommendation
                 self.assertIsNotNone(restored)
+                self.assertEqual(restored.recommendation_id, lever_recommendation.recommendation_id)
                 self.assertEqual(restored.profile_id, "integration_lever")
-                self.assertEqual(
-                    [shot.shot_id for shot in harness.optimizer.contexts[-1].shots],
-                    ["shot_integration_1"],
-                )
                 restored_status = harness.publications("gaggimate/AA_BB/rl/status")[-1][0]
                 self.assertEqual(restored_status["optimizer_profile_id"], "integration_lever")
                 self.assertEqual(

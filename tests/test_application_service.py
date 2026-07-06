@@ -94,6 +94,8 @@ class MemoryRecommendationRepository:
         bean_context_id: str | None,
         now: int,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         rows = [
             row
@@ -102,6 +104,7 @@ class MemoryRecommendationRepository:
             and row.machine_id == machine_id
             and row.bean_context_id == bean_context_id
             and row.grinder_context_id == grinder_context_id
+            and _recommendation_profile_matches(row, profile_id, raw_profile_hash)
             and row.active_at(now)
         ]
         return max(rows, key=lambda row: row.created_at) if rows else None
@@ -112,6 +115,8 @@ class MemoryRecommendationRepository:
         machine_id: str,
         bean_context_id: str | None,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         rows = [
             row
@@ -120,6 +125,7 @@ class MemoryRecommendationRepository:
             and row.machine_id == machine_id
             and row.bean_context_id == bean_context_id
             and row.grinder_context_id == grinder_context_id
+            and _recommendation_profile_matches(row, profile_id, raw_profile_hash)
         ]
         return max(rows, key=lambda row: row.created_at) if rows else None
 
@@ -131,6 +137,8 @@ class MemoryRecommendationRepository:
         now: int,
         except_recommendation_id: str | None = None,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> None:
         for row in self.rows.values():
             if row.recommendation_id == except_recommendation_id:
@@ -140,10 +148,23 @@ class MemoryRecommendationRepository:
                 and row.machine_id == machine_id
                 and row.bean_context_id == bean_context_id
                 and row.grinder_context_id == grinder_context_id
+                and _recommendation_profile_matches(row, profile_id, raw_profile_hash)
             ):
                 if row.status in {RecommendationStatus.PENDING, RecommendationStatus.SHOWN}:
                     row.status = RecommendationStatus.SUPERSEDED
                     row.superseded_at = now
+
+
+def _recommendation_profile_matches(
+    recommendation: Recommendation,
+    profile_id: str | None,
+    raw_profile_hash: str | None,
+) -> bool:
+    if profile_id is not None:
+        return recommendation.profile_id == profile_id
+    if raw_profile_hash is not None:
+        return recommendation.raw_profile_hash == raw_profile_hash
+    return True
 
 
 class MemoryUploadQueue:
@@ -1342,9 +1363,20 @@ class ApplicationServiceTests(unittest.TestCase):
         )
 
         self.assertNotEqual(turbo.recommendation_id, shown.recommendation_id)
+        self.assertEqual(shown.recommendation_id, lever.recommendation_id)
         self.assertEqual(shown.profile_id, "lever")
-        self.assertTrue(all(shot.profile_id == "lever" for shot in optimizer.contexts[-1].shots))
-        self.assertEqual(recs.get(turbo.recommendation_id).status, RecommendationStatus.EXPIRED)
+        self.assertEqual(recs.get(lever.recommendation_id).status, RecommendationStatus.SHOWN)
+        self.assertEqual(recs.get(turbo.recommendation_id).status, RecommendationStatus.PENDING)
+        self.assertEqual(
+            recs.get_current(
+                "install_1",
+                "machine_1",
+                "bean_1",
+                20,
+                profile_id="turbo",
+            ).recommendation_id,
+            turbo.recommendation_id,
+        )
 
     def test_machine_idle_shows_current_recommendation(self) -> None:
         shots = MemoryShotRepository()

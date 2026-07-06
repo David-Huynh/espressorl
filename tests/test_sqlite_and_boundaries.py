@@ -320,14 +320,15 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             config = Config(mqtt_host="localhost", data_dir=Path(tmp), install_id="install_1")
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 shots = SQLiteShotRepository(store)
+                recommendations = SQLiteRecommendationRepository(store)
                 service = EspressoRLService(
                     shots,
-                    SQLiteRecommendationRepository(store),
+                    recommendations,
                     ConservativeBOOptimizer(),
                     clock=lambda: 10,
                 )
                 service.ingest_shot_profile(shot_event())
-                service.record_feedback(
+                profile_1 = service.record_feedback(
                     ShotFeedbackEvent(
                         shot_id="shot_1",
                         install_id="install_1",
@@ -335,7 +336,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         timestamp=2,
                         rating=5,
                     )
-                )
+                ).recommendation
                 service.ingest_shot_profile(
                     shot_event(
                         shot_id="shot_2",
@@ -346,7 +347,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         beverage_out_g=42.0,
                     )
                 )
-                service.record_feedback(
+                profile_2 = service.record_feedback(
                     ShotFeedbackEvent(
                         shot_id="shot_2",
                         install_id="install_1",
@@ -354,6 +355,27 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         timestamp=4,
                         rating=2,
                     )
+                ).recommendation
+
+                self.assertEqual(
+                    recommendations.get_current(
+                        "install_1",
+                        "machine_1",
+                        None,
+                        now=10,
+                        profile_id="profile_1",
+                    ).recommendation_id,
+                    profile_1.recommendation_id,
+                )
+                self.assertEqual(
+                    recommendations.get_current(
+                        "install_1",
+                        "machine_1",
+                        None,
+                        now=10,
+                        profile_id="profile_2",
+                    ).recommendation_id,
+                    profile_2.recommendation_id,
                 )
 
                 status = build_status_payload(

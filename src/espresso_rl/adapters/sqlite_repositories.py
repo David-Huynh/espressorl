@@ -373,6 +373,22 @@ def _nullable_clause(
     return f"{column}={placeholder}"
 
 
+def _profile_scope_clause(
+    params: list[object],
+    placeholder: str,
+    *,
+    profile_id: str | None = None,
+    raw_profile_hash: str | None = None,
+) -> str:
+    if profile_id is not None:
+        params.append(profile_id)
+        return f"profile_id={placeholder}"
+    if raw_profile_hash is not None:
+        params.append(raw_profile_hash)
+        return f"raw_profile_hash={placeholder}"
+    return "1=1"
+
+
 class SQLiteShotRepository:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
@@ -850,14 +866,23 @@ class SQLiteRecommendationRepository:
         machine_id: str,
         bean_context_id: str | None,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         params: list[object] = [install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
         grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params, "?")
+        profile_clause = _profile_scope_clause(
+            params,
+            "?",
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash,
+        )
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
             WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
+              AND {profile_clause}
             ORDER BY created_at DESC
             LIMIT 1
             """,
@@ -872,15 +897,24 @@ class SQLiteRecommendationRepository:
         bean_context_id: str | None,
         now: int,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         params: list[object] = [install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
         grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params, "?")
+        profile_clause = _profile_scope_clause(
+            params,
+            "?",
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash,
+        )
         params.append(now)
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
             WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
+              AND {profile_clause}
               AND status IN ('pending', 'shown', 'accepted', 'edited')
               AND (expires_at IS NULL OR expires_at > ?)
             ORDER BY created_at DESC
@@ -898,10 +932,18 @@ class SQLiteRecommendationRepository:
         now: int,
         except_recommendation_id: str | None = None,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> None:
         params: list = [now, now, install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
         grinder_clause = _nullable_clause("grinder_context_id", grinder_context_id, params, "?")
+        profile_clause = _profile_scope_clause(
+            params,
+            "?",
+            profile_id=profile_id,
+            raw_profile_hash=raw_profile_hash,
+        )
         except_clause = ""
         if except_recommendation_id is not None:
             except_clause = "AND recommendation_id != ?"
@@ -911,6 +953,7 @@ class SQLiteRecommendationRepository:
             UPDATE recommendations
             SET status='superseded', superseded_at=?, updated_at=?
             WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
+              AND {profile_clause}
               AND status IN ('pending', 'shown')
               {except_clause}
             """,

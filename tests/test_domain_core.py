@@ -128,6 +128,14 @@ class DomainCoreTests(unittest.TestCase):
                 taste_objective={"mode": "custom"},
             )
 
+    def test_shot_profile_event_normalizes_raw_profile_hash(self) -> None:
+        shot = event(raw_profile_hash="A" * 64)
+
+        self.assertEqual(shot.raw_profile_hash, "a" * 64)
+
+        with self.assertRaisesRegex(ValueError, "raw_profile_hash"):
+            event(raw_profile_hash="not-a-digest")
+
     def test_feedback_event_normalizes_canonical_taste_tags_and_rejects_unknowns(self) -> None:
         feedback = ShotFeedbackEvent(
             shot_id="shot_1",

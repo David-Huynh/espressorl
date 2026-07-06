@@ -160,6 +160,7 @@ class ShotProfileEvent:
     pump_flow_calibration_required: bool = False
     profile_id: str | None = None
     profile_label: str | None = None
+    raw_profile_hash: str | None = None
     profile_type: str | None = None
     profile_phase_count: int | None = None
     final_phase_index: int | None = None
@@ -252,6 +253,7 @@ class ShotProfileEvent:
         object.__setattr__(self, "pump_flow_units", _optional_string(self.pump_flow_units, "pump_flow_units", 40))
         object.__setattr__(self, "profile_id", _optional_string(self.profile_id, "profile_id", 120))
         object.__setattr__(self, "profile_label", _optional_string(self.profile_label, "profile_label", 120))
+        object.__setattr__(self, "raw_profile_hash", _optional_sha256(self.raw_profile_hash, "raw_profile_hash"))
         object.__setattr__(self, "profile_type", _optional_string(self.profile_type, "profile_type", 80))
         object.__setattr__(
             self,
@@ -600,7 +602,7 @@ class MachineStateEvent:
             raise ValueError("community_upload_enabled must be boolean")
         object.__setattr__(self, "profile_id", _optional_string(self.profile_id, "profile_id", 120))
         object.__setattr__(self, "profile_label", _optional_string(self.profile_label, "profile_label", 160))
-        object.__setattr__(self, "raw_profile_hash", _optional_sha256(self.raw_profile_hash))
+        object.__setattr__(self, "raw_profile_hash", _optional_sha256(self.raw_profile_hash, "raw_profile_hash"))
 
     def current_recipe(self) -> Recipe | None:
         if (
@@ -654,7 +656,7 @@ class OptimizerSettingsEvent:
         object.__setattr__(
             self,
             "model_artifact_sha256",
-            _optional_sha256(self.model_artifact_sha256),
+            _optional_sha256(self.model_artifact_sha256, "model_artifact_sha256"),
         )
         object.__setattr__(
             self,
@@ -673,10 +675,10 @@ def _safe_artifact_path(value: Any) -> str | None:
     return parsed
 
 
-def _optional_sha256(value: Any) -> str | None:
-    parsed = _optional_string(value, "model_artifact_sha256", 64)
+def _optional_sha256(value: Any, field_name: str) -> str | None:
+    parsed = _optional_string(value, field_name, 64)
     if parsed is None:
         return None
     if len(parsed) != 64 or any(ch not in _HEX_CHARS for ch in parsed):
-        raise ValueError("model_artifact_sha256 must be a sha256 hex digest")
+        raise ValueError(f"{field_name} must be a sha256 hex digest")
     return parsed.lower()

@@ -537,6 +537,7 @@ class GaggimateMQTTClient:
             pump_flow_calibration_required=bool(payload.get("pump_flow_calibration_required", False)),
             profile_id=_optional_string(payload.get("profile_id")),
             profile_label=_optional_string(payload.get("profile_label")),
+            raw_profile_hash=_optional_string(payload.get("raw_profile_hash")),
             profile_type=_optional_string(payload.get("profile_type")),
             profile_phase_count=_optional_int(payload.get("profile_phase_count")),
             final_phase_index=_optional_int(payload.get("final_phase_index")),

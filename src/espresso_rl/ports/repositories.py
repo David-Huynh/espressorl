@@ -45,6 +45,8 @@ class RecommendationRepository(Protocol):
         bean_context_id: str | None,
         now: int,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         ...
 
@@ -54,6 +56,8 @@ class RecommendationRepository(Protocol):
         machine_id: str,
         bean_context_id: str | None,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
         ...
 
@@ -65,6 +69,8 @@ class RecommendationRepository(Protocol):
         now: int,
         except_recommendation_id: str | None = None,
         grinder_context_id: str | None = None,
+        profile_id: str | None = None,
+        raw_profile_hash: str | None = None,
     ) -> None:
         ...
 
