@@ -292,7 +292,11 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalEnum(payload, 'recommendation_followed', ['followed', 'partially_followed', 'not_followed', 'unknown'], errors);
   optionalNumberRange(payload, 'recommendation_attribution_weight', 0, 1, errors);
   optionalNumberRange(payload, 'human_rating', 1, 5, errors);
-  optionalStringListEnum(payload, 'taste_tags', ['sour', 'bitter', 'weak', 'harsh', 'thin', 'channeling_suspected', 'balanced', 'astringent', 'too_fast', 'too_slow', 'muddy', 'dry', 'sweet', 'good_body'], errors);
+  optionalStringListEnum(payload, 'taste_tags', [
+    'fruity', 'citrus', 'floral', 'sweet', 'nutty_cocoa', 'roasted', 'spice',
+    'fermented', 'sour', 'green_vegetative', 'bitter', 'astringent_harsh',
+    'papery_stale', 'salty', 'channeling_suspected',
+  ], errors);
   optionalBoolean(payload, 'feedback_recorded', errors);
   optionalEnum(payload, 'shot_type', ['espresso', 'utility_flush', 'cleaning', 'calibration', 'unknown'], errors);
   if (payload.shot_type !== undefined && payload.shot_type !== null && payload.shot_type !== 'espresso') {
