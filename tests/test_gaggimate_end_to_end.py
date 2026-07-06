@@ -275,6 +275,76 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 self.assertEqual(final_steps["community_upload"]["state"], "waiting")
                 self.assertEqual(final_steps["status_published"]["state"], "ok")
 
+    def test_pending_rating_blocks_recommendation_across_idle_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                harness = GaggimateEndToEndHarness(store, Path(tmp))
+                harness.send("gaggimate/AA_BB/shot/profile", self.shot_payload())
+                harness.send(
+                    "gaggimate/AA_BB/rl/rating",
+                    self.rating_payload("shot_integration_1"),
+                )
+                first_recommendation = harness.last_feedback_result.recommendation
+                self.assertIsNotNone(first_recommendation)
+                self.assertEqual(len(harness.optimizer.contexts), 1)
+                self.assertEqual(
+                    len(harness.publications("gaggimate/AA_BB/rl/recommendation")),
+                    1,
+                )
+
+                pending = self.shot_payload(
+                    shot_id="shot_pending_rating",
+                    timestamp=1_700_000_220,
+                    recommendation_id=first_recommendation.recommendation_id,
+                    beverage_out_g=33.2,
+                    target_yield_g=32.0,
+                    weight=[0.0, 0.0, 4.0, 12.0, 22.0, 29.0, 33.2],
+                )
+                harness.send("gaggimate/AA_BB/shot/profile", pending)
+
+                self.assertIsNone(harness.last_ingest_result.recommendation)
+                self.assertEqual(len(harness.optimizer.contexts), 1)
+                pending_status = harness.publications("gaggimate/AA_BB/rl/status")[-1][0]
+                self.assertIsNone(pending_status["last_recommendation_id"])
+                pending_steps = {
+                    step["key"]: step for step in pending_status["auto_tuning_diagnostic_steps"]
+                }
+                self.assertEqual(pending_steps["rating"]["state"], "waiting")
+                self.assertEqual(pending_steps["recommendation"]["state"], "waiting")
+
+                harness.send(
+                    "gaggimate/AA_BB/machine/state",
+                    {
+                        "event_type": "machine_state",
+                        "schema_version": 1,
+                        "machine_id": "gaggimate:AA_BB",
+                        "timestamp": 1_700_000_230,
+                        "state": "idle",
+                        "bean_context_id": "bean_integration_1",
+                        "bean_context_name": "Integration Coffee",
+                        "grinder_context_id": "grinder_integration_1",
+                        "grinder_calibration_mode": "absolute_display_calibrated",
+                        "microns_per_step": 12.5,
+                        "step_direction": "higher_is_coarser",
+                        "relative_grind_steps_from_reference": 2,
+                        "current_absolute_step": 42,
+                        "absolute_reference_step": 40,
+                        "dose_in_g": 18.0,
+                        "target_yield_g": 32.0,
+                        "profile_id": "integration_lever",
+                        "profile_label": "Integration Lever Profile",
+                    },
+                )
+
+                self.assertIsNone(harness.last_machine_state_recommendation)
+                self.assertEqual(len(harness.optimizer.contexts), 1)
+                idle_status = harness.publications("gaggimate/AA_BB/rl/status")[-1][0]
+                self.assertIsNone(idle_status["last_recommendation_id"])
+                self.assertEqual(
+                    len(harness.publications("gaggimate/AA_BB/rl/recommendation")),
+                    1,
+                )
+
     def test_partial_action_and_actual_yield_remain_optimizable_and_uploadable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:

@@ -127,6 +127,13 @@ def _has_optimizer_observation(shots: list[ShotRecord]) -> bool:
     return any(_is_optimizer_observation(shot) for shot in shots)
 
 
+def _latest_shot_waits_for_feedback(shots: list[ShotRecord]) -> bool:
+    if not shots:
+        return False
+    latest = shots[-1]
+    return latest.rating_prompt_allowed and not latest.feedback_recorded
+
+
 def _normal_context_key(value: str | None) -> str:
     if not value:
         return ""
@@ -663,6 +670,15 @@ class EspressoRLService:
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
+        recent = self._shots.list_recent(
+            install_id=install_id,
+            machine_id=machine_id,
+            bean_context_id=bean_context_id,
+            grinder_context_id=grinder_context_id,
+            limit=200,
+        )
+        if _latest_shot_waits_for_feedback(recent):
+            return None
         return self._recommendations.get_current(
             install_id=install_id,
             machine_id=machine_id,
@@ -695,9 +711,9 @@ class EspressoRLService:
             grinder_context_id=event.grinder_context_id,
             limit=200,
         )
-        recent = [shot for shot in all_recent if _shot_matches_profile_scope(shot, profile_scope)]
-        if recent and recent[-1].rating_prompt_allowed and not recent[-1].feedback_recorded:
+        if _latest_shot_waits_for_feedback(all_recent):
             return None
+        recent = [shot for shot in all_recent if _shot_matches_profile_scope(shot, profile_scope)]
         current = self._recommendations.get_current(
             install_id=event.install_id,
             machine_id=event.machine_id,

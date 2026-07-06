@@ -542,6 +542,41 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertTrue(feedback.shot.feedback_recorded)
         self.assertEqual(shots.get("shot_1").reward_confidence, 1.0)  # type: ignore[union-attr]
 
+    def test_pending_latest_rating_blocks_recommendation_generation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        optimizer = CapturingOptimizer()
+        service = EspressoRLService(shots, recs, optimizer, clock=lambda: 10)
+
+        first = ingest_and_feedback(service, shot_event("shot_1", 1, profile_id="lever"), rating=4)
+        self.assertEqual(len(optimizer.contexts), 1)
+        pending = service.ingest_shot_profile(
+            shot_event(
+                "shot_2",
+                3,
+                profile_id="lever",
+                recommendation_id=first.recommendation_id,
+            )
+        )
+
+        self.assertIsNone(pending.recommendation)
+        self.assertIsNone(
+            service.get_current_recommendation(
+                "install_1",
+                "machine_1",
+                "bean_1",
+                profile_id="lever",
+            )
+        )
+        self.assertIsNone(service.handle_machine_state(idle_event(4, profile_id="lever")))
+        self.assertEqual(len(optimizer.contexts), 1)
+
+        feedback = service.record_feedback(feedback_event("shot_2", 5, rating=3))
+
+        self.assertIsNotNone(feedback.recommendation)
+        self.assertEqual(feedback.recommendation.source_shot_id, "shot_2")
+        self.assertEqual(len(optimizer.contexts), 2)
+
     def test_previous_bag_same_bean_history_becomes_optimizer_prior_points(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
