@@ -123,7 +123,7 @@ serve(async request => {
 
   // Dedup before spending rate-limit budget: a re-send of an already-queued
   // upload is acknowledged without consuming the install's quota.
-  if (await uploadAlreadyQueued(supabase, installId, uploadId)) {
+  if (await uploadAlreadyQueued(supabase, installId, uploadId, payloadHash)) {
     return jsonResponse(202, { status: 'duplicate' });
   }
 
@@ -179,7 +179,7 @@ serve(async request => {
   const sanitizedPayload = sanitizePayload(payload);
   sanitizedPayload.install_id = installId;
 
-  const { error } = await supabase.from('raw_upload_queue').insert({
+  const queueRow = {
     install_id: installId,
     upload_id: uploadId,
     upload_token_id: tokenId,
@@ -190,9 +190,19 @@ serve(async request => {
     payload_json: sanitizedPayload,
     client_timestamp: timestamp,
     status: 'queued',
+    mirror_error: null,
+    mirror_claimed_by: null,
+    mirror_claimed_at: null,
+    mirror_claim_expires_at: null,
+    mirror_completed_at: null,
+    mirror_attempt_count: 0,
     source_ip_hash: sourceIpHash,
     validation_summary: { initial_validation: 'accepted' },
-  });
+  };
+  const queued = validation.localRecordType === 'recommendation'
+    ? await supabase.from('raw_upload_queue').upsert(queueRow, { onConflict: 'install_id,upload_id' })
+    : await supabase.from('raw_upload_queue').insert(queueRow);
+  const { error } = queued;
   if (error) {
     if (error.code === '23505') {
       return jsonResponse(202, { status: 'duplicate' });
@@ -792,12 +802,14 @@ async function uploadAlreadyQueued(
   supabase: ReturnType<typeof createClient>,
   installId: string,
   uploadId: string,
+  payloadHash: string,
 ): Promise<boolean> {
   const { data, error } = await supabase
     .from('raw_upload_queue')
     .select('upload_id')
     .eq('install_id', installId)
     .eq('upload_id', uploadId)
+    .eq('payload_hash', payloadHash)
     .maybeSingle();
   // Fail open on error: the insert's unique constraint still dedups (23505 -> 202).
   return !error && data !== null;

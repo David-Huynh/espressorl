@@ -119,6 +119,8 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("sanitizedPayload.install_id = installId", source)
         self.assertIn("consumeRateLimits", source)
         self.assertIn(".from('raw_upload_queue').insert", source)
+        self.assertIn(".from('raw_upload_queue').upsert", source)
+        self.assertIn("onConflict: 'install_id,upload_id'", source)
         self.assertIn("payload_json: sanitizedPayload", source)
         self.assertNotIn(".from('validated_shots').insert", source)
         self.assertNotIn(".from('community_priors').insert", source)
@@ -173,11 +175,21 @@ class SupabaseIngestionContractTests(unittest.TestCase):
 
         self.assertIn("uploadAlreadyQueued", source)
         self.assertIn("status: 'duplicate'", source)
+        self.assertIn(".eq('payload_hash', payloadHash)", source)
         # A re-send must be detected before any rate-limit budget is spent.
         self.assertLess(
             source.index("uploadAlreadyQueued("),
             source.index("consumeRateLimits("),
         )
+
+    def test_recommendation_uploads_update_one_remote_raw_row(self) -> None:
+        source = FUNCTION.read_text()
+
+        self.assertIn("validation.localRecordType === 'recommendation'", source)
+        self.assertIn("mirror_claimed_by: null", source)
+        self.assertIn("mirror_completed_at: null", source)
+        self.assertIn("mirror_attempt_count: 0", source)
+        self.assertIn("status: 'queued'", source)
 
     def test_edge_function_returns_retry_after_and_raised_limits(self) -> None:
         source = FUNCTION.read_text()

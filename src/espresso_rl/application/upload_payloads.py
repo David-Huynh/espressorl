@@ -22,7 +22,8 @@ def make_recommendation_upload_item(
     now: int,
 ) -> UploadQueueItem:
     payload = recommendation_upload_payload(recommendation)
-    return _make_item("recommendation", recommendation.recommendation_id, payload, now)
+    upload_id = f"recommendation_{recommendation.recommendation_id}"
+    return _make_item("recommendation", recommendation.recommendation_id, payload, now, upload_id=upload_id)
 
 
 def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
@@ -200,11 +201,13 @@ def _make_item(
     record_id: str,
     payload: dict[str, Any],
     now: int,
+    *,
+    upload_id: str | None = None,
 ) -> UploadQueueItem:
     payload_json = canonical_payload_json(payload)
     digest = payload_hash(payload_json)
     return UploadQueueItem(
-        upload_id=f"{record_type}_{record_id}_{digest[:16]}",
+        upload_id=upload_id or f"{record_type}_{record_id}_{digest[:16]}",
         local_record_type=record_type,
         local_record_id=record_id,
         payload_hash=digest,

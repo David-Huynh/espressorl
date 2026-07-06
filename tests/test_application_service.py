@@ -1724,6 +1724,10 @@ class ApplicationServiceTests(unittest.TestCase):
         # created, first-shown, accepted, applied -> four uploads, each a new snapshot.
         self.assertEqual(len(calls), 4)
         self.assertEqual(len({item.payload_hash for item in calls}), 4)
+        self.assertEqual(
+            {item.upload_id for item in calls},
+            {f"recommendation_{rec.recommendation_id}"},
+        )
 
     def test_recommendation_signature_ignores_incidental_churn(self) -> None:
         shots = MemoryShotRepository()

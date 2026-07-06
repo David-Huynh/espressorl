@@ -952,6 +952,36 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 ).fetchone()["c"]
                 self.assertEqual(count, 2)  # uploaded 'a' kept as memory + pending 'b'
 
+    def test_enqueue_rearms_same_upload_id_when_content_changes_after_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                queue = SQLiteUploadQueueRepository(store)
+                queue.enqueue(
+                    queue_item(
+                        "recommendation_rec_1",
+                        "a",
+                        local_record_type="recommendation",
+                        local_record_id="rec_1",
+                    )
+                )
+                queue.update_status("recommendation_rec_1", UploadQueueStatus.UPLOADED, now=2)
+                queue.enqueue(
+                    queue_item(
+                        "recommendation_rec_1",
+                        "b",
+                        local_record_type="recommendation",
+                        local_record_id="rec_1",
+                    )
+                )
+
+                ready = queue.list_ready(now=10)
+                self.assertEqual([item.upload_id for item in ready], ["recommendation_rec_1"])
+                self.assertEqual(ready[0].payload_hash, "b")
+                count = store.conn.execute(
+                    "SELECT COUNT(*) AS c FROM upload_queue WHERE local_record_id='rec_1'"
+                ).fetchone()["c"]
+                self.assertEqual(count, 1)
+
     def test_enqueue_never_deletes_in_flight_uploading_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
