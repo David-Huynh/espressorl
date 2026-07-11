@@ -15,12 +15,14 @@ from espresso_rl.domain.cpbo import (
     Suggestion,
 )
 from espresso_rl.domain.events import PreferenceFeedbackEvent
+from espresso_rl.domain.community import PairwiseShotComparison
 from espresso_rl.domain.models import Recipe, Recommendation, SafetyBounds, ShotRecord, ShotType
 from espresso_rl.ports.repositories import ShotRepository
 
 
 RunContextFactory = Callable[[ShotRecord], OptimizationRunContext]
 RecommendationSink = Callable[[Recommendation], None]
+ComparisonSink = Callable[[PairwiseShotComparison], None]
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class CPBORuntimeBridge:
         shots: ShotRepository,
         recommendation_sink: RecommendationSink,
         context_factory: RunContextFactory,
+        comparison_sink: ComparisonSink | None = None,
         *,
         comparison_mode: ComparisonMode,
         safety_bounds: SafetyBounds,
@@ -48,6 +51,7 @@ class CPBORuntimeBridge:
         self._shots = shots
         self._recommendation_sink = recommendation_sink
         self._context_factory = context_factory
+        self._comparison_sink = comparison_sink
         self._comparison_mode = ComparisonMode(comparison_mode)
         self._safety_bounds = safety_bounds
 
@@ -118,11 +122,18 @@ class CPBORuntimeBridge:
             raise ValueError("preference install_id does not own the CPBO run")
         if not _same_machine_id(run.context.machine_id, event.machine_id):
             raise ValueError("preference machine_id does not own the CPBO run")
+        if event.comparison_mode is not None and event.comparison_mode != run.comparison_mode:
+            raise ValueError("preference comparison_mode does not match the optimization run")
         self._optimizer.record_preference(
             event.optimization_run_id,
             event.new_shot_id,
             event.anchor_shot_id,
             event.label,
+        )
+        comparison = self._optimizer.get_comparison(
+            event.optimization_run_id,
+            event.new_shot_id,
+            event.anchor_shot_id,
         )
         shot = self._shots.get(event.new_shot_id)
         if shot is None:
@@ -130,6 +141,26 @@ class CPBORuntimeBridge:
         current_recipe = _observed_recipe(shot)
         if current_recipe is None:
             raise ValueError("CPBO preference shot no longer has complete recipe controls")
+        if self._comparison_sink is not None:
+            self._comparison_sink(
+                PairwiseShotComparison(
+                    comparison_id=comparison.comparison_id,
+                    optimization_run_id=comparison.optimization_run_id,
+                    new_shot_id=comparison.new_shot_id,
+                    anchor_shot_id=comparison.anchor_shot_id,
+                    label=comparison.label.value,
+                    comparison_mode=comparison.comparison_mode.value,
+                    created_at=comparison.created_at,
+                    install_id=run.context.install_id,
+                    machine_id=run.context.machine_id,
+                    machine_adapter=shot.machine_adapter,
+                    recommendation_id=shot.recommendation_id,
+                    bean_context_id=run.context.bean_context_id,
+                    grinder_context_id=run.context.grinder_context_id,
+                    profile_id=run.context.profile_id,
+                    raw_profile_hash=run.context.raw_profile_hash,
+                )
+            )
         suggestion = self._optimizer.suggest_next(event.optimization_run_id)
         recommendation = self._machine_recommendation(suggestion, shot, current_recipe)
         self._recommendation_sink(recommendation)

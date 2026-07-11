@@ -58,13 +58,11 @@ class FakeAdminService:
             raw_upload_counts={},
             local_raw_upload_purge_eligible_counts={},
             validated_shot_count=0,
-            training_row_count=0,
-            community_prior_count=0,
+            comparison_count=0,
             abuse_event_count=0,
             latest_rejections=[],
             latest_admin_actions=[],
             mirror_enabled=False,
-            training_export_enabled=False,
         )
 
 

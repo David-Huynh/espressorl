@@ -87,6 +87,7 @@ class GaggimateAdapterTests(unittest.TestCase):
             "new_shot_id": "shot_new",
             "anchor_shot_id": "shot_anchor",
             "label": "tie",
+            "comparison_mode": "best_incumbent",
             "install_id": "install_1",
             "machine_id": "gaggimate:AA_BB",
             "timestamp": 100,
@@ -98,6 +99,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.new_shot_id, "shot_new")
         self.assertEqual(event.anchor_shot_id, "shot_anchor")
         self.assertEqual(event.label.value, "tie")
+        self.assertEqual(event.comparison_mode.value, "best_incumbent")
         with self.assertRaisesRegex(ValueError, "unsupported fields"):
             client.translate_preference_payload({**payload, "rating": 5}, "AA_BB")
         with self.assertRaisesRegex(ValueError, "does not match topic"):

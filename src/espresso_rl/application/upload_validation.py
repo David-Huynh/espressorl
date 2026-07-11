@@ -8,8 +8,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from espresso_rl.domain.models import VALID_TASTE_TAGS
-
 SHA256_HEX_LENGTH = 64
 SUPPORTED_SCHEMA_VERSION = 1
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,160}$")
@@ -56,24 +54,11 @@ SHOT_RECORD_FIELDS = frozenset(
         "recommended_target_ratio",
         "recommendation_decision",
         "recommendation_followed",
-        "recommendation_attribution_weight",
-        "human_rating",
-        "taste_tags",
-        "feedback_recorded",
-        "profile_score",
-        "profile_mse",
-        "reward",
-        "reward_confidence",
         "shot_type",
         "exclude_from_local_optimization",
-        "optimization_weight",
-        "rating_prompt_allowed",
         "grind_followed",
         "dose_followed",
         "yield_followed",
-        "grind_recommendation_trust",
-        "dose_recommendation_trust",
-        "yield_recommendation_trust",
         "weight_source",
         "flow_source",
         "flow_units",
@@ -157,6 +142,27 @@ RECOMMENDATION_RECORD_FIELDS = frozenset(
         "apply_error",
     }
 )
+COMPARISON_RECORD_FIELDS = frozenset(
+    {
+        "event_type",
+        "schema_version",
+        "comparison_id",
+        "optimization_run_id",
+        "new_shot_id",
+        "anchor_shot_id",
+        "label",
+        "comparison_mode",
+        "created_at",
+        "install_id",
+        "machine_id",
+        "machine_adapter",
+        "recommendation_id",
+        "bean_context_id",
+        "grinder_context_id",
+        "profile_id",
+        "raw_profile_hash",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -237,6 +243,8 @@ def validate_upload_payload(payload: dict[str, Any]) -> UploadPayloadValidation:
         _validate_shot_record(payload, errors)
     elif event_type == "recommendation_record":
         _validate_recommendation_record(payload, errors)
+    elif event_type == "comparison_record":
+        _validate_comparison_record(payload, errors)
     else:
         errors.append("unsupported event_type")
     return UploadPayloadValidation(ok=not errors, errors=errors)
@@ -348,19 +356,7 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_number_range(payload, "recommended_target_ratio", 1.2, 3.5, errors)
     _optional_enum(payload, "recommendation_decision", {"accepted", "edited", "ignored", "dismissed", "unknown"}, errors)
     _optional_enum(payload, "recommendation_followed", {"followed", "partially_followed", "not_followed", "unknown"}, errors)
-    _optional_number_range(payload, "human_rating", 1, 5, errors)
-    _optional_bool(payload, "feedback_recorded", errors)
-    _optional_number_range(payload, "profile_score", 0, 1, errors)
-    _optional_number_range(payload, "profile_mse", 0, 1_000_000, errors)
-    _optional_number_range(payload, "reward", 0, 1, errors)
-    _optional_number_range(payload, "optimization_weight", 0, 1, errors)
-    _optional_number_range(payload, "recommendation_attribution_weight", 0, 1, errors)
-    _optional_number_range(payload, "grind_recommendation_trust", 0, 1, errors)
-    _optional_number_range(payload, "dose_recommendation_trust", 0, 1, errors)
-    _optional_number_range(payload, "yield_recommendation_trust", 0, 1, errors)
-    _optional_number_range(payload, "reward_confidence", 0, 1, errors)
     _optional_bool(payload, "exclude_from_local_optimization", errors)
-    _optional_bool(payload, "rating_prompt_allowed", errors)
     _optional_bool(payload, "grind_followed", errors)
     _optional_bool(payload, "dose_followed", errors)
     _optional_bool(payload, "yield_followed", errors)
@@ -392,7 +388,6 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_pump_target_mode_profile(payload, "pump_target_mode_profile", errors)
     _optional_fixed_cadence_sequence(payload.get("fixed_cadence_sequence"), errors)
     _optional_enum(payload, "shot_end_state", {"finished", "manual_or_interrupted", "unknown"}, errors)
-    _optional_string_list_enum(payload, "taste_tags", VALID_TASTE_TAGS, errors)
     _optional_number_range(payload, "created_at", 0, 9_007_199_254_740_991, errors)
     _optional_number_range(payload, "updated_at", 0, 9_007_199_254_740_991, errors)
     _optional_enum(
@@ -496,6 +491,32 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
     _optional_object(payload, "applied_fields", errors)
     _optional_string_list(payload, "manual_fields", errors)
     _optional_string(payload, "apply_error", 500, errors)
+
+
+def _validate_comparison_record(payload: dict[str, Any], errors: list[str]) -> None:
+    _reject_unknown_fields(payload, COMPARISON_RECORD_FIELDS, errors)
+    _require_number_range(payload, "schema_version", SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSION, errors)
+    _require_identifier(payload, "comparison_id", errors)
+    _require_identifier(payload, "optimization_run_id", errors)
+    _require_identifier(payload, "new_shot_id", errors)
+    _require_identifier(payload, "anchor_shot_id", errors)
+    _require_identifier(payload, "install_id", errors)
+    _require_identifier(payload, "machine_id", errors)
+    _optional_identifier(payload, "machine_adapter", errors)
+    _optional_identifier(payload, "recommendation_id", errors)
+    _optional_identifier(payload, "bean_context_id", errors)
+    _optional_string(payload, "grinder_context_id", 120, errors)
+    _optional_string(payload, "profile_id", 120, errors)
+    _optional_hash(payload, "raw_profile_hash", errors)
+    _require_number_range(payload, "created_at", 0, 9_007_199_254_740_991, errors)
+    _optional_enum(payload, "label", {"new_better", "anchor_better", "tie"}, errors)
+    if payload.get("label") is None:
+        errors.append("label is required")
+    _optional_enum(payload, "comparison_mode", {"global_previous", "best_incumbent"}, errors)
+    if payload.get("comparison_mode") is None:
+        errors.append("comparison_mode is required")
+    if payload.get("new_shot_id") == payload.get("anchor_shot_id"):
+        errors.append("comparison requires distinct physical shots")
 
 
 def _validate_profile_resampled(profile: Any, errors: list[str]) -> None:
@@ -795,6 +816,8 @@ def _allowed_fields(event_type: object) -> frozenset[str]:
         return SHOT_RECORD_FIELDS
     if event_type == "recommendation_record":
         return RECOMMENDATION_RECORD_FIELDS
+    if event_type == "comparison_record":
+        return COMPARISON_RECORD_FIELDS
     return frozenset()
 
 

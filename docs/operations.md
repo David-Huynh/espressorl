@@ -9,7 +9,8 @@ You can collect local optimizer data when:
 
 - EspressoRL is running and connected to the same MQTT broker as Gaggimate.
 - Gaggimate publishes `gaggimate/{topic_id}/shot/profile` at brew end.
-- Gaggimate publishes feedback on `gaggimate/{topic_id}/rl/rating`.
+- Gaggimate publishes oriented preference feedback on
+  `gaggimate/{topic_id}/rl/preference`.
 - Gaggimate subscribes to `gaggimate/{topic_id}/rl/recommendation`.
 - `data/options.json` has the current machine, bean, grinder, dose, and target
   yield context.
@@ -89,8 +90,17 @@ supabase functions deploy espresso-rl-grinder-search --no-verify-jwt
 supabase functions deploy espresso-rl-prior-rule-search --no-verify-jwt
 ```
 
-The public upload queue stores raw signed payloads only. Admin validation is
-responsible for promoting accepted records into trusted warehouse tables.
+The public upload queue stores raw signed payloads only. It accepts physical
+`shot_record`, recommendation lifecycle `recommendation_record`, and
+optimizer-neutral `comparison_record` payloads. A comparison identifies the
+new and anchor physical shots, preserves orientation, and records exactly one
+of `new_better`, `anchor_better`, or `tie`. Numeric ratings and scalar rewards
+are rejected by this community contract.
+
+Gaggimate queues physical shots and later preference comparisons as independent
+retryable records. A missing or delayed comparison never withholds a useful
+physical trajectory. Admin validation promotes accepted records into separate
+trusted warehouse tables, and dataset builders join them by shot ID.
 
 ## Grinder And Prior Catalogs
 
@@ -121,8 +131,6 @@ Admin settings:
   "admin_collector_enabled": true,
   "admin_dashboard_enabled": true,
   "admin_dashboard_port": 8080,
-  "training_export_dir": "/data/espresso_rl/exports",
-  "training_export_max_rows": 50000,
   "supabase_rest_url": "https://PROJECT_REF.supabase.co/rest/v1",
   "supabase_service_role_key": "SERVICE_ROLE_KEY",
   "admin_dashboard_token": "AT_LEAST_32_RANDOM_CHARS"
@@ -139,12 +147,22 @@ removed by the purge RPC.
 
 Admin validation rejects spoofed install IDs, event-type mismatches,
 payload-hash mismatches, malformed payloads, impossible espresso values,
-invalid taste tags, unsafe profile arrays, and non-espresso utility shots.
-Accepted shot uploads are stored as sanitized allowlisted payloads with capped
-low trust weight.
+unsafe profile arrays, scalar taste scores, reversed comparison orientation,
+and non-espresso utility shots. Accepted shot uploads are stored as sanitized
+allowlisted physical observations with capped low trust weight.
 
 Recommendation uploads are stored for audit and follow-through analysis, but
-they are not training rows by themselves.
+they are not subjective outcomes by themselves.
+
+Pairwise feedback is stored in `community_comparisons`. The table is not tied
+to CPBO: online preference optimizers and future offline learners can join each
+comparison to the two immutable shot recipes and telemetry trajectories.
+
+The pre-release `training_dataset` copy table and scalar `community_priors`
+table are removed on admin Postgres startup. The old scalar/Dreamer community
+export action is disabled. A future offline dataset builder will join sanitized
+shots and comparisons into a separately versioned artifact; no numeric-rating
+compatibility data is carried forward.
 
 ## Local Verification
 

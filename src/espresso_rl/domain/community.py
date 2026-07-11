@@ -14,6 +14,9 @@ SAFE_COMMUNITY_REJECTION_CATEGORIES = frozenset(
     }
 )
 
+COMMUNITY_COMPARISON_LABELS = frozenset({"new_better", "anchor_better", "tie"})
+COMMUNITY_COMPARISON_MODES = frozenset({"global_previous", "best_incumbent"})
+
 
 @dataclass(frozen=True)
 class CommunityUploadCredentials:
@@ -46,7 +49,7 @@ class CommunityRawUpload:
             raise ValueError("upload_id is required")
         if len(self.payload_hash) != 64 or any(char not in "0123456789abcdef" for char in self.payload_hash.lower()):
             raise ValueError("payload_hash must be a sha256 hex digest")
-        if self.event_type not in {"shot_record", "recommendation_record"}:
+        if self.event_type not in {"shot_record", "recommendation_record", "comparison_record"}:
             raise ValueError("unsupported community upload event_type")
 
 
@@ -68,6 +71,10 @@ class CommunityValidatedShot:
             raise ValueError("shot_id is required")
         if self.payload_json.get("event_type") != "shot_record":
             raise ValueError("validated shot payload must be a shot_record")
+        if self.payload_json.get("install_id") != self.install_id:
+            raise ValueError("validated shot install_id does not match payload")
+        if self.payload_json.get("shot_id") != self.shot_id:
+            raise ValueError("validated shot_id does not match payload")
         if not 0.0 <= float(self.trust_weight) <= 1.0:
             raise ValueError("trust_weight must be between 0 and 1")
 
@@ -97,19 +104,6 @@ class CommunityTrainingRow:
 
 
 @dataclass(frozen=True)
-class CommunityPrior:
-    context_key: str
-    prior_json: dict[str, Any]
-    confidence: float
-
-    def __post_init__(self) -> None:
-        if not self.context_key:
-            raise ValueError("context_key is required")
-        if not 0.0 <= float(self.confidence) <= 1.0:
-            raise ValueError("confidence must be between 0 and 1")
-
-
-@dataclass(frozen=True)
 class CommunityRecommendationRecord:
     install_id: str
     upload_id: str
@@ -125,6 +119,88 @@ class CommunityRecommendationRecord:
             raise ValueError("recommendation_id is required")
         if self.payload_json.get("event_type") != "recommendation_record":
             raise ValueError("recommendation payload must be a recommendation_record")
+
+
+@dataclass(frozen=True)
+class PairwiseShotComparison:
+    """Canonical comparison data, independent of the proposing optimizer."""
+
+    comparison_id: str
+    optimization_run_id: str
+    new_shot_id: str
+    anchor_shot_id: str
+    label: str
+    comparison_mode: str
+    created_at: int
+    install_id: str
+    machine_id: str
+    machine_adapter: str | None = None
+    recommendation_id: str | None = None
+    bean_context_id: str | None = None
+    grinder_context_id: str | None = None
+    profile_id: str | None = None
+    raw_profile_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        required = (
+            self.comparison_id,
+            self.optimization_run_id,
+            self.new_shot_id,
+            self.anchor_shot_id,
+            self.install_id,
+            self.machine_id,
+        )
+        if any(not isinstance(value, str) or not value.strip() for value in required):
+            raise ValueError("comparison identifiers are required")
+        if self.new_shot_id == self.anchor_shot_id:
+            raise ValueError("comparison requires two distinct physical shots")
+        if self.label not in COMMUNITY_COMPARISON_LABELS:
+            raise ValueError("comparison label is invalid")
+        if self.comparison_mode not in COMMUNITY_COMPARISON_MODES:
+            raise ValueError("comparison mode is invalid")
+        if self.created_at < 0:
+            raise ValueError("comparison created_at must be nonnegative")
+
+
+@dataclass(frozen=True)
+class CommunityComparisonRecord:
+    """An optimizer-neutral, oriented comparison between two physical shots."""
+
+    install_id: str
+    upload_id: str
+    comparison_id: str
+    payload_json: dict[str, Any]
+    trust_weight: float
+    validation_summary: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not self.install_id:
+            raise ValueError("install_id is required")
+        if not self.upload_id:
+            raise ValueError("upload_id is required")
+        if not self.comparison_id:
+            raise ValueError("comparison_id is required")
+        if self.payload_json.get("event_type") != "comparison_record":
+            raise ValueError("comparison payload must be a comparison_record")
+        if self.payload_json.get("install_id") != self.install_id:
+            raise ValueError("comparison install_id does not match payload")
+        if self.payload_json.get("comparison_id") != self.comparison_id:
+            raise ValueError("comparison_id does not match payload")
+        if self.payload_json.get("label") not in COMMUNITY_COMPARISON_LABELS:
+            raise ValueError("comparison label is invalid")
+        if self.payload_json.get("comparison_mode") not in COMMUNITY_COMPARISON_MODES:
+            raise ValueError("comparison mode is invalid")
+        if self.payload_json.get("new_shot_id") == self.payload_json.get("anchor_shot_id"):
+            raise ValueError("comparison requires two distinct physical shots")
+        for field_name in ("optimization_run_id", "new_shot_id", "anchor_shot_id", "machine_id"):
+            value = self.payload_json.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"comparison {field_name} is required")
+        created_at = self.payload_json.get("created_at")
+        if isinstance(created_at, bool) or not isinstance(created_at, int) or created_at < 0:
+            raise ValueError("comparison created_at must be a nonnegative integer")
+        if not 0.0 <= float(self.trust_weight) <= 1.0:
+            raise ValueError("trust_weight must be between 0 and 1")
 
 
 @dataclass(frozen=True)

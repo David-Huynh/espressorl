@@ -6,10 +6,7 @@ import unittest
 from espresso_rl.adapters.postgres_repositories import _row_to_rejection_summary
 from espresso_rl.application.admin_pipeline import AdminPipelineService
 from espresso_rl.application.community_mirror import CommunityMirrorResult, CommunityQueuePurgeResult
-from espresso_rl.application.community_priors import CommunityPriorGenerationResult
 from espresso_rl.application.community_validation import CommunityValidationResult
-from espresso_rl.application.training_export import TrainingDatasetExportResult
-from espresso_rl.domain.artifacts import ArtifactInfo
 from espresso_rl.domain.community import AdminActionLogEntry, CommunityRejectionSummary
 
 
@@ -21,7 +18,6 @@ class AdminPipelineTests(unittest.TestCase):
             warehouse=warehouse,
             mirror=mirror,
             validator=FakeValidator(),
-            prior_generator=FakePriorGenerator(),
             clock=FakeClock(),
         )
 
@@ -40,37 +36,12 @@ class AdminPipelineTests(unittest.TestCase):
         self.assertIsNotNone(blocked.status_snapshot)
         self.assertEqual([entry.status for entry in warehouse.admin_actions], ["already_running", "completed"])
 
-    def test_prior_dry_run_audits_zero_rows_changed(self) -> None:
-        warehouse = FakeWarehouse()
-        prior_generator = FakePriorGenerator()
-        service = AdminPipelineService(
-            warehouse=warehouse,
-            mirror=None,
-            validator=FakeValidator(),
-            prior_generator=prior_generator,
-            clock=FakeClock(),
-        )
-
-        result = service.generate_priors_once(
-            limit=50,
-            dry_run=True,
-            requested_by="dashboard user with spaces",
-        )
-
-        self.assertTrue(result.dry_run)
-        self.assertTrue(prior_generator.dry_run_seen)
-        self.assertEqual(result.priors.priors_written, 2)
-        self.assertEqual(warehouse.admin_actions[-1].rows_seen, 10)
-        self.assertEqual(warehouse.admin_actions[-1].rows_changed, 0)
-        self.assertEqual(warehouse.admin_actions[-1].requested_by, "dashboard_user_with_spaces")
-
     def test_purge_dry_run_is_locked_and_audited_without_changes(self) -> None:
         warehouse = FakeWarehouse(purge_eligible={"validated": 4, "rejected": 2})
         service = AdminPipelineService(
             warehouse=warehouse,
             mirror=FakeMirror(),
             validator=FakeValidator(),
-            prior_generator=FakePriorGenerator(),
             clock=FakeClock(),
         )
 
@@ -89,7 +60,6 @@ class AdminPipelineTests(unittest.TestCase):
             warehouse=warehouse,
             mirror=PurgingMirror(source_purged=5),
             validator=FakeValidator(),
-            prior_generator=FakePriorGenerator(),
             clock=FakeClock(),
         )
 
@@ -107,7 +77,6 @@ class AdminPipelineTests(unittest.TestCase):
             warehouse=warehouse,
             mirror=None,
             validator=FakeValidator(),
-            prior_generator=FakePriorGenerator(),
             clock=FakeClock(),
         )
 
@@ -134,7 +103,6 @@ class AdminPipelineTests(unittest.TestCase):
             warehouse=warehouse,
             mirror=None,
             validator=FakeValidator(),
-            prior_generator=FakePriorGenerator(),
             clock=FakeClock(),
         )
 
@@ -162,27 +130,6 @@ class AdminPipelineTests(unittest.TestCase):
         )
 
         self.assertEqual(summary.validation_errors, ["invalid_schema", "impossible_flow", "payload_too_large"])
-
-    def test_training_export_action_is_locked_and_audited_without_mutating_rows(self) -> None:
-        warehouse = FakeWarehouse()
-        exporter = FakeTrainingExporter()
-        service = AdminPipelineService(
-            warehouse=warehouse,
-            mirror=None,
-            validator=FakeValidator(),
-            prior_generator=FakePriorGenerator(),
-            training_exporter=exporter,
-            clock=FakeClock(),
-        )
-
-        result = service.export_training_dataset_once(limit=25, requested_by="dashboard")
-
-        self.assertEqual(result.training_export.row_count, 2)  # type: ignore[union-attr]
-        self.assertEqual(exporter.limit_seen, 25)
-        self.assertEqual(warehouse.admin_actions[-1].action_type, "export_training_dataset_once")
-        self.assertEqual(warehouse.admin_actions[-1].rows_seen, 2)
-        self.assertEqual(warehouse.admin_actions[-1].rows_changed, 0)
-
 
 class FakeWarehouse:
     def __init__(
@@ -220,10 +167,7 @@ class FakeWarehouse:
     def validated_shot_count(self) -> int:
         return 3
 
-    def training_row_count(self) -> int:
-        return 4
-
-    def community_prior_count(self) -> int:
+    def comparison_count(self) -> int:
         return 5
 
     def abuse_event_count(self) -> int:
@@ -278,49 +222,8 @@ class FakeValidator:
             processed=7,
             validated_shots=3,
             stored_recommendations=1,
+            stored_comparisons=1,
             rejected=1,
-            training_rows=2,
-        )
-
-
-class FakePriorGenerator:
-    def __init__(self) -> None:
-        self.dry_run_seen = False
-
-    def generate_once(self, limit: int = 5000, *, dry_run: bool = False) -> CommunityPriorGenerationResult:
-        self.dry_run_seen = dry_run
-        return CommunityPriorGenerationResult(
-            examined=10,
-            eligible=8,
-            rejected=2,
-            contexts_seen=3,
-            priors_written=2,
-        )
-
-
-class FakeTrainingExporter:
-    def __init__(self) -> None:
-        self.limit_seen = 0
-
-    def export_once(self, limit: int = 50_000) -> TrainingDatasetExportResult:
-        self.limit_seen = limit
-        return TrainingDatasetExportResult(
-            export_id="export_1",
-            export_dir="export_1",
-            row_count=2,
-            skipped_row_count=0,
-            dataset_sha256="a" * 64,
-            manifest_sha256="b" * 64,
-            files=[
-                ArtifactInfo(
-                    relative_path="export_1/training_rows.jsonl",
-                    absolute_path="/tmp/export_1/training_rows.jsonl",
-                    content_type="application/x-ndjson; charset=utf-8",
-                    size_bytes=10,
-                    sha256="a" * 64,
-                )
-            ],
-            warnings=[],
         )
 
 

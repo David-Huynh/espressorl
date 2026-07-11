@@ -83,10 +83,11 @@ Minimal manifest shape:
 }
 ```
 
-## Training Export Format
+## Legacy Training Export Format
 
-The admin dashboard can export the validated training dataset under
-`training_export_dir`. The format is intentionally plain:
+The old Dreamer community export is no longer exposed by the admin dashboard.
+Its isolated implementation remains temporarily while Dreamer is removed. The
+legacy format was intentionally plain:
 
 - `training_rows.jsonl`: canonical UTF-8 JSON Lines, one
   `espresso_rl_training_transition_v1` object per line.
@@ -96,8 +97,10 @@ The admin dashboard can export the validated training dataset under
   canonical row format, source git SHA, and zero-trust flags.
 - `README.txt`: plain-language format notes.
 
-No export artifact uses pickle, SQLite dumps, parquet, macros, absolute grinder
-settings, or executable/opaque formats.
+No legacy export artifact uses pickle, SQLite dumps, parquet, macros, absolute
+grinder settings, or executable/opaque formats. A future offline-model dataset
+will use a new versioned artifact that joins immutable physical shots to
+oriented comparisons instead of carrying this scalar reward schema forward.
 
 ## Dreamer Episode And Tensor Conversion
 

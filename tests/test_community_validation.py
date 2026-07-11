@@ -11,6 +11,7 @@ from espresso_rl.application.community_validation import (
 from espresso_rl.application.upload_payloads import canonical_payload_json, payload_hash
 from espresso_rl.domain.community import (
     CommunityAbuseEvent,
+    CommunityComparisonRecord,
     CommunityInstallStats,
     CommunityRawUpload,
     CommunityRecommendationRecord,
@@ -20,7 +21,7 @@ from espresso_rl.domain.community import (
 
 
 class CommunityValidationTests(unittest.TestCase):
-    def test_valid_shot_upload_moves_to_validated_and_training_tables(self) -> None:
+    def test_valid_shot_upload_moves_to_validated_physical_shots(self) -> None:
         upload = raw_upload(payload=shot_payload())
         warehouse = FakeWarehouse([upload])
 
@@ -28,13 +29,11 @@ class CommunityValidationTests(unittest.TestCase):
 
         self.assertEqual(result.processed, 1)
         self.assertEqual(result.validated_shots, 1)
-        self.assertEqual(result.training_rows, 1)
         self.assertEqual(result.rejected, 0)
         self.assertEqual(warehouse.statuses[upload.upload_id], "validated")
         self.assertEqual(warehouse.validated_shots[0].install_id, "verified_install")
         self.assertGreater(warehouse.validated_shots[0].trust_weight, 0)
         self.assertLessEqual(warehouse.validated_shots[0].trust_weight, 0.25)
-        self.assertEqual(warehouse.training_rows[0][0], 1)
 
     def test_dry_run_validation_reports_proposed_changes_without_mutating_state(self) -> None:
         upload = raw_upload(payload=shot_payload())
@@ -44,11 +43,9 @@ class CommunityValidationTests(unittest.TestCase):
 
         self.assertEqual(result.processed, 1)
         self.assertEqual(result.validated_shots, 1)
-        self.assertEqual(result.training_rows, 1)
         self.assertEqual(result.rejected, 0)
         self.assertEqual(warehouse.statuses[upload.upload_id], "mirrored")
         self.assertEqual(warehouse.validated_shots, [])
-        self.assertEqual(warehouse.training_rows, [])
         self.assertEqual(warehouse.trust_scores, [])
 
     def test_dry_run_rejection_does_not_mark_raw_row_or_log_abuse(self) -> None:
@@ -74,7 +71,6 @@ class CommunityValidationTests(unittest.TestCase):
 
         self.assertEqual(result.rejected, 1)
         self.assertEqual(warehouse.validated_shots, [])
-        self.assertEqual(warehouse.training_rows, [])
         self.assertEqual(warehouse.statuses[upload.upload_id], "rejected")
         self.assertIn("install_id", warehouse.rejections[upload.upload_id][0])
         self.assertEqual(warehouse.abuse_events[0].reason, "community_upload_validation_failed")
@@ -87,7 +83,6 @@ class CommunityValidationTests(unittest.TestCase):
 
         self.assertEqual(result.rejected, 1)
         self.assertEqual(warehouse.validated_shots, [])
-        self.assertEqual(warehouse.training_rows, [])
         self.assertEqual(warehouse.statuses[upload.upload_id], "rejected")
         self.assertIn("payload_hash", " ".join(warehouse.rejections[upload.upload_id]))
 
@@ -101,7 +96,6 @@ class CommunityValidationTests(unittest.TestCase):
 
         self.assertEqual(result.rejected, 1)
         self.assertEqual(warehouse.validated_shots, [])
-        self.assertEqual(warehouse.training_rows, [])
         self.assertIn("unknown fields", " ".join(warehouse.rejections[upload.upload_id]))
 
     def test_malformed_action_observation_mask_is_rejected(self) -> None:
@@ -132,7 +126,6 @@ class CommunityValidationTests(unittest.TestCase):
 
         self.assertEqual(result.rejected, 1)
         self.assertEqual(warehouse.validated_shots, [])
-        self.assertEqual(warehouse.training_rows, [])
         self.assertIn("profile_label", " ".join(warehouse.rejections[upload.upload_id]))
 
     def test_wrong_schema_version_is_rejected_before_trusted_storage(self) -> None:
@@ -145,7 +138,6 @@ class CommunityValidationTests(unittest.TestCase):
 
         self.assertEqual(result.rejected, 1)
         self.assertEqual(warehouse.validated_shots, [])
-        self.assertEqual(warehouse.training_rows, [])
         self.assertIn("schema_version", " ".join(warehouse.rejections[upload.upload_id]))
 
     def test_utility_upload_is_rejected_before_trusted_storage(self) -> None:
@@ -158,24 +150,20 @@ class CommunityValidationTests(unittest.TestCase):
 
         self.assertEqual(result.rejected, 1)
         self.assertEqual(warehouse.validated_shots, [])
-        self.assertEqual(warehouse.training_rows, [])
         self.assertIn("non-espresso", warehouse.rejections[upload.upload_id][0])
 
-    def test_excluded_espresso_shot_is_validated_but_not_training_weighted(self) -> None:
+    def test_excluded_espresso_shot_is_validated_with_zero_modeling_weight(self) -> None:
         payload = shot_payload()
         payload["exclude_from_local_optimization"] = True
-        payload["optimization_weight"] = 0.0
         upload = raw_upload(payload=payload)
         warehouse = FakeWarehouse([upload])
 
         result = CommunityValidationService(warehouse).validate_once()
 
         self.assertEqual(result.validated_shots, 1)
-        self.assertEqual(result.training_rows, 0)
         self.assertEqual(warehouse.validated_shots[0].trust_weight, 0.0)
-        self.assertEqual(warehouse.training_rows, [])
 
-    def test_recommendation_upload_is_stored_but_not_added_to_training_dataset(self) -> None:
+    def test_recommendation_upload_is_stored_separately_from_physical_shots(self) -> None:
         upload = raw_upload(
             event_type="recommendation_record",
             payload={
@@ -194,9 +182,83 @@ class CommunityValidationTests(unittest.TestCase):
         result = CommunityValidationService(warehouse).validate_once()
 
         self.assertEqual(result.stored_recommendations, 1)
-        self.assertEqual(result.training_rows, 0)
         self.assertEqual(warehouse.recommendations[0].recommendation_id, "rec_1")
         self.assertEqual(warehouse.statuses[upload.upload_id], "validated")
+
+    def test_pairwise_comparison_is_stored_without_scalar_taste_score(self) -> None:
+        payload = comparison_payload()
+        upload = raw_upload(event_type="comparison_record", payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.stored_comparisons, 1)
+        self.assertEqual(warehouse.comparisons[0].comparison_id, "comparison_1")
+        self.assertEqual(warehouse.comparisons[0].payload_json["label"], "new_better")
+        self.assertEqual(warehouse.statuses[upload.upload_id], "validated")
+
+    def test_comparison_rejects_reversed_identity_and_unknown_scalar_rating(self) -> None:
+        payload = comparison_payload(anchor_shot_id="candidate", human_rating=5)
+        upload = raw_upload(event_type="comparison_record", payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.rejected, 1)
+        errors = " ".join(warehouse.rejections[upload.upload_id])
+        self.assertIn("unknown fields", errors)
+        self.assertIn("distinct physical shots", errors)
+
+    def test_scalar_rating_is_not_part_of_community_shot_contract(self) -> None:
+        payload = shot_payload()
+        payload["human_rating"] = 4
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.rejected, 1)
+        self.assertIn("unknown fields", " ".join(warehouse.rejections[upload.upload_id]))
+
+    def test_physical_shot_rejects_optimizer_comparison_metadata(self) -> None:
+        payload = shot_payload()
+        payload.update(
+            {
+                "optimization_run_id": "run_1",
+                "comparison_anchor_shot_id": "anchor_1",
+                "comparison_mode": "best_incumbent",
+                "preference_feedback_required": True,
+            }
+        )
+        upload = raw_upload(payload=payload)
+        warehouse = FakeWarehouse([upload])
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.rejected, 1)
+        self.assertIn("unknown fields", " ".join(warehouse.rejections[upload.upload_id]))
+
+    def test_immutable_shot_identity_conflict_is_rejected(self) -> None:
+        upload = raw_upload(payload=shot_payload())
+        warehouse = FakeWarehouse([upload])
+        warehouse.store_error = "duplicate shot_id conflicts with an immutable physical shot"
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.validated_shots, 0)
+        self.assertEqual(result.rejected, 1)
+        self.assertEqual(warehouse.statuses[upload.upload_id], "rejected")
+
+    def test_immutable_comparison_identity_conflict_is_rejected(self) -> None:
+        upload = raw_upload(event_type="comparison_record", payload=comparison_payload())
+        warehouse = FakeWarehouse([upload])
+        warehouse.store_error = "comparison_id conflicts with an immutable oriented comparison"
+
+        result = CommunityValidationService(warehouse).validate_once()
+
+        self.assertEqual(result.stored_comparisons, 0)
+        self.assertEqual(result.rejected, 1)
+        self.assertEqual(warehouse.statuses[upload.upload_id], "rejected")
 
     def test_bad_profile_values_are_rejected(self) -> None:
         payload = shot_payload()
@@ -267,7 +329,7 @@ class CommunityValidationTests(unittest.TestCase):
             0.0,
         )
 
-    def test_not_followed_payload_keeps_actual_shot_training_weight(self) -> None:
+    def test_not_followed_payload_keeps_actual_shot_modeling_weight(self) -> None:
         payload = shot_payload()
         followed_weight = payload_trust_weight(payload, install_trust=0.35)
         payload["recommendation_followed"] = "not_followed"
@@ -319,15 +381,32 @@ def shot_payload() -> dict[str, Any]:
         "shot_time_s": 30.0,
         "profile_temperature_c": 93.0,
         "final_phase_temperature_c": 92.5,
-        "human_rating": 4,
-        "taste_tags": ["sweet"],
-        "reward_confidence": 1.0,
-        "optimization_weight": 1.0,
         "recommendation_followed": "followed",
-        "recommendation_attribution_weight": 1.0,
         "shot_type": "espresso",
         "exclude_from_local_optimization": False,
     }
+
+
+def comparison_payload(**overrides: Any) -> dict[str, Any]:
+    payload = {
+        "event_type": "comparison_record",
+        "schema_version": 1,
+        "comparison_id": "comparison_1",
+        "optimization_run_id": "run_1",
+        "new_shot_id": "candidate",
+        "anchor_shot_id": "anchor",
+        "label": "new_better",
+        "comparison_mode": "best_incumbent",
+        "created_at": 1_779_999_100,
+        "install_id": "verified_install",
+        "machine_id": "machine_1",
+        "machine_adapter": "gaggimate",
+        "bean_context_id": "bean_1",
+        "grinder_context_id": "grinder_1",
+        "profile_id": "profile_1",
+    }
+    payload.update(overrides)
+    return payload
 
 
 class FakeWarehouse:
@@ -337,10 +416,11 @@ class FakeWarehouse:
         self.rejections: dict[str, list[str]] = {}
         self.validated_shots: list[CommunityValidatedShot] = []
         self.recommendations: list[CommunityRecommendationRecord] = []
+        self.comparisons: list[CommunityComparisonRecord] = []
         self.trust_scores: list[InstallTrustScore] = []
         self.abuse_events: list[CommunityAbuseEvent] = []
-        self.training_rows: list[tuple[int, dict[str, Any], float]] = []
         self.validated_summaries: dict[str, dict[str, Any]] = {}
+        self.store_error: str | None = None
 
     def upsert_raw_upload(self, upload: CommunityRawUpload) -> None:
         self.uploads.append(upload)
@@ -366,11 +446,18 @@ class FakeWarehouse:
         self.rejections[upload.upload_id] = validation_errors
 
     def upsert_validated_shot(self, shot: CommunityValidatedShot) -> int:
+        if self.store_error:
+            raise ValueError(self.store_error)
         self.validated_shots.append(shot)
         return len(self.validated_shots)
 
     def upsert_community_recommendation(self, recommendation: CommunityRecommendationRecord) -> None:
         self.recommendations.append(recommendation)
+
+    def upsert_community_comparison(self, comparison: CommunityComparisonRecord) -> None:
+        if self.store_error:
+            raise ValueError(self.store_error)
+        self.comparisons.append(comparison)
 
     def upsert_install_trust_score(self, score: InstallTrustScore) -> None:
         self.trust_scores.append(score)
@@ -390,15 +477,6 @@ class FakeWarehouse:
 
     def record_abuse_event(self, event: CommunityAbuseEvent) -> None:
         self.abuse_events.append(event)
-
-    def upsert_training_row(
-        self,
-        source_validation_id: int,
-        payload_json: dict[str, Any],
-        trust_weight: float,
-    ) -> None:
-        self.training_rows.append((source_validation_id, payload_json, trust_weight))
-
 
 if __name__ == "__main__":
     unittest.main()

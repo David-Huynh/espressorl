@@ -26,6 +26,9 @@ PRIOR_RULE_CATALOG_MIGRATION = (
 PRIOR_RULE_SEARCH_FUNCTION = (
     ROOT / "supabase" / "functions" / "espresso-rl-prior-rule-search" / "index.ts"
 )
+COMPARISON_UPLOAD_MIGRATION = (
+    ROOT / "supabase" / "migrations" / "202607110001_espressorl_comparison_uploads.sql"
+)
 
 
 class SupabaseIngestionContractTests(unittest.TestCase):
@@ -134,6 +137,7 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("SUPPORTED_SCHEMA_VERSION = 1", source)
         self.assertIn("rejectUnknownFields(payload, allowedShotFields, errors)", source)
         self.assertIn("rejectUnknownFields(payload, allowedRecommendationFields, errors)", source)
+        self.assertIn("rejectUnknownFields(payload, allowedComparisonFields, errors)", source)
         self.assertIn("requireNumberRange(payload, 'schema_version', SUPPORTED_SCHEMA_VERSION", source)
         self.assertIn("requireNumberRange(payload, 'dose_in_g', 5, 30", source)
         self.assertIn("optionalNumberRange(payload, 'beverage_out_g', 0, 120", source)
@@ -151,10 +155,9 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("fixed_cadence_sequence channels must have matching lengths", source)
         self.assertIn("optionalEnum(payload, 'shot_type', ['espresso', 'utility_flush', 'cleaning', 'calibration', 'unknown']", source)
         self.assertIn("optionalBoolean(payload, 'exclude_from_local_optimization'", source)
-        self.assertIn("optionalBoolean(payload, 'feedback_recorded'", source)
-        self.assertIn("'nutty_cocoa'", source)
-        self.assertIn("'astringent_harsh'", source)
-        self.assertIn("'papery_stale'", source)
+        self.assertNotIn("'feedback_recorded'", source)
+        self.assertNotIn("'human_rating'", source)
+        self.assertNotIn("'reward_confidence'", source)
         self.assertIn("'action_observed'", source)
         self.assertIn("optionalActionObserved(payload, errors)", source)
         self.assertIn("action_observed.grind cannot be true without a grind measurement", source)
@@ -165,7 +168,10 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         )
         self.assertIn("optionalString(payload, 'profile_id', 120", source)
         self.assertIn("optionalSha256(payload, 'raw_profile_hash'", source)
-        self.assertIn("optionalNumberRange(payload, 'optimization_weight', 0, 1", source)
+        self.assertIn("validateComparisonRecord", source)
+        self.assertIn("'new_better', 'anchor_better', 'tie'", source)
+        self.assertIn("comparison requires distinct physical shots", source)
+        self.assertNotIn("preference-gated shot requires optimization_run_id", source)
         self.assertIn("[0, 20, 'pressure']", source)
         self.assertIn("[0, 15, 'target_pressure']", source)
         self.assertIn("[-1, 120, 'weight']", source)
@@ -193,6 +199,13 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("mirror_completed_at: null", source)
         self.assertIn("mirror_attempt_count: 0", source)
         self.assertIn("status: 'queued'", source)
+
+    def test_comparison_migration_expands_only_raw_queue_record_types(self) -> None:
+        sql = COMPARISON_UPLOAD_MIGRATION.read_text()
+
+        self.assertIn("'shot', 'recommendation', 'comparison'", sql)
+        self.assertIn("'shot_record', 'recommendation_record', 'comparison_record'", sql)
+        self.assertNotIn("cpbo", sql.lower())
 
     def test_edge_function_returns_retry_after_and_raised_limits(self) -> None:
         source = FUNCTION.read_text()

@@ -126,7 +126,6 @@ Gaggimate should publish:
 gaggimate/{topic_id}/shot/profile
 gaggimate/{topic_id}/machine/state
 gaggimate/{topic_id}/rl/preference
-gaggimate/{topic_id}/rl/rating
 gaggimate/{topic_id}/rl/shot/correction
 gaggimate/{topic_id}/rl/recommendation/decision
 gaggimate/{topic_id}/rl/recommendation/apply
@@ -170,15 +169,16 @@ basket, water, and user context when available
 Use separate grinder contexts for different grinders. Bean/grinder/profile
 contexts keep local shot history and active recommendations isolated, while old
 bags of the same normalized bean can still provide low-weight prior evidence
-after the new context has at least one rated local shot.
+after the new context has at least one local preference comparison.
 
 ## Optional Features
 
-Community upload is optional. Local BO and local history work without Supabase.
-Public containers only queue anonymous upload snapshots when backend upload is
-enabled, Gaggimate has sent the user opt-in, and payloads pass local schema and
-hash preflight. Supabase rejects or network failures do not delete local
-optimizer evidence.
+Community upload is optional. Local optimization and history work without
+Supabase. Community shot records contain physical recipe and trajectory facts;
+subjective supervision is stored separately as oriented three-outcome
+comparison records. Numeric ratings and derived scalar rewards are not part of
+the community upload contract. Supabase rejects or network failures do not
+delete local optimizer evidence.
 
 DreamerV3 artifacts must be non-executable, hash-verified, schema-compatible,
 and explicitly release-ready before runtime use. `safetensors` is the accepted

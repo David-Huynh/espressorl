@@ -147,25 +147,19 @@ rejection and a finite Gibbs fallback.
 The CPBO path never calls EI, UCB, Thompson sampling, EUBO, qEUBO, or a scalar
 rating acquisition.
 
-## DreamerV3 Integration
+## Offline Model Integration
 
-CPBO comparisons are canonical shot feedback, so a future DreamerV3 taste
-model should consume the same oriented `new_better`, `anchor_better`, and `tie`
-records. The labels must not be converted to `+1`, `0`, and `-1` rewards.
+Pairwise comparisons are canonical supervision that can be reused by future
+offline model-based RL or preference-learning methods. Community persistence is
+therefore algorithm-neutral: physical recipes and trajectories are shot
+records, while `new_better`, `anchor_better`, and `tie` are oriented rows in
+`community_comparisons`.
 
-Dreamer's RSSM world model remains self-supervised on physical trajectories,
-actions, and context. Preference feedback belongs in a separate terminal
-utility head over the candidate and anchor trajectory embeddings, conditioned
-on recipe context and the selected taste objective. That head should use the
-same three-outcome JND likelihood and learn a nonnegative perceptual threshold.
-The actor can then optimize predicted terminal utility during imagined
-rollouts without teaching the dynamics model that a tie is zero reward.
-
-For one-shot recipe recommendations, unavailable or rejected Dreamer inference
-hands control to stateful CPBO. For Dreamer's live adaptive profile, a control
-safety failure falls back to the configured static machine profile; CPBO does
-not issue mid-shot control actions. Numeric historical ratings remain separate
-legacy supervision and are not silently transformed into pairwise preferences.
+An offline dynamics model can train self-supervised on physical trajectories,
+actions, and context. A separate preference or terminal-utility model can join
+the candidate and anchor trajectory embeddings through the comparison table.
+The labels must not be converted to fabricated scalar rewards, and optimizer
+implementation details must not become persistence columns.
 
 ## Anchor Modes
 
@@ -210,6 +204,19 @@ Recommendation storage also adds:
 Existing numeric BO records remain readable. CPBO data are separate physical
 shots and oriented comparisons, not synthetic scalar observations. Reset All
 deletes CPBO rows for that install and machine through the repository port.
+
+Community persistence is separate from local optimizer checkpoints:
+
+- `community_validated_shots` stores sanitized physical observations.
+- `community_recommendations` stores proposal lifecycle records.
+- `community_comparisons` stores algorithm-neutral oriented feedback.
+
+There is no optimizer-owned community table. Offline dataset builders join
+physical shot trajectories to comparison rows and version their own artifacts.
+
+The signed Supabase queue uses the matching `shot_record`,
+`recommendation_record`, and `comparison_record` event types. Community shot
+records do not contain numeric taste ratings or derived scalar rewards.
 
 ## Configuration
 

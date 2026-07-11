@@ -126,7 +126,7 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         self.store.close()
         self.temp.cleanup()
 
-    def bridge(self, grinds: list[float]) -> CPBORuntimeBridge:
+    def bridge(self, grinds: list[float], comparison_sink=None) -> CPBORuntimeBridge:
         service = ConsecutivePreferenceOptimizationService(
             self.repository,
             _Engine(grinds),
@@ -139,6 +139,7 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
             self.shots,
             self.recommendations.append,
             strict_context_from_shot,
+            comparison_sink,
             comparison_mode=ComparisonMode.BEST_INCUMBENT,
             safety_bounds=SafetyBounds(),
         )
@@ -148,7 +149,8 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         return self.clock_value
 
     def test_baseline_candidate_and_preference_advance_without_numeric_rating(self) -> None:
-        bridge = self.bridge([6.0, 7.0])
+        uploaded_comparisons = []
+        bridge = self.bridge([6.0, 7.0], uploaded_comparisons.append)
         baseline = _shot("baseline", grind=5.0, rating=1)
         self.shots.rows[baseline.shot_id] = baseline
 
@@ -173,6 +175,7 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
                 new_shot_id="candidate",
                 anchor_shot_id="baseline",
                 label=PreferenceLabel.ANCHOR_BETTER,
+                comparison_mode=ComparisonMode.BEST_INCUMBENT,
                 install_id="install",
                 machine_id="gaggimate:AA_BB",
                 timestamp=200,
@@ -181,6 +184,10 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
 
         comparisons = self.repository.list_comparisons(first.optimization_run_id)
         self.assertEqual([row.label for row in comparisons], [PreferenceLabel.ANCHOR_BETTER])
+        self.assertEqual(len(uploaded_comparisons), 1)
+        self.assertEqual(uploaded_comparisons[0].new_shot_id, "candidate")
+        self.assertEqual(uploaded_comparisons[0].anchor_shot_id, "baseline")
+        self.assertEqual(uploaded_comparisons[0].label, "anchor_better")
         self.assertEqual(next_recommendation.comparison_anchor_shot_id, "baseline")
         self.assertEqual(next_recommendation.projected_relative_step_from_reference, 7.0)
 

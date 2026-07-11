@@ -16,7 +16,7 @@ from .models import (
     VALID_TASTE_TAGS,
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
-from .cpbo import PreferenceLabel
+from .cpbo import ComparisonMode, PreferenceLabel
 from .dreamer_taste import normalize_dreamer_taste_objective
 from .prior_rules import PriorRule, PriorSelectionMode, parse_prior_rules
 from .taste import normalize_taste_tags
@@ -390,6 +390,7 @@ class PreferenceFeedbackEvent:
     install_id: str
     machine_id: str
     timestamp: int
+    comparison_mode: ComparisonMode | None = None
     source: str = "unknown"
     schema_version: int = 1
 
@@ -415,6 +416,8 @@ class PreferenceFeedbackEvent:
         if not isinstance(self.source, str) or not self.source.strip() or len(self.source) > 80:
             raise ValueError("preference feedback source is invalid")
         object.__setattr__(self, "label", PreferenceLabel(self.label))
+        if self.comparison_mode is not None:
+            object.__setattr__(self, "comparison_mode", ComparisonMode(self.comparison_mode))
 
 
 @dataclass(frozen=True)

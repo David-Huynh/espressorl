@@ -44,9 +44,11 @@ from espresso_rl.domain.reward import compute_reward
 from espresso_rl.domain.staleness import check_recommendation_staleness
 from espresso_rl.domain.utility import classify_shot_profile_event
 from espresso_rl.application.upload_payloads import (
+    make_comparison_upload_item,
     make_recommendation_upload_item,
     make_shot_upload_item,
 )
+from espresso_rl.domain.community import PairwiseShotComparison
 from espresso_rl.application.rule_priors import rule_prior_signals
 from espresso_rl.ports.optimizers import Optimizer, PriorProvider, StatefulOptimizerHandoff
 from espresso_rl.ports.repositories import (
@@ -987,6 +989,24 @@ class EspressoRLService:
             (install_id, machine_id),
             self._community_upload_enabled_default,
         )
+
+    def enqueue_comparison_upload(self, comparison: PairwiseShotComparison) -> None:
+        """Queue generic pairwise feedback without making optimization depend on upload."""
+
+        if self._upload_queue is None:
+            return
+        if not self.community_upload_enabled_for(comparison.install_id, comparison.machine_id):
+            return
+        try:
+            self._upload_queue.enqueue(
+                make_comparison_upload_item(comparison, self._clock())
+            )
+        except Exception as exc:
+            logger.warning(
+                "Community upload enqueue failed for comparison %s; local comparison was retained: %s",
+                comparison.comparison_id,
+                exc,
+            )
 
     def _apply_grinder_display_metadata(
         self,

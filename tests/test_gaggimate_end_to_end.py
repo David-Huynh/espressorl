@@ -232,8 +232,8 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 )
                 shot_upload = next(item for item in pending if item.local_record_type == "shot")
                 queued_shot = json.loads(shot_upload.payload_json)
-                self.assertEqual(queued_shot["human_rating"], 4)
-                self.assertEqual(queued_shot["taste_tags"], ["sweet", "fruity"])
+                self.assertNotIn("human_rating", queued_shot)
+                self.assertNotIn("taste_tags", queued_shot)
 
                 recommendations = harness.publications("gaggimate/AA_BB/rl/recommendation")
                 self.assertEqual(len(recommendations), 1)
@@ -417,7 +417,7 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 self.assertIsNone(queued_shot["relative_grind_steps_from_reference"])
                 self.assertEqual(queued_shot["dose_in_g"], 18.0)
                 self.assertEqual(queued_shot["beverage_out_g"], 31.5)
-                self.assertEqual(queued_shot["human_rating"], 3)
+                self.assertNotIn("human_rating", queued_shot)
 
     def test_optimizer_context_isolated_by_profile_bean_and_grinder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

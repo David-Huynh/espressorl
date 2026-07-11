@@ -44,7 +44,6 @@ from espresso_rl.adapters.supabase_credentials import (
     SupabaseCredentialRegistrar,
     SupabaseCredentialRegistrarConfig,
 )
-from espresso_rl.adapters.file_artifacts import LocalTextArtifactWriter
 from espresso_rl.adapters.local_model_store import LocalModelArtifactStore
 from espresso_rl.application.admin_pipeline import AdminPipelineService
 from espresso_rl.application.checkpoint_loading import CheckpointLoadError, load_verified_dreamer_checkpoint
@@ -69,14 +68,11 @@ from espresso_rl.application.dreamer_shadow_quality import (
 )
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
-from espresso_rl.application.community_priors import CommunityPriorGenerationService
 from espresso_rl.application.community_validation import CommunityValidationService
 from espresso_rl.application.cpbo_runtime import CPBORuntimeBridge, strict_context_from_shot
 from espresso_rl.application.local_data import LocalDataService
-from espresso_rl.application.training_export import TrainingDatasetExportService
 from espresso_rl.application.training_export import local_training_transition_from_shot
 from espresso_rl.application.prior_providers import (
-    CommunityPriorProvider,
     CompositePriorProvider,
     LocalHistoryPriorProvider,
 )
@@ -251,6 +247,7 @@ def main() -> None:
         optimizer=cpbo_service,
         shots=shot_repo,
         recommendation_sink=service.persist_generated_recommendation,
+        comparison_sink=service.enqueue_comparison_upload,
         context_factory=strict_context_from_shot,
         comparison_mode=config.cpbo.comparison_mode,
         safety_bounds=safety_bounds,
@@ -1806,28 +1803,12 @@ def maybe_start_admin_collector_worker(
                     logger.info("Admin validation skipped because the job is already running")
                 elif validation is not None and validation.processed:
                     logger.info(
-                        "Validated community uploads processed=%d shots=%d recommendations=%d rejected=%d training_rows=%d",
+                        "Validated community uploads processed=%d shots=%d recommendations=%d comparisons=%d rejected=%d",
                         validation.processed,
                         validation.validated_shots,
                         validation.stored_recommendations,
+                        validation.stored_comparisons,
                         validation.rejected,
-                        validation.training_rows,
-                    )
-                prior_action = pipeline.generate_priors_once(
-                    limit=max(config.admin_collector_batch_size * 50, 5000),
-                    requested_by="admin_collector",
-                )
-                priors = prior_action.priors
-                if prior_action.already_running:
-                    logger.info("Admin prior generation skipped because the job is already running")
-                elif priors is not None and priors.priors_written:
-                    logger.info(
-                        "Generated community priors examined=%d eligible=%d rejected=%d contexts=%d written=%d",
-                        priors.examined,
-                        priors.eligible,
-                        priors.rejected,
-                        priors.contexts_seen,
-                        priors.priors_written,
                     )
             except Exception:
                 logger.exception("Admin community mirror/validation cycle failed")
@@ -1942,14 +1923,6 @@ def build_admin_pipeline_service(config: Config) -> AdminPipelineService:
         warehouse=warehouse,
         mirror=mirror,
         validator=CommunityValidationService(warehouse=warehouse),
-        prior_generator=CommunityPriorGenerationService(warehouse=warehouse),
-        training_exporter=TrainingDatasetExportService(
-            warehouse=warehouse,
-            writer=LocalTextArtifactWriter(config.training_export_dir),
-            source_git_sha=config.build_git_sha,
-            max_rows=config.training_export_max_rows,
-            clock=config.now,
-        ),
         clock=config.now,
     )
 
@@ -1964,14 +1937,7 @@ def upload_queue_for_service(
 
 
 def open_prior_provider(config: Config) -> CompositePriorProvider:
-    providers = [LocalHistoryPriorProvider()]
-    if config.storage_backend == "postgres":
-        providers.append(
-            CommunityPriorProvider(
-                PostgresCommunityWarehouse(PostgresStore(config.postgres_dsn)),
-            )
-        )
-    return CompositePriorProvider(providers)
+    return CompositePriorProvider([LocalHistoryPriorProvider()])
 
 
 def build_cpbo_recipe_space(

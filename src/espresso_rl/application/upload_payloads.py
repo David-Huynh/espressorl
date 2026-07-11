@@ -4,6 +4,7 @@ import hashlib
 import json
 from typing import Any
 
+from espresso_rl.domain.community import PairwiseShotComparison
 from espresso_rl.domain.models import (
     Recommendation,
     ShotRecord,
@@ -24,6 +25,14 @@ def make_recommendation_upload_item(
     payload = recommendation_upload_payload(recommendation)
     upload_id = f"recommendation_{recommendation.recommendation_id}"
     return _make_item("recommendation", recommendation.recommendation_id, payload, now, upload_id=upload_id)
+
+
+def make_comparison_upload_item(
+    comparison: PairwiseShotComparison,
+    now: int,
+) -> UploadQueueItem:
+    payload = comparison_upload_payload(comparison)
+    return _make_item("comparison", comparison.comparison_id, payload, now)
 
 
 def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
@@ -65,24 +74,11 @@ def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
         "recommended_target_ratio": shot.recommended_target_ratio,
         "recommendation_decision": shot.recommendation_decision.value,
         "recommendation_followed": shot.recommendation_followed.value,
-        "recommendation_attribution_weight": shot.recommendation_attribution_weight,
-        "human_rating": shot.human_rating,
-        "taste_tags": list(shot.taste_tags),
-        "feedback_recorded": shot.feedback_recorded,
-        "profile_score": shot.profile_score,
-        "profile_mse": shot.profile_mse,
-        "reward": shot.reward,
-        "reward_confidence": shot.reward_confidence,
         "shot_type": shot.shot_type.value,
         "exclude_from_local_optimization": shot.exclude_from_local_optimization,
-        "optimization_weight": shot.optimization_weight,
-        "rating_prompt_allowed": shot.rating_prompt_allowed,
         "grind_followed": shot.grind_followed,
         "dose_followed": shot.dose_followed,
         "yield_followed": shot.yield_followed,
-        "grind_recommendation_trust": shot.grind_recommendation_trust,
-        "dose_recommendation_trust": shot.dose_recommendation_trust,
-        "yield_recommendation_trust": shot.yield_recommendation_trust,
         "weight_source": shot.weight_source,
         "flow_source": shot.flow_source,
         "flow_units": shot.flow_units,
@@ -177,6 +173,28 @@ def recommendation_upload_payload(recommendation: Recommendation) -> dict[str, A
         "applied_fields": dict(recommendation.applied_fields),
         "manual_fields": list(recommendation.manual_fields),
         "apply_error": recommendation.apply_error,
+    }
+
+
+def comparison_upload_payload(comparison: PairwiseShotComparison) -> dict[str, Any]:
+    return {
+        "event_type": "comparison_record",
+        "schema_version": 1,
+        "comparison_id": comparison.comparison_id,
+        "optimization_run_id": comparison.optimization_run_id,
+        "new_shot_id": comparison.new_shot_id,
+        "anchor_shot_id": comparison.anchor_shot_id,
+        "label": comparison.label,
+        "comparison_mode": comparison.comparison_mode,
+        "created_at": comparison.created_at,
+        "install_id": comparison.install_id,
+        "machine_id": comparison.machine_id,
+        "machine_adapter": comparison.machine_adapter,
+        "recommendation_id": comparison.recommendation_id,
+        "bean_context_id": comparison.bean_context_id,
+        "grinder_context_id": comparison.grinder_context_id,
+        "profile_id": comparison.profile_id,
+        "raw_profile_hash": comparison.raw_profile_hash,
     }
 
 

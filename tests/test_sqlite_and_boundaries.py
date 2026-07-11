@@ -1256,10 +1256,9 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             "community_raw_uploads",
             "community_validated_shots",
             "community_recommendations",
+            "community_comparisons",
             "install_trust_scores",
             "abuse_events",
-            "training_dataset",
-            "community_priors",
             "community_grinder_catalog",
             "community_grinder_aliases",
         ):
@@ -1269,8 +1268,8 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("UNIQUE (install_id, payload_hash)", schema)
         self.assertIn("validation_summary JSONB", schema)
         self.assertIn("validation_errors JSONB", schema)
-        self.assertIn("UNIQUE (source_validation_id)", schema)
-        self.assertIn("idx_community_priors_context_key", schema)
+        self.assertNotIn("CREATE TABLE IF NOT EXISTS training_dataset", schema)
+        self.assertNotIn("CREATE TABLE IF NOT EXISTS community_priors", schema)
         self.assertIn("microns_per_step DOUBLE PRECISION", schema)
         self.assertIn("grind_observed BOOLEAN NOT NULL DEFAULT TRUE", schema)
         self.assertIn("dose_observed BOOLEAN NOT NULL DEFAULT TRUE", schema)

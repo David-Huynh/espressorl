@@ -19,12 +19,11 @@ from espresso_rl.adapters.sqlite_repositories import (
 from espresso_rl.domain.community import (
     AdminActionLogEntry,
     CommunityAbuseEvent,
+    CommunityComparisonRecord,
     CommunityInstallStats,
-    CommunityPrior,
     CommunityRawUpload,
     CommunityRecommendationRecord,
     CommunityRejectionSummary,
-    CommunityTrainingRow,
     CommunityValidatedShot,
     InstallTrustScore,
     community_rejection_categories,
@@ -105,21 +104,14 @@ class PostgresStore:
         self._migrate_existing_tables()
         for statement in index_statements:
             self.conn.execute(statement)
-        self.conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_training_dataset_source_validation_id
-                ON training_dataset (source_validation_id)
-            """
-        )
-        self.conn.execute(
-            """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_community_priors_context_key
-                ON community_priors (context_key)
-            """
-        )
         self.conn.commit()
 
     def _migrate_existing_tables(self) -> None:
+        # Community supervision is represented by immutable physical shots and
+        # oriented comparisons. These pre-release scalar/duplicate tables have
+        # no compatible semantics and intentionally carry no data forward.
+        self.conn.execute("DROP TABLE IF EXISTS training_dataset")
+        self.conn.execute("DROP TABLE IF EXISTS community_priors")
         for column, definition in {
             "bean_context_name": "TEXT",
             "grinder_context_id": "TEXT",
@@ -585,7 +577,7 @@ class PostgresPreferentialOptimizationRepository:
             if not _same_cpbo_recipe_values(stored, recipe):
                 raise ValueError("recipe identifier collision has inconsistent values")
             return
-        self._store.conn.execute(
+        stored = self._store.conn.execute(
             """
             INSERT INTO cpbo_recipes (recipe_id, run_id, created_at, payload_json)
             VALUES (%s, %s, %s, %s)
@@ -1677,11 +1669,7 @@ class PostgresCommunityWarehouse:
             INSERT INTO community_validated_shots (
                 install_id, upload_id, shot_id, payload_json, trust_weight, validation_summary
             ) VALUES (%s, %s, %s, %s::jsonb, %s, %s::jsonb)
-            ON CONFLICT (install_id, shot_id) DO UPDATE SET
-                upload_id=EXCLUDED.upload_id,
-                payload_json=EXCLUDED.payload_json,
-                trust_weight=EXCLUDED.trust_weight,
-                validation_summary=EXCLUDED.validation_summary
+            ON CONFLICT (install_id, shot_id) DO NOTHING
             RETURNING validation_id
             """,
             (
@@ -1693,6 +1681,19 @@ class PostgresCommunityWarehouse:
                 json.dumps(shot.validation_summary, sort_keys=True),
             ),
         ).fetchone()
+        if row is None:
+            existing = self._store.conn.execute(
+                """
+                SELECT validation_id, payload_json
+                FROM community_validated_shots
+                WHERE install_id=%s AND shot_id=%s
+                """,
+                (shot.install_id, shot.shot_id),
+            ).fetchone()
+            if existing is None or _json_object(existing["payload_json"]) != shot.payload_json:
+                self._store.conn.rollback()
+                raise ValueError("duplicate shot_id conflicts with an immutable physical shot")
+            row = existing
         self._store.conn.commit()
         return int(row["validation_id"])
 
@@ -1713,6 +1714,47 @@ class PostgresCommunityWarehouse:
                 json.dumps(recommendation.payload_json, sort_keys=True),
             ),
         )
+        self._store.conn.commit()
+
+    def upsert_community_comparison(self, comparison: CommunityComparisonRecord) -> None:
+        payload = comparison.payload_json
+        stored = self._store.conn.execute(
+            """
+            INSERT INTO community_comparisons (
+                install_id, comparison_id, upload_id, optimization_run_id,
+                new_shot_id, anchor_shot_id, label, comparison_mode,
+                payload_json, trust_weight, validation_summary, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, to_timestamp(%s))
+            ON CONFLICT (install_id, comparison_id) DO NOTHING
+            RETURNING comparison_id
+            """,
+            (
+                comparison.install_id,
+                comparison.comparison_id,
+                comparison.upload_id,
+                payload["optimization_run_id"],
+                payload["new_shot_id"],
+                payload["anchor_shot_id"],
+                payload["label"],
+                payload["comparison_mode"],
+                json.dumps(payload, sort_keys=True),
+                comparison.trust_weight,
+                json.dumps(comparison.validation_summary, sort_keys=True),
+                payload["created_at"],
+            ),
+        ).fetchone()
+        if stored is None:
+            existing = self._store.conn.execute(
+                """
+                SELECT payload_json
+                FROM community_comparisons
+                WHERE install_id=%s AND comparison_id=%s
+                """,
+                (comparison.install_id, comparison.comparison_id),
+            ).fetchone()
+            if existing is None or _json_object(existing["payload_json"]) != payload:
+                self._store.conn.rollback()
+                raise ValueError("comparison_id conflicts with an immutable oriented comparison")
         self._store.conn.commit()
 
     def upsert_install_trust_score(self, score: InstallTrustScore) -> None:
@@ -1766,82 +1808,6 @@ class PostgresCommunityWarehouse:
             ),
         )
         self._store.conn.commit()
-
-    def upsert_training_row(
-        self,
-        source_validation_id: int,
-        payload_json: dict[str, Any],
-        trust_weight: float,
-    ) -> None:
-        self._store.conn.execute(
-            """
-            INSERT INTO training_dataset (source_validation_id, payload_json, trust_weight)
-            VALUES (%s, %s::jsonb, %s)
-            ON CONFLICT (source_validation_id) DO UPDATE SET
-                payload_json=EXCLUDED.payload_json,
-                trust_weight=EXCLUDED.trust_weight
-            """,
-            (
-                source_validation_id,
-                json.dumps(payload_json, sort_keys=True),
-                trust_weight,
-            ),
-        )
-        self._store.conn.commit()
-
-    def list_training_rows(self, limit: int = 5000) -> list[CommunityTrainingRow]:
-        rows = self._store.conn.execute(
-            """
-            SELECT
-                td.training_row_id,
-                td.source_validation_id,
-                cvs.install_id,
-                td.payload_json,
-                td.trust_weight,
-                cru.payload_hash
-            FROM training_dataset td
-            JOIN community_validated_shots cvs
-                ON cvs.validation_id = td.source_validation_id
-            LEFT JOIN community_raw_uploads cru
-                ON cru.install_id = cvs.install_id AND cru.upload_id = cvs.upload_id
-            WHERE td.trust_weight > 0
-            ORDER BY td.created_at DESC
-            LIMIT %s
-            """,
-            (limit,),
-        ).fetchall()
-        return [_row_to_training_row(row) for row in rows]
-
-    def upsert_community_prior(self, prior: CommunityPrior) -> None:
-        self._store.conn.execute(
-            """
-            INSERT INTO community_priors (context_key, prior_json, confidence, created_at)
-            VALUES (%s, %s::jsonb, %s, now())
-            ON CONFLICT (context_key) DO UPDATE SET
-                prior_json=EXCLUDED.prior_json,
-                confidence=EXCLUDED.confidence,
-                created_at=now()
-            """,
-            (
-                prior.context_key,
-                json.dumps(prior.prior_json, sort_keys=True),
-                prior.confidence,
-            ),
-        )
-        self._store.conn.commit()
-
-    def list_community_priors(self, context_key: str, limit: int = 10) -> list[CommunityPrior]:
-        rows = self._store.conn.execute(
-            """
-            SELECT context_key, prior_json, confidence
-            FROM community_priors
-            WHERE context_key=%s
-            ORDER BY created_at DESC
-            LIMIT %s
-            """,
-            (context_key, limit),
-        ).fetchall()
-        return [_row_to_community_prior(row) for row in rows]
 
     def raw_upload_counts_by_status(self) -> dict[str, int]:
         rows = self._store.conn.execute(
@@ -1913,11 +1879,8 @@ class PostgresCommunityWarehouse:
     def validated_shot_count(self) -> int:
         return _count_table(self._store.conn, "community_validated_shots")
 
-    def training_row_count(self) -> int:
-        return _count_table(self._store.conn, "training_dataset")
-
-    def community_prior_count(self) -> int:
-        return _count_table(self._store.conn, "community_priors")
+    def comparison_count(self) -> int:
+        return _count_table(self._store.conn, "community_comparisons")
 
     def abuse_event_count(self) -> int:
         return _count_table(self._store.conn, "abuse_events")
@@ -1994,13 +1957,19 @@ def _upsert(conn, table: str, key: str, row: dict[str, Any]) -> None:
 def _count_table(conn, table: str) -> int:
     if table not in {
         "community_validated_shots",
-        "training_dataset",
-        "community_priors",
+        "community_comparisons",
         "abuse_events",
     }:
         raise ValueError("unsupported count table")
     row = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
     return int(row["count"])
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    parsed = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(parsed, dict):
+        raise ValueError("stored JSON value must be an object")
+    return parsed
 
 
 def _mark_rejected_uploads_postgres(conn, shots: list[ShotRecord]) -> None:
@@ -2072,31 +2041,6 @@ def _row_to_community_raw_upload(row: dict[str, Any]) -> CommunityRawUpload:
         event_type=row["event_type"],
         payload_json=payload_json,
         received_at=str(received_at) if received_at is not None else None,
-    )
-
-
-def _row_to_training_row(row: dict[str, Any]) -> CommunityTrainingRow:
-    payload_json = row["payload_json"]
-    if isinstance(payload_json, str):
-        payload_json = json.loads(payload_json)
-    return CommunityTrainingRow(
-        training_row_id=int(row["training_row_id"]),
-        source_validation_id=int(row["source_validation_id"]),
-        install_id=row["install_id"],
-        payload_json=payload_json,
-        trust_weight=float(row["trust_weight"]),
-        payload_hash=row.get("payload_hash"),
-    )
-
-
-def _row_to_community_prior(row: dict[str, Any]) -> CommunityPrior:
-    prior_json = row["prior_json"]
-    if isinstance(prior_json, str):
-        prior_json = json.loads(prior_json)
-    return CommunityPrior(
-        context_key=row["context_key"],
-        prior_json=prior_json,
-        confidence=float(row["confidence"]),
     )
 
 

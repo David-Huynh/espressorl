@@ -54,9 +54,6 @@ class TrainingDatasetExportTests(unittest.TestCase):
                             1,
                             payload_overrides={
                                 "grinder_context_id": "=formula_like_context",
-                                "human_rating": 4,
-                                "reward": 0.8,
-                                "reward_confidence": 0.7,
                                 "beverage_flow_profile": [1.5 for _ in range(100)],
                                 "temperature_profile": [93.0 for _ in range(100)],
                                 "target_temperature_profile": [92.5 for _ in range(100)],
@@ -176,7 +173,6 @@ class TrainingDatasetExportTests(unittest.TestCase):
                                 "recommended_projected_relative_step_from_reference": -2,
                                 "recommendation_decision": "accepted",
                                 "recommendation_followed": "not_followed",
-                                "recommendation_attribution_weight": 1.0,
                             },
                         )
                     ]
@@ -277,7 +273,6 @@ def training_row(
         "microns_per_step": 12.5,
         "relative_grind_steps_from_reference": 0,
         "relative_grind_um_from_reference": 0,
-        "optimization_weight": 1.0,
         "recommendation_followed": "followed",
     }
     if payload_overrides:

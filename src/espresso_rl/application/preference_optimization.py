@@ -343,6 +343,22 @@ class ConsecutivePreferenceOptimizationService:
             raise ValueError(f"unknown CPBO shot {shot_id}")
         return shot
 
+    def get_comparison(
+        self,
+        run_id: str,
+        new_shot_id: str,
+        anchor_shot_id: str,
+    ) -> PreferenceComparison:
+        matching = [
+            comparison
+            for comparison in self._repository.list_comparisons(run_id)
+            if comparison.new_shot_id == new_shot_id
+            and comparison.anchor_shot_id == anchor_shot_id
+        ]
+        if len(matching) != 1:
+            raise ValueError("stored preference comparison is missing or ambiguous")
+        return matching[0]
+
     def reset_owner(self, install_id: str, machine_id: str) -> dict[str, int]:
         return self._repository.reset_owner(install_id, machine_id)
 

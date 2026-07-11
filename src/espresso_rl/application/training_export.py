@@ -20,7 +20,7 @@ from espresso_rl.domain.training import (
     validate_training_transition,
 )
 from espresso_rl.ports.artifacts import TextArtifactWriter
-from espresso_rl.ports.community import CommunityWarehouseRepository
+from espresso_rl.ports.training import TrainingRowSource
 
 EXPORT_SCHEMA_VERSION = TRAINING_SCHEMA_VERSION
 TRAINING_ROW_FORMAT = TRAINING_TRANSITION_FORMAT
@@ -140,7 +140,7 @@ class TrainingDatasetExportService:
     def __init__(
         self,
         *,
-        warehouse: CommunityWarehouseRepository,
+        warehouse: TrainingRowSource,
         writer: TextArtifactWriter,
         source_git_sha: str = "",
         max_rows: int = 50_000,

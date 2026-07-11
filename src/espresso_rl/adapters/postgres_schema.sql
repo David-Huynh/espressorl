@@ -324,6 +324,31 @@ CREATE TABLE IF NOT EXISTS community_recommendations (
     PRIMARY KEY (install_id, recommendation_id)
 );
 
+-- Algorithm-neutral pairwise feedback. Optimizers and offline learners join
+-- these immutable comparisons to the two physical shot trajectories.
+CREATE TABLE IF NOT EXISTS community_comparisons (
+    install_id TEXT NOT NULL,
+    comparison_id TEXT NOT NULL,
+    upload_id TEXT NOT NULL,
+    optimization_run_id TEXT NOT NULL,
+    new_shot_id TEXT NOT NULL,
+    anchor_shot_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    comparison_mode TEXT NOT NULL,
+    payload_json JSONB NOT NULL,
+    trust_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    validation_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (install_id, comparison_id),
+    CHECK (new_shot_id <> anchor_shot_id),
+    CHECK (trust_weight >= 0.0 AND trust_weight <= 1.0),
+    CHECK (label IN ('new_better', 'anchor_better', 'tie')),
+    CHECK (comparison_mode IN ('global_previous', 'best_incumbent'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_community_comparisons_run
+    ON community_comparisons (install_id, optimization_run_id, created_at);
+
 CREATE TABLE IF NOT EXISTS install_trust_scores (
     install_id TEXT PRIMARY KEY,
     trust_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
@@ -340,26 +365,6 @@ CREATE TABLE IF NOT EXISTS abuse_events (
     detail JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-CREATE TABLE IF NOT EXISTS training_dataset (
-    training_row_id BIGSERIAL PRIMARY KEY,
-    source_validation_id BIGINT REFERENCES community_validated_shots(validation_id),
-    payload_json JSONB NOT NULL,
-    trust_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (source_validation_id)
-);
-
-CREATE TABLE IF NOT EXISTS community_priors (
-    prior_id BIGSERIAL PRIMARY KEY,
-    context_key TEXT NOT NULL,
-    prior_json JSONB NOT NULL,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_community_priors_context_key
-    ON community_priors (context_key);
 
 CREATE TABLE IF NOT EXISTS community_grinder_catalog (
     grinder_id TEXT PRIMARY KEY,

@@ -25,12 +25,10 @@ const allowedShotFields = new Set([
   'shot_time_s', 'recommendation_id', 'recommended_grind_delta_steps_from_current',
   'recommended_grind_delta_um_from_current', 'recommended_projected_relative_step_from_reference',
   'recommended_dose_g', 'recommended_target_yield_g', 'recommended_target_ratio',
-  'recommendation_decision', 'recommendation_followed', 'recommendation_attribution_weight',
-  'human_rating', 'taste_tags', 'feedback_recorded', 'profile_score', 'profile_mse',
-  'reward', 'reward_confidence', 'shot_type', 'exclude_from_local_optimization',
-  'optimization_weight', 'rating_prompt_allowed', 'grind_followed', 'dose_followed',
-  'yield_followed', 'grind_recommendation_trust', 'dose_recommendation_trust',
-  'yield_recommendation_trust', 'weight_source', 'flow_source', 'flow_units',
+  'recommendation_decision', 'recommendation_followed',
+  'shot_type', 'exclude_from_local_optimization',
+  'grind_followed', 'dose_followed', 'yield_followed',
+  'weight_source', 'flow_source', 'flow_units',
   'pump_flow_source', 'pump_flow_units', 'pump_flow_calibration_required',
   'profile_flow_valid', 'profile_flow_masked', 'profile_id', 'profile_label',
   'profile_type', 'profile_phase_count', 'final_phase_index', 'final_phase_name',
@@ -55,6 +53,13 @@ const allowedRecommendationFields = new Set([
   'optimization_run_id', 'comparison_anchor_shot_id', 'comparison_mode',
   'preference_feedback_required',
   'applied_fields', 'manual_fields', 'apply_error',
+]);
+
+const allowedComparisonFields = new Set([
+  'event_type', 'schema_version', 'comparison_id', 'optimization_run_id',
+  'new_shot_id', 'anchor_shot_id', 'label', 'comparison_mode', 'created_at',
+  'install_id', 'machine_id', 'machine_adapter', 'recommendation_id',
+  'bean_context_id', 'grinder_context_id', 'profile_id', 'raw_profile_hash',
 ]);
 
 serve(async request => {
@@ -250,6 +255,16 @@ function validatePayload(payload: JsonRecord): {
       localRecordId: String(payload.recommendation_id || ''),
     };
   }
+  if (payload.event_type === 'comparison_record') {
+    rejectUnknownFields(payload, allowedComparisonFields, errors);
+    validateComparisonRecord(payload, errors);
+    return {
+      ok: errors.length === 0,
+      errors,
+      localRecordType: 'comparison',
+      localRecordId: String(payload.comparison_id || ''),
+    };
+  }
   return {
     ok: false,
     errors: ['unsupported event_type'],
@@ -292,26 +307,12 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalNumberRange(payload, 'recommended_target_ratio', 1.2, 3.5, errors);
   optionalEnum(payload, 'recommendation_decision', ['accepted', 'edited', 'ignored', 'dismissed', 'unknown'], errors);
   optionalEnum(payload, 'recommendation_followed', ['followed', 'partially_followed', 'not_followed', 'unknown'], errors);
-  optionalNumberRange(payload, 'recommendation_attribution_weight', 0, 1, errors);
-  optionalNumberRange(payload, 'human_rating', 1, 5, errors);
-  optionalStringListEnum(payload, 'taste_tags', [
-    'fruity', 'citrus', 'floral', 'sweet', 'nutty_cocoa', 'roasted', 'spice',
-    'fermented', 'sour', 'green_vegetative', 'bitter', 'astringent_harsh',
-    'papery_stale', 'salty', 'channeling_suspected',
-  ], errors);
-  optionalBoolean(payload, 'feedback_recorded', errors);
   optionalEnum(payload, 'shot_type', ['espresso', 'utility_flush', 'cleaning', 'calibration', 'unknown'], errors);
   if (payload.shot_type !== undefined && payload.shot_type !== null && payload.shot_type !== 'espresso') {
     errors.push('non-espresso shot uploads are not trusted training shots');
     errors.push('shot_type must be espresso');
   }
   optionalBoolean(payload, 'exclude_from_local_optimization', errors);
-  optionalBoolean(payload, 'rating_prompt_allowed', errors);
-  optionalNumberRange(payload, 'optimization_weight', 0, 1, errors);
-  optionalNumberRange(payload, 'profile_score', 0, 1, errors);
-  optionalNumberRange(payload, 'profile_mse', 0, 1_000_000, errors);
-  optionalNumberRange(payload, 'reward', 0, 1, errors);
-  optionalNumberRange(payload, 'reward_confidence', 0, 1, errors);
   optionalBoolean(payload, 'grind_followed', errors);
   optionalBoolean(payload, 'dose_followed', errors);
   optionalBoolean(payload, 'yield_followed', errors);
@@ -323,9 +324,6 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalString(payload, 'flow_units', 40, errors);
   optionalString(payload, 'pump_flow_source', 80, errors);
   optionalString(payload, 'pump_flow_units', 40, errors);
-  optionalNumberRange(payload, 'grind_recommendation_trust', 0, 1, errors);
-  optionalNumberRange(payload, 'dose_recommendation_trust', 0, 1, errors);
-  optionalNumberRange(payload, 'yield_recommendation_trust', 0, 1, errors);
   optionalString(payload, 'profile_id', 120, errors);
   optionalString(payload, 'profile_label', 120, errors);
   optionalString(payload, 'profile_type', 80, errors);
@@ -418,6 +416,32 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   optionalObject(payload, 'applied_fields', errors);
   optionalStringList(payload, 'manual_fields', errors);
   optionalString(payload, 'apply_error', 500, errors);
+}
+
+function validateComparisonRecord(payload: JsonRecord, errors: string[]) {
+  requireNumberRange(payload, 'schema_version', SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSION, errors);
+  requireIdentifier(payload, 'comparison_id', errors);
+  requireIdentifier(payload, 'optimization_run_id', errors);
+  requireIdentifier(payload, 'new_shot_id', errors);
+  requireIdentifier(payload, 'anchor_shot_id', errors);
+  requireIdentifier(payload, 'install_id', errors);
+  requireIdentifier(payload, 'machine_id', errors);
+  optionalIdentifier(payload, 'machine_adapter', errors);
+  optionalIdentifier(payload, 'recommendation_id', errors);
+  optionalIdentifier(payload, 'bean_context_id', errors);
+  optionalString(payload, 'grinder_context_id', 120, errors);
+  optionalString(payload, 'profile_id', 120, errors);
+  optionalSha256(payload, 'raw_profile_hash', errors);
+  requireNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalEnum(payload, 'label', ['new_better', 'anchor_better', 'tie'], errors);
+  if (payload.label === undefined || payload.label === null) errors.push('label is required');
+  optionalEnum(payload, 'comparison_mode', ['global_previous', 'best_incumbent'], errors);
+  if (payload.comparison_mode === undefined || payload.comparison_mode === null) {
+    errors.push('comparison_mode is required');
+  }
+  if (payload.new_shot_id === payload.anchor_shot_id) {
+    errors.push('comparison requires distinct physical shots');
+  }
 }
 
 function requireString(payload: JsonRecord, key: string, errors: string[]) {
@@ -762,7 +786,11 @@ function rejectUnknownFields(payload: JsonRecord, allowed: Set<string>, errors: 
 }
 
 function sanitizePayload(payload: JsonRecord): JsonRecord {
-  const allowed = payload.event_type === 'shot_record' ? allowedShotFields : allowedRecommendationFields;
+  const allowed = payload.event_type === 'shot_record'
+    ? allowedShotFields
+    : payload.event_type === 'recommendation_record'
+      ? allowedRecommendationFields
+      : allowedComparisonFields;
   const sanitized: JsonRecord = {};
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(payload, key)) {

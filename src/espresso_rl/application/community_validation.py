@@ -11,6 +11,7 @@ from espresso_rl.application.upload_validation import (
 )
 from espresso_rl.domain.community import (
     CommunityAbuseEvent,
+    CommunityComparisonRecord,
     CommunityInstallStats,
     CommunityRawUpload,
     CommunityRecommendationRecord,
@@ -21,7 +22,7 @@ from espresso_rl.ports.community import CommunityWarehouseRepository
 
 
 MAX_COMMUNITY_TRUST_SCORE = 0.35
-MAX_COMMUNITY_TRAINING_WEIGHT = 0.25
+MAX_COMMUNITY_MODELING_WEIGHT = 0.25
 
 
 @dataclass(frozen=True)
@@ -29,8 +30,8 @@ class CommunityValidationResult:
     processed: int
     validated_shots: int
     stored_recommendations: int
+    stored_comparisons: int
     rejected: int
-    training_rows: int
 
 
 class CommunityValidationService:
@@ -41,8 +42,8 @@ class CommunityValidationService:
         uploads = self._warehouse.list_raw_uploads(status="mirrored", limit=limit)
         validated_shots = 0
         stored_recommendations = 0
+        stored_comparisons = 0
         rejected = 0
-        training_rows = 0
 
         for upload in uploads:
             outcome = self._validate_upload(upload, mutate=not dry_run)
@@ -52,30 +53,30 @@ class CommunityValidationService:
                 rejected += 1
                 continue
 
-            if upload.event_type == "shot_record":
-                validation_id = None
+            try:
+                if upload.event_type == "shot_record":
+                    if not dry_run:
+                        self._store_validated_shot(upload, outcome.payload)
+                    validated_shots += 1
+                elif upload.event_type == "recommendation_record":
+                    if not dry_run:
+                        self._store_recommendation(upload, outcome.payload)
+                    stored_recommendations += 1
+                elif upload.event_type == "comparison_record":
+                    if not dry_run:
+                        self._store_comparison(upload, outcome.payload, outcome.trust_weight)
+                    stored_comparisons += 1
+            except ValueError as exc:
                 if not dry_run:
-                    validation_id = self._store_validated_shot(upload, outcome.payload)
-                if outcome.trust_weight > 0:
-                    if validation_id is not None:
-                        self._warehouse.upsert_training_row(
-                            validation_id,
-                            outcome.payload,
-                            outcome.trust_weight,
-                        )
-                    training_rows += 1
-                validated_shots += 1
-            elif upload.event_type == "recommendation_record":
-                if not dry_run:
-                    self._store_recommendation(upload, outcome.payload)
-                stored_recommendations += 1
+                    self._reject_upload(upload, [str(exc)])
+                rejected += 1
 
         return CommunityValidationResult(
             processed=len(uploads),
             validated_shots=validated_shots,
             stored_recommendations=stored_recommendations,
+            stored_comparisons=stored_comparisons,
             rejected=rejected,
-            training_rows=training_rows,
         )
 
     def _validate_upload(self, upload: CommunityRawUpload, *, mutate: bool) -> "_ValidationOutcome":
@@ -127,14 +128,15 @@ class CommunityValidationService:
                     reason="validated_upload_history",
                 )
             )
-        trust_weight = (
-            payload_trust_weight(payload, install_trust)
-            if upload.event_type == "shot_record"
-            else 0.0
-        )
+        if upload.event_type == "shot_record":
+            trust_weight = payload_trust_weight(payload, install_trust)
+        elif upload.event_type == "comparison_record":
+            trust_weight = round(min(install_trust, MAX_COMMUNITY_MODELING_WEIGHT), 6)
+        else:
+            trust_weight = 0.0
         return _ValidationOutcome(payload=payload, errors=[], trust_weight=trust_weight)
 
-    def _store_validated_shot(self, upload: CommunityRawUpload, payload: dict[str, Any]) -> int:
+    def _store_validated_shot(self, upload: CommunityRawUpload, payload: dict[str, Any]) -> None:
         stats = self._warehouse.install_stats(upload.install_id)
         install_trust = install_trust_score(
             CommunityInstallStats(
@@ -153,9 +155,8 @@ class CommunityValidationService:
             trust_weight=trust_weight,
             validation_summary=summary,
         )
-        validation_id = self._warehouse.upsert_validated_shot(shot)
+        self._warehouse.upsert_validated_shot(shot)
         self._warehouse.mark_raw_upload_validated(upload, summary)
-        return validation_id
 
     def _store_recommendation(self, upload: CommunityRawUpload, payload: dict[str, Any]) -> None:
         recommendation = CommunityRecommendationRecord(
@@ -169,8 +170,34 @@ class CommunityValidationService:
             upload,
             {
                 "event_type": "recommendation_record",
-                "training_eligible": False,
+                "modeling_eligible": False,
             },
+        )
+
+    def _store_comparison(
+        self,
+        upload: CommunityRawUpload,
+        payload: dict[str, Any],
+        trust_weight: float,
+    ) -> None:
+        summary = {
+            "event_type": "comparison_record",
+            "modeling_eligible": trust_weight > 0,
+            "label_type": "pairwise_preference",
+            "trust_weight": trust_weight,
+        }
+        comparison = CommunityComparisonRecord(
+            install_id=upload.install_id,
+            upload_id=upload.upload_id,
+            comparison_id=str(payload["comparison_id"]),
+            payload_json=payload,
+            trust_weight=trust_weight,
+            validation_summary=summary,
+        )
+        self._warehouse.upsert_community_comparison(comparison)
+        self._warehouse.mark_raw_upload_validated(
+            upload,
+            summary,
         )
 
     def _reject_upload(self, upload: CommunityRawUpload, errors: list[str]) -> None:
@@ -216,22 +243,11 @@ def install_trust_score(stats: CommunityInstallStats) -> float:
 def payload_trust_weight(payload: dict[str, Any], install_trust: float) -> float:
     if payload.get("exclude_from_local_optimization") is True:
         return 0.0
-    optimization_weight = _optional_float(payload.get("optimization_weight"), default=1.0)
-    if optimization_weight <= 0:
-        return 0.0
-
-    quality = optimization_weight
-    if payload.get("human_rating") is None:
-        quality *= 0.4
-    quality *= _optional_float(payload.get("reward_confidence"), default=0.5)
-
-    taste_tags = payload.get("taste_tags")
-    if isinstance(taste_tags, list) and "channeling_suspected" in taste_tags:
-        quality *= 0.7
+    quality = 1.0
     if payload.get("profile_flow_masked") is True or payload.get("profile_flow_valid") is False:
         quality *= 0.7
 
-    return round(_clamp(install_trust * quality, 0.0, MAX_COMMUNITY_TRAINING_WEIGHT), 6)
+    return round(_clamp(install_trust * quality, 0.0, MAX_COMMUNITY_MODELING_WEIGHT), 6)
 
 
 def validation_summary(
@@ -241,12 +257,11 @@ def validation_summary(
 ) -> dict[str, Any]:
     return {
         "event_type": payload.get("event_type"),
-        "training_eligible": trust_weight > 0,
+        "modeling_eligible": trust_weight > 0,
         "trust_weight": trust_weight,
         "install_trust_score": round(install_trust, 6),
-        "rating_present": payload.get("human_rating") is not None,
         "recommendation_followed": payload.get("recommendation_followed"),
-        "optimization_weight": _optional_float(payload.get("optimization_weight"), default=1.0),
+        "action_observed": payload.get("action_observed"),
         "profile_flow_valid": payload.get("profile_flow_valid", True),
         "profile_flow_masked": payload.get("profile_flow_masked", False),
     }

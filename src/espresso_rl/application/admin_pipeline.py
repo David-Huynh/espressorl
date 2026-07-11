@@ -11,9 +11,7 @@ from espresso_rl.application.community_mirror import (
     CommunityMirrorService,
     CommunityQueuePurgeResult,
 )
-from espresso_rl.application.community_priors import CommunityPriorGenerationResult, CommunityPriorGenerationService
 from espresso_rl.application.community_validation import CommunityValidationResult, CommunityValidationService
-from espresso_rl.application.training_export import TrainingDatasetExportResult, TrainingDatasetExportService
 from espresso_rl.domain.community import AdminActionLogEntry
 from espresso_rl.ports.community import CommunityWarehouseRepository
 
@@ -23,13 +21,11 @@ class AdminPipelineStatus:
     raw_upload_counts: dict[str, int]
     local_raw_upload_purge_eligible_counts: dict[str, int]
     validated_shot_count: int
-    training_row_count: int
-    community_prior_count: int
+    comparison_count: int
     abuse_event_count: int
     latest_rejections: list[dict]
     latest_admin_actions: list[dict]
     mirror_enabled: bool
-    training_export_enabled: bool
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -41,8 +37,6 @@ class AdminPipelineActionResult:
     mirror: CommunityMirrorResult | None = None
     purge: CommunityQueuePurgeResult | None = None
     validation: CommunityValidationResult | None = None
-    priors: CommunityPriorGenerationResult | None = None
-    training_export: TrainingDatasetExportResult | None = None
     dry_run: bool = False
     warnings: list[str] = field(default_factory=list)
     already_running: bool = False
@@ -60,22 +54,16 @@ class AdminPipelineService:
         warehouse: CommunityWarehouseRepository,
         mirror: CommunityMirrorService | None,
         validator: CommunityValidationService,
-        prior_generator: CommunityPriorGenerationService,
-        training_exporter: TrainingDatasetExportService | None = None,
         clock: Callable[[], int] | None = None,
     ) -> None:
         self._warehouse = warehouse
         self._mirror = mirror
         self._validator = validator
-        self._prior_generator = prior_generator
-        self._training_exporter = training_exporter
         self._clock = clock or (lambda: int(time.time()))
         self._locks = {
             "mirror_once": threading.Lock(),
             "purge_queue_once": threading.Lock(),
             "validate_once": threading.Lock(),
-            "generate_priors_once": threading.Lock(),
-            "export_training_dataset_once": threading.Lock(),
         }
 
     def status(self) -> AdminPipelineStatus:
@@ -83,8 +71,7 @@ class AdminPipelineService:
             raw_upload_counts=self._warehouse.raw_upload_counts_by_status(),
             local_raw_upload_purge_eligible_counts=self._warehouse.raw_upload_purge_eligible_counts(),
             validated_shot_count=self._warehouse.validated_shot_count(),
-            training_row_count=self._warehouse.training_row_count(),
-            community_prior_count=self._warehouse.community_prior_count(),
+            comparison_count=self._warehouse.comparison_count(),
             abuse_event_count=self._warehouse.abuse_event_count(),
             latest_rejections=[
                 {
@@ -111,7 +98,6 @@ class AdminPipelineService:
                 for item in self._warehouse.latest_admin_actions(limit=10)
             ],
             mirror_enabled=self._mirror is not None,
-            training_export_enabled=self._training_exporter is not None,
         )
 
     def mirror_once(
@@ -157,41 +143,6 @@ class AdminPipelineService:
             dry_run=dry_run,
             requested_by=requested_by,
             run=lambda: self._purge_queue_once_unlocked(dry_run=dry_run),
-        )
-
-    def generate_priors_once(
-        self,
-        limit: int = 5000,
-        *,
-        dry_run: bool = False,
-        requested_by: str = "system",
-    ) -> AdminPipelineActionResult:
-        return self._run_locked_action(
-            "generate_priors_once",
-            dry_run=dry_run,
-            requested_by=requested_by,
-            run=lambda: AdminPipelineActionResult(
-                action="generate_priors_once",
-                priors=self._prior_generator.generate_once(limit=limit, dry_run=dry_run),
-                dry_run=dry_run,
-                warnings=["dry run only computed proposed priors; community_priors was not updated"]
-                if dry_run
-                else [],
-            ),
-        )
-
-    def export_training_dataset_once(
-        self,
-        limit: int = 50_000,
-        *,
-        dry_run: bool = False,
-        requested_by: str = "system",
-    ) -> AdminPipelineActionResult:
-        return self._run_locked_action(
-            "export_training_dataset_once",
-            dry_run=dry_run,
-            requested_by=requested_by,
-            run=lambda: self._export_training_dataset_once_unlocked(limit=limit, dry_run=dry_run),
         )
 
     def _mirror_once_unlocked(self, *, limit: int, dry_run: bool) -> AdminPipelineActionResult:
@@ -253,28 +204,6 @@ class AdminPipelineService:
                 source_enabled=source_enabled,
             ),
             warnings=warnings,
-        )
-
-    def _export_training_dataset_once_unlocked(self, *, limit: int, dry_run: bool) -> AdminPipelineActionResult:
-        if self._training_exporter is None:
-            return AdminPipelineActionResult(
-                action="export_training_dataset_once",
-                dry_run=dry_run,
-                warnings=["training dataset export is disabled because no artifact writer is configured"],
-                status_snapshot=self.status(),
-            )
-        if dry_run:
-            return AdminPipelineActionResult(
-                action="export_training_dataset_once",
-                dry_run=True,
-                status_snapshot=self.status(),
-                warnings=["export dry_run reports current counts but does not write files"],
-            )
-        export = self._training_exporter.export_once(limit=limit)
-        return AdminPipelineActionResult(
-            action="export_training_dataset_once",
-            training_export=export,
-            warnings=list(export.warnings),
         )
 
     def _run_locked_action(
@@ -341,10 +270,6 @@ def _rows_seen(result: AdminPipelineActionResult) -> int:
         return result.purge.purged
     if result.validation is not None:
         return result.validation.processed
-    if result.priors is not None:
-        return result.priors.examined
-    if result.training_export is not None:
-        return result.training_export.row_count + result.training_export.skipped_row_count
     return 0
 
 
@@ -357,13 +282,9 @@ def _rows_changed(result: AdminPipelineActionResult) -> int:
         return (
             result.validation.validated_shots
             + result.validation.stored_recommendations
+            + result.validation.stored_comparisons
             + result.validation.rejected
-            + result.validation.training_rows
         )
-    if result.priors is not None:
-        return result.priors.priors_written
-    if result.training_export is not None:
-        return 0
     return 0
 
 

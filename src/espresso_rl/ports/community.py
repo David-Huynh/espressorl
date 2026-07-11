@@ -5,12 +5,11 @@ from typing import Any, Protocol
 from espresso_rl.domain.community import (
     AdminActionLogEntry,
     CommunityAbuseEvent,
+    CommunityComparisonRecord,
     CommunityInstallStats,
-    CommunityPrior,
     CommunityRawUpload,
     CommunityRecommendationRecord,
     CommunityRejectionSummary,
-    CommunityTrainingRow,
     CommunityUploadCredentials,
     CommunityValidatedShot,
     InstallTrustScore,
@@ -64,6 +63,9 @@ class CommunityWarehouseRepository(Protocol):
     def upsert_community_recommendation(self, recommendation: CommunityRecommendationRecord) -> None:
         ...
 
+    def upsert_community_comparison(self, comparison: CommunityComparisonRecord) -> None:
+        ...
+
     def upsert_install_trust_score(self, score: InstallTrustScore) -> None:
         ...
 
@@ -71,23 +73,6 @@ class CommunityWarehouseRepository(Protocol):
         ...
 
     def record_abuse_event(self, event: CommunityAbuseEvent) -> None:
-        ...
-
-    def upsert_training_row(
-        self,
-        source_validation_id: int,
-        payload_json: dict[str, Any],
-        trust_weight: float,
-    ) -> None:
-        ...
-
-    def list_training_rows(self, limit: int = 5000) -> list[CommunityTrainingRow]:
-        ...
-
-    def upsert_community_prior(self, prior: CommunityPrior) -> None:
-        ...
-
-    def list_community_priors(self, context_key: str, limit: int = 10) -> list[CommunityPrior]:
         ...
 
     def raw_upload_counts_by_status(self) -> dict[str, int]:
@@ -112,10 +97,7 @@ class CommunityWarehouseRepository(Protocol):
     def validated_shot_count(self) -> int:
         ...
 
-    def training_row_count(self) -> int:
-        ...
-
-    def community_prior_count(self) -> int:
+    def comparison_count(self) -> int:
         ...
 
     def abuse_event_count(self) -> int:

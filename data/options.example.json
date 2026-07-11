@@ -44,7 +44,5 @@
   "admin_collector_id": "espresso-rl-admin",
   "admin_collector_lease_seconds": 300,
   "admin_collector_interval_s": 30.0,
-  "admin_collector_batch_size": 100,
-  "training_export_dir": "/data/espresso_rl/exports",
-  "training_export_max_rows": 50000
+  "admin_collector_batch_size": 100
 }
