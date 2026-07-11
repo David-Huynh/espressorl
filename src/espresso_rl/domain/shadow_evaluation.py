@@ -40,7 +40,7 @@ class ShadowRecipeProposal:
     safety_errors: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.source not in {"dreamer_v3", "bayesian_optimization"}:
+        if self.source not in {"dreamer_v3", "cpbo"}:
             raise ValueError("shadow proposal source is invalid")
         _finite(self.grind_delta_steps_from_current, "shadow proposal grind_delta_steps_from_current")
         for field_name in (
@@ -192,7 +192,7 @@ class DreamerShadowEvaluation:
             _finite(getattr(self, field_name), f"shadow evaluation {field_name}")
         if not isinstance(self.dreamer_proposal, ShadowRecipeProposal) or self.dreamer_proposal.source != "dreamer_v3":
             raise ValueError("shadow evaluation Dreamer proposal is invalid")
-        if self.bo_proposal is not None and self.bo_proposal.source != "bayesian_optimization":
+        if self.bo_proposal is not None and self.bo_proposal.source != "cpbo":
             raise ValueError("shadow evaluation BO proposal is invalid")
         object.__setattr__(self, "status", ShadowEvaluationStatus(self.status))
         object.__setattr__(self, "dreamer_match", ShadowProposalMatch(self.dreamer_match))

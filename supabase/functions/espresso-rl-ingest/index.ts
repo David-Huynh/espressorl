@@ -52,6 +52,8 @@ const allowedRecommendationFields = new Set([
   'next_dose_g', 'target_yield_g', 'target_ratio', 'mode', 'confidence', 'reason',
   'status', 'shown_count', 'accepted_at', 'ignored_at', 'edited_at', 'used_at',
   'superseded_at', 'source_shot_id', 'apply_status', 'apply_acknowledged_at',
+  'optimization_run_id', 'comparison_anchor_shot_id', 'comparison_mode',
+  'preference_feedback_required',
   'applied_fields', 'manual_fields', 'apply_error',
 ]);
 
@@ -383,7 +385,7 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   requireNumberRange(payload, 'next_dose_g', 5, 30, errors);
   requireNumberRange(payload, 'target_yield_g', 5, 100, errors);
   requireNumberRange(payload, 'target_ratio', 1.2, 3.5, errors);
-  optionalEnum(payload, 'mode', ['zero_observe', 'zero_immediate_bo', 'warm_started_bo', 'local_bo', 'dreamer_candidate', 'dreamer_active', 'bo_fallback'], errors);
+  optionalEnum(payload, 'mode', ['zero_observe', 'zero_immediate_bo', 'warm_started_bo', 'local_bo', 'cpbo_global_previous', 'cpbo_best_incumbent', 'dreamer_candidate', 'dreamer_active', 'bo_fallback'], errors);
   optionalNumberRange(payload, 'confidence', 0, 1, errors);
   optionalString(payload, 'reason', 500, errors);
   optionalEnum(payload, 'status', ['pending', 'shown', 'accepted', 'edited', 'ignored', 'expired', 'used', 'superseded'], errors);
@@ -394,6 +396,23 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   optionalNumberRange(payload, 'used_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalNumberRange(payload, 'superseded_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalIdentifier(payload, 'source_shot_id', errors);
+  optionalIdentifier(payload, 'optimization_run_id', errors);
+  optionalIdentifier(payload, 'comparison_anchor_shot_id', errors);
+  optionalEnum(payload, 'comparison_mode', ['global_previous', 'best_incumbent'], errors);
+  optionalBoolean(payload, 'preference_feedback_required', errors);
+  if (payload.mode === 'cpbo_global_previous' || payload.mode === 'cpbo_best_incumbent') {
+    if (!payload.optimization_run_id) errors.push('CPBO recommendation requires optimization_run_id');
+    if (!payload.comparison_anchor_shot_id) errors.push('CPBO recommendation requires comparison_anchor_shot_id');
+    if (payload.preference_feedback_required !== true) {
+      errors.push('CPBO recommendation requires preference_feedback_required=true');
+    }
+    const expectedMode = payload.mode === 'cpbo_global_previous'
+      ? 'global_previous'
+      : 'best_incumbent';
+    if (payload.comparison_mode !== expectedMode) {
+      errors.push('CPBO recommendation comparison_mode does not match mode');
+    }
+  }
   optionalEnum(payload, 'apply_status', ['unknown', 'applied', 'partially_applied', 'manual_required', 'failed'], errors);
   optionalNumberRange(payload, 'apply_acknowledged_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalObject(payload, 'applied_fields', errors);

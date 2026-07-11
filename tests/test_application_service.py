@@ -32,7 +32,8 @@ from espresso_rl.domain.models import (
 )
 from espresso_rl.domain.optimization import OptimizationContext
 from espresso_rl.domain.prior_rules import PriorRule, PriorSelectionMode
-from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
+from tests.optimizer_stub import DeterministicOptimizer
+from espresso_rl.ports.optimizers import StatefulOptimizerHandoff
 
 
 class MemoryShotRepository:
@@ -312,6 +313,15 @@ class CapturingOptimizer:
         )
 
 
+class HandoffOptimizer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def recommend(self, context: OptimizationContext) -> Recommendation:
+        self.calls += 1
+        raise StatefulOptimizerHandoff("cpbo", "Dreamer candidate rejected")
+
+
 def idle_event(timestamp: int, **overrides) -> MachineStateEvent:
     base = {
         "install_id": "install_1",
@@ -392,6 +402,21 @@ def ingest_and_feedback(
 
 
 class ApplicationServiceTests(unittest.TestCase):
+    def test_stateless_optimizer_handoff_retains_shot_without_fake_recommendation(self) -> None:
+        shots = MemoryShotRepository()
+        recs = MemoryRecommendationRepository()
+        optimizer = HandoffOptimizer()
+        service = EspressoRLService(shots, recs, optimizer, clock=lambda: 10)
+        service.ingest_shot_profile(shot_event("shot_handoff", 1))
+
+        result = service.record_feedback(feedback_event("shot_handoff", 2, rating=4))
+
+        self.assertEqual(result.optimizer_handoff_mode, "cpbo")
+        self.assertIsNone(result.recommendation)
+        self.assertIsNotNone(shots.get("shot_handoff"))
+        self.assertEqual(recs.rows, {})
+        self.assertEqual(optimizer.calls, 1)
+
     def test_matching_user_rule_becomes_bounded_optimizer_prior(self) -> None:
         optimizer = CapturingOptimizer()
         service = EspressoRLService(
@@ -520,7 +545,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_idle_without_rated_shot_does_not_create_baseline_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         self.assertIsNone(service.handle_machine_state(idle_event(1)))
         self.assertEqual(recs.rows, {})
@@ -528,7 +553,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_feedback_generates_bounded_second_shot_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         result = service.ingest_shot_profile(shot_event("shot_1", 1))
 
@@ -703,7 +728,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_skipped_feedback_is_complete_and_generates_from_the_latest_shot(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
         service.ingest_shot_profile(shot_event("shot_1", 1))
 
         result = service.record_feedback(
@@ -717,7 +742,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_rating_opt_out_uses_profile_evidence_without_waiting_for_feedback(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         result = service.ingest_shot_profile(
             shot_event("shot_1", 1, rating_prompt_allowed=False)
@@ -730,7 +755,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_feedback_owner_mismatch_is_rejected_without_training(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
         service.ingest_shot_profile(shot_event("shot_1", 1))
 
         with self.assertRaisesRegex(ValueError, "does not match the stored shot owner"):
@@ -744,7 +769,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_late_feedback_updates_history_without_replacing_latest_shot_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
         service.ingest_shot_profile(shot_event("shot_1", 1))
         service.ingest_shot_profile(shot_event("shot_2", 3))
 
@@ -757,7 +782,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_duplicate_unchanged_feedback_reuses_the_same_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
         service.ingest_shot_profile(shot_event("shot_1", 1))
 
         first = service.record_feedback(feedback_event("shot_1", 2, rating=4))
@@ -772,7 +797,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_same_bean_different_grinders_have_isolated_bo_contexts(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         service.ingest_shot_profile(shot_event("shot_a", 1, grinder_context_id="grinder_a"))
         rec_a = service.record_feedback(feedback_event("shot_a", 2, rating=4)).recommendation
@@ -804,7 +829,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_relative_only_grinder_context_emits_relative_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         service.ingest_shot_profile(
             shot_event(
@@ -830,7 +855,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_absolute_display_grinder_context_keeps_optimizer_input_relative(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         service.ingest_shot_profile(
             shot_event(
@@ -860,7 +885,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_feedback_rejects_a_recommendation_id_mismatch(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
         recommendation = ingest_and_feedback(service, shot_event("shot_1", 1))
         service.ingest_shot_profile(
             shot_event("shot_2", 3, recommendation_id=recommendation.recommendation_id)
@@ -874,7 +899,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_ingest_masks_invalid_flow_without_dropping_espresso_shot(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         result = service.ingest_shot_profile(
             shot_event(
@@ -896,7 +921,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_ingest_stores_fixed_cadence_sequence_and_masks_uncalibrated_pump_flow(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         result = service.ingest_shot_profile(
             shot_event(
@@ -921,7 +946,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_utility_flush_does_not_consume_or_train_active_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         active = ingest_and_feedback(service, shot_event("shot_1", 1))
         result = service.ingest_shot_profile(
@@ -945,7 +970,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_local_optimization_disabled_drops_shot_without_new_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         result = service.ingest_shot_profile(
             shot_event(
@@ -970,7 +995,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service = EspressoRLService(
             shots,
             recs,
-            ConservativeBOOptimizer(),
+            DeterministicOptimizer(),
             upload_queue=uploads,
             clock=lambda: 10,
             community_upload_enabled_default=True,
@@ -996,7 +1021,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service = EspressoRLService(
             shots,
             recs,
-            ConservativeBOOptimizer(),
+            DeterministicOptimizer(),
             upload_queue=uploads,
             clock=lambda: 10,
             community_upload_enabled_default=True,
@@ -1025,7 +1050,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_shot_correction_records_variable_specific_not_followed(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         service.record_recommendation_decision(
@@ -1074,7 +1099,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_manual_follow_confirmation_promotes_recommended_grind_and_dose_to_observed(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
         recommendation = ingest_and_feedback(service, shot_event("shot_1", 1))
         service.ingest_shot_profile(
             shot_event(
@@ -1116,7 +1141,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service = EspressoRLService(
             shots,
             recs,
-            ConservativeBOOptimizer(),
+            DeterministicOptimizer(),
             upload_queue=uploads,
             clock=lambda: 10,
             community_upload_enabled_default=True,
@@ -1139,7 +1164,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_decision_and_actual_shot_data_drive_follow_through(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         first = ingest_and_feedback(service, shot_event("shot_1", 1))
         service.record_recommendation_decision(
@@ -1183,7 +1208,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_changed_recipe_shot_keeps_recommendation_association(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         first = ingest_and_feedback(service, shot_event("shot_1", 1))
         service.record_recommendation_decision(
@@ -1215,7 +1240,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_close_yield_and_small_negative_tare_remain_valid_training_data(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
         first = ingest_and_feedback(
             service,
             shot_event("shot_1", 1, target_yield_g=38.0, beverage_out_g=38.0),
@@ -1416,7 +1441,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_machine_idle_shows_current_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         shown = service.handle_machine_state(
@@ -1442,7 +1467,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_machine_state_recipe_change_does_not_expire_current_recommendation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         old = ingest_and_feedback(service, shot_event("shot_1", 1))
         shown = service.handle_machine_state(
@@ -1467,7 +1492,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_accepted_recommendation_is_not_reprompted_as_shown_on_wake(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         accepted = service.record_recommendation_decision(
@@ -1499,7 +1524,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_apply_acknowledgement_does_not_mark_recommendation_followed(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         service.record_recommendation_decision(
@@ -1530,7 +1555,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_no_answer_reprompts_until_user_decides(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         latest = rec
@@ -1566,7 +1591,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_expired_recommendation_is_not_treated_as_followed_observation(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         stored = recs.get(rec.recommendation_id)
@@ -1595,7 +1620,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service = EspressoRLService(
             shots,
             recs,
-            ConservativeBOOptimizer(),
+            DeterministicOptimizer(),
             upload_queue=uploads,
             clock=lambda: 10,
             community_upload_enabled_default=True,
@@ -1642,7 +1667,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service = EspressoRLService(
             shots,
             recs,
-            ConservativeBOOptimizer(),
+            DeterministicOptimizer(),
             upload_queue=uploads,
             clock=lambda: 10,
         )
@@ -1662,7 +1687,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service = EspressoRLService(
             shots,
             recs,
-            ConservativeBOOptimizer(),
+            DeterministicOptimizer(),
             upload_queue=uploads,
             clock=lambda: 10,
         )
@@ -1685,7 +1710,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service = EspressoRLService(
             shots,
             recs,
-            ConservativeBOOptimizer(),
+            DeterministicOptimizer(),
             upload_queue=uploads,
             clock=lambda: 10,
         )
@@ -1707,7 +1732,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service = EspressoRLService(
             shots,
             recs,
-            ConservativeBOOptimizer(),
+            DeterministicOptimizer(),
             upload_queue=queue,
             clock=lambda: 10,
             community_upload_enabled_default=True,
@@ -1730,7 +1755,7 @@ class ApplicationServiceTests(unittest.TestCase):
         service = EspressoRLService(
             shots,
             recs,
-            ConservativeBOOptimizer(),
+            DeterministicOptimizer(),
             upload_queue=queue,
             clock=lambda: 10,
             community_upload_enabled_default=True,
@@ -1767,7 +1792,7 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_recommendation_signature_ignores_incidental_churn(self) -> None:
         shots = MemoryShotRepository()
         recs = MemoryRecommendationRepository()
-        service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+        service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
         rec = ingest_and_feedback(service, shot_event("shot_1", 1))
         base = recs.get(rec.recommendation_id)

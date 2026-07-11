@@ -1,0 +1,385 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+from espresso_rl.adapters.sqlite_repositories import (
+    SQLitePreferentialOptimizationRepository,
+    SQLiteStore,
+)
+from espresso_rl.application.preference_optimization import (
+    ConsecutivePreferenceOptimizationService,
+)
+from espresso_rl.domain.cpbo import (
+    AcquisitionDiagnostics,
+    ComparisonMode,
+    ModelRecommendation,
+    OptimizationRunContext,
+    PhysicalShotStatus,
+    PreferenceLabel,
+    RecipeParameter,
+    RecipePoint,
+    RecipeSpace,
+    Suggestion,
+    SuggestionComputation,
+    TrustRegionDiagnostics,
+)
+from espresso_rl.domain.models import GrinderStepDirection, Recipe
+from espresso_rl.optimizers.cpbo_config import TrustRegionConfig
+from espresso_rl.optimizers.cpbo_trust_region import update_trust_region
+
+
+class RecordingEngine:
+    def __init__(self, proposed_grinds: list[float] | None = None) -> None:
+        self.proposed_grinds = list(proposed_grinds or [6.0, 7.0, 8.0])
+        self.anchors: list[str] = []
+
+    def suggest(self, *, run, recipes, shots, comparisons, state, now):
+        anchor = (
+            state.previous_valid_shot_id
+            if run.comparison_mode == ComparisonMode.GLOBAL_PREVIOUS
+            else state.incumbent_shot_id
+        )
+        self.anchors.append(anchor)
+        grind = self.proposed_grinds.pop(0)
+        recipe = RecipePoint.create(run.run_id, run.recipe_space, grind, 18.0, 36.0, created_at=now)
+        suggestion = Suggestion(
+            suggestion_id=f"suggestion_{state.iteration + 1}",
+            optimization_run_id=run.run_id,
+            recipe=recipe,
+            anchor_shot_id=anchor,
+            comparison_mode=run.comparison_mode,
+            acquisition=AcquisitionDiagnostics(
+                acquisition_value=0.1,
+                unclipped_acquisition_value=0.1,
+                outcome_probabilities={
+                    "new_better": 0.4,
+                    "tie": 0.2,
+                    "anchor_better": 0.4,
+                },
+                learned_gamma=0.2,
+                kernel_weights={"raw": 0.8, "physics": 0.2, "trace": 0.0},
+                raw_kernel_lengthscales=(1.0, 1.0, 1.0),
+                physics_kernel_lengthscales=(1.0,),
+                trace_kernel_enabled=False,
+                fit_warnings=(),
+                maximum_strategy="paper_gumbel",
+                truncation_fallback_count=0,
+            ),
+            trust_region=TrustRegionDiagnostics(
+                length=state.trust_region_state.length,
+                lower_bounds=(0.0, 0.0, 0.0),
+                upper_bounds=(1.0, 1.0, 1.0),
+                success_count=state.trust_region_state.success_count,
+                failure_count=state.trust_region_state.failure_count,
+                restart_pending=state.trust_region_state.restart_pending,
+                full_domain_proposal=run.comparison_mode == ComparisonMode.GLOBAL_PREVIOUS,
+            ),
+            model_version="test_cpbo",
+            iteration=state.iteration + 1,
+            created_at=now,
+        )
+        return SuggestionComputation(suggestion, '{"model":"safe"}', None)
+
+    def recommend_evaluated(self, *, run, recipes, shots, comparisons, state):
+        shot_id = state.incumbent_shot_id or state.previous_valid_shot_id
+        shot = next(row for row in shots if row.shot_id == shot_id)
+        recipe = next(row for row in recipes if row.recipe_id == shot.recipe_id)
+        return ModelRecommendation(
+            run.run_id,
+            recipe,
+            "test",
+            run.comparison_mode == ComparisonMode.BEST_INCUMBENT,
+            state.incumbent_shot_id,
+        )
+
+    def update_trust_region_state(self, state, label, *, candidate_center):
+        return update_trust_region(
+            state,
+            label,
+            candidate_center=candidate_center,
+            config=TrustRegionConfig(),
+        )
+
+
+class CPBOApplicationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = SQLiteStore(Path(self.temp.name) / "cpbo.db")
+        self.repository = SQLitePreferentialOptimizationRepository(self.store)
+        self.clock_value = 100
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temp.cleanup()
+
+    def service(self, mode: ComparisonMode, engine: RecordingEngine | None = None):
+        engine = engine or RecordingEngine()
+        service = ConsecutivePreferenceOptimizationService(
+            self.repository,
+            engine,
+            recipe_space_factory,
+            random_seed=11,
+            clock=self.clock,
+        )
+        request = service.initialize(run_context(), baseline_recipe(), comparison_mode=mode)
+        service.record_shot(
+            request.optimization_run_id,
+            baseline_recipe(),
+            PhysicalShotStatus.VALID,
+            shot_id="baseline",
+            started_at=1,
+            completed_at=2,
+        )
+        return service, engine, request.optimization_run_id
+
+    def clock(self) -> int:
+        self.clock_value += 1
+        return self.clock_value
+
+    def test_first_valid_shot_initializes_without_comparison(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        state = service.get_state(run_id)
+        self.assertEqual(state.previous_valid_shot_id, "baseline")
+        self.assertEqual(state.incumbent_shot_id, "baseline")
+        self.assertEqual(self.repository.list_comparisons(run_id), [])
+
+    def test_global_mode_loss_still_advances_previous_anchor(self) -> None:
+        service, engine, run_id = self.service(ComparisonMode.GLOBAL_PREVIOUS)
+        suggestion = service.suggest_next(run_id)
+        service.record_shot(
+            run_id,
+            suggestion.recipe,
+            PhysicalShotStatus.VALID,
+            shot_id="candidate_1",
+            started_at=3,
+            completed_at=4,
+        )
+        state = service.record_preference(
+            run_id,
+            "candidate_1",
+            "baseline",
+            PreferenceLabel.ANCHOR_BETTER,
+        )
+        self.assertEqual(state.previous_valid_shot_id, "candidate_1")
+        service.suggest_next(run_id)
+        self.assertEqual(engine.anchors, ["baseline", "candidate_1"])
+
+    def test_best_mode_loss_and_tie_never_replace_incumbent(self) -> None:
+        service, engine, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        for index, label in enumerate((PreferenceLabel.ANCHOR_BETTER, PreferenceLabel.TIE), start=1):
+            suggestion = service.suggest_next(run_id)
+            shot_id = f"candidate_{index}"
+            service.record_shot(
+                run_id,
+                suggestion.recipe,
+                PhysicalShotStatus.VALID,
+                shot_id=shot_id,
+                started_at=2 * index + 1,
+                completed_at=2 * index + 2,
+            )
+            state = service.record_preference(run_id, shot_id, "baseline", label)
+            self.assertEqual(state.incumbent_shot_id, "baseline")
+        self.assertEqual(engine.anchors, ["baseline", "baseline"])
+        self.assertEqual(service.get_state(run_id).trust_region_state.failure_count, 2)
+
+    def test_best_mode_only_new_better_replaces_incumbent(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        suggestion = service.suggest_next(run_id)
+        service.record_shot(
+            run_id,
+            suggestion.recipe,
+            PhysicalShotStatus.VALID,
+            shot_id="winner",
+            started_at=3,
+            completed_at=4,
+        )
+        state = service.record_preference(run_id, "winner", "baseline", PreferenceLabel.NEW_BETTER)
+        self.assertEqual(state.incumbent_shot_id, "winner")
+        self.assertEqual(state.trust_region_state.center, suggestion.recipe.normalized_x)
+
+    def test_reversed_shot_ids_are_rejected(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        suggestion = service.suggest_next(run_id)
+        service.record_shot(
+            run_id,
+            suggestion.recipe,
+            PhysicalShotStatus.VALID,
+            shot_id="candidate",
+            started_at=3,
+            completed_at=4,
+        )
+        with self.assertRaisesRegex(ValueError, "pending CPBO candidate"):
+            service.record_preference(run_id, "baseline", "candidate", PreferenceLabel.NEW_BETTER)
+
+    def test_failed_shot_creates_no_comparison_and_allows_another_suggestion(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        first = service.suggest_next(run_id)
+        service.record_shot(
+            run_id,
+            first.recipe,
+            PhysicalShotStatus.MACHINE_FAILURE,
+            shot_id="failed",
+            started_at=3,
+            completed_at=4,
+        )
+        self.assertEqual(self.repository.list_comparisons(run_id), [])
+        second = service.suggest_next(run_id)
+        self.assertNotEqual(first.suggestion_id, second.suggestion_id)
+        with self.assertRaisesRegex(ValueError, "pending CPBO candidate"):
+            service.record_preference(run_id, "failed", "baseline", PreferenceLabel.TIE)
+
+    def test_repeated_recipe_is_one_recipe_and_multiple_shots(self) -> None:
+        engine = RecordingEngine([5.0])
+        service, _, run_id = self.service(ComparisonMode.GLOBAL_PREVIOUS, engine)
+        suggestion = service.suggest_next(run_id)
+        self.assertEqual(suggestion.recipe.grind_size, baseline_recipe().relative_grind_steps_from_reference)
+        service.record_shot(
+            run_id,
+            suggestion.recipe,
+            PhysicalShotStatus.VALID,
+            shot_id="repeat",
+            started_at=3,
+            completed_at=4,
+        )
+        service.record_preference(run_id, "repeat", "baseline", PreferenceLabel.TIE)
+        self.assertEqual(len(self.repository.list_recipes(run_id)), 1)
+        self.assertEqual(len(self.repository.list_shots(run_id)), 2)
+
+    def test_contexts_are_isolated_in_persistence(self) -> None:
+        service, _, first_run = self.service(ComparisonMode.BEST_INCUMBENT)
+        second_request = service.initialize(
+            replace(run_context(), bean_context_id="other_bean"),
+            baseline_recipe(),
+            comparison_mode=ComparisonMode.BEST_INCUMBENT,
+        )
+        self.assertNotEqual(first_run, second_request.optimization_run_id)
+
+    def test_initialize_resumes_with_a_new_suggestion_not_the_incumbent(self) -> None:
+        service, engine, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+
+        resumed = service.initialize(
+            run_context(),
+            baseline_recipe(),
+            comparison_mode=ComparisonMode.BEST_INCUMBENT,
+        )
+
+        self.assertEqual(resumed.optimization_run_id, run_id)
+        self.assertFalse(resumed.is_baseline)
+        self.assertEqual(resumed.anchor_shot_id, "baseline")
+        self.assertEqual(engine.anchors, ["baseline"])
+        self.assertEqual(
+            self.repository.get_state(run_id).pending_recipe_id,
+            resumed.recipe.recipe_id,
+        )
+
+    def test_initialize_does_not_request_an_already_pulled_candidate_again(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        suggestion = service.suggest_next(run_id)
+        service.record_shot(
+            run_id,
+            suggestion.recipe,
+            PhysicalShotStatus.VALID,
+            shot_id="candidate",
+            started_at=3,
+            completed_at=4,
+        )
+
+        with self.assertRaisesRegex(ValueError, "awaiting preference"):
+            service.initialize(
+                run_context(),
+                baseline_recipe(),
+                comparison_mode=ComparisonMode.BEST_INCUMBENT,
+            )
+
+    def test_configuration_change_archives_run_without_mutating_history(self) -> None:
+        first_service = ConsecutivePreferenceOptimizationService(
+            self.repository,
+            RecordingEngine(),
+            recipe_space_factory,
+            random_seed=11,
+            configuration_version="config:v1",
+            clock=self.clock,
+        )
+        first = first_service.initialize(
+            run_context(),
+            baseline_recipe(),
+            comparison_mode=ComparisonMode.BEST_INCUMBENT,
+        )
+        first_recipe = self.repository.list_recipes(first.optimization_run_id)[0]
+
+        second_service = ConsecutivePreferenceOptimizationService(
+            self.repository,
+            RecordingEngine(),
+            recipe_space_factory,
+            random_seed=11,
+            configuration_version="config:v2",
+            clock=self.clock,
+        )
+        self.assertIsNone(second_service.active_run(run_context()))
+        self.assertFalse(self.repository.get_run(first.optimization_run_id).active)
+        second = second_service.initialize(
+            run_context(),
+            baseline_recipe(),
+            comparison_mode=ComparisonMode.BEST_INCUMBENT,
+        )
+
+        self.assertNotEqual(first.optimization_run_id, second.optimization_run_id)
+        self.assertEqual(self.repository.get_recipe(first_recipe.recipe_id), first_recipe)
+        self.assertEqual(
+            self.repository.get_run(second.optimization_run_id).configuration_version,
+            "config:v2",
+        )
+
+    def test_state_survives_repository_reconstruction(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        suggestion = service.suggest_next(run_id)
+        reconstructed = SQLitePreferentialOptimizationRepository(self.store)
+        self.assertEqual(reconstructed.get_state(run_id).pending_recipe_id, suggestion.recipe.recipe_id)
+        self.assertEqual(reconstructed.get_pending_suggestion(run_id).suggestion_id, suggestion.suggestion_id)
+
+    def test_reset_owner_removes_cpbo_records(self) -> None:
+        _, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        counts = self.repository.reset_owner("install", "machine")
+        self.assertEqual(counts["runs"], 1)
+        self.assertIsNone(self.repository.get_run(run_id))
+
+
+def baseline_recipe() -> Recipe:
+    return Recipe(
+        relative_grind_steps_from_reference=5.0,
+        microns_per_step=10.0,
+        dose_g=18.0,
+        target_yield_g=36.0,
+        grinder_step_direction=GrinderStepDirection.HIGHER_IS_FINER,
+    )
+
+
+def recipe_space_factory(recipe: Recipe) -> RecipeSpace:
+    return RecipeSpace(
+        RecipeParameter("grind_size", 0.0, 10.0, 1.0, "step"),
+        RecipeParameter("dose_g", 14.0, 22.0, 0.1, "g"),
+        RecipeParameter("target_output_g", 20.0, 60.0, 0.1, "g"),
+        recipe.grinder_step_direction,
+        1.2,
+        3.5,
+    )
+
+
+def run_context() -> OptimizationRunContext:
+    return OptimizationRunContext(
+        install_id="install",
+        machine_id="machine",
+        bean_context_id="bean",
+        grinder_context_id="grinder",
+        profile_id="profile",
+        basket_id="basket",
+        water_id="water",
+        user_id="user",
+    )
+
+
+if __name__ == "__main__":
+    unittest.main()

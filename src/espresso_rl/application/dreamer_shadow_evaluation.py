@@ -173,7 +173,7 @@ class DreamerShadowEvaluationService:
             current_episode_index=current_episode_index,
             current_recipe=current_recipe,
         )
-        bo_proposal = self._bo_proposal(
+        bo_proposal = self._cpbo_proposal(
             bo_recommendation,
             current_recipe=current_recipe,
             install_id=install_id,
@@ -255,7 +255,7 @@ class DreamerShadowEvaluationService:
             safety_errors=proposal.safety_errors,
         )
 
-    def _bo_proposal(
+    def _cpbo_proposal(
         self,
         recommendation: Recommendation | None,
         *,
@@ -274,11 +274,11 @@ class DreamerShadowEvaluationService:
             or recommendation.bean_context_id != bean_context_id
             or recommendation.grinder_context_id != grinder_context_id
         ):
-            raise DreamerShadowEvaluationError("BO comparison recommendation context does not match transition")
+            raise DreamerShadowEvaluationError("CPBO comparison recommendation context does not match transition")
         if recommendation.source_shot_id not in {None, source_shot_id}:
-            raise DreamerShadowEvaluationError("BO comparison recommendation source shot does not match transition")
+            raise DreamerShadowEvaluationError("CPBO comparison recommendation source shot does not match transition")
         if recommendation.mode in {RecommendationMode.DREAMER_CANDIDATE, RecommendationMode.DREAMER_ACTIVE}:
-            raise DreamerShadowEvaluationError("Dreamer recommendation cannot be used as the BO comparator")
+            raise DreamerShadowEvaluationError("Dreamer recommendation cannot be used as the CPBO comparator")
         safety_errors: tuple[str, ...] = ()
         try:
             candidate = DreamerActionCandidate(
@@ -287,13 +287,13 @@ class DreamerShadowEvaluationService:
                 target_yield_g=recommendation.target_yield_g,
                 target_ratio=recommendation.target_ratio,
                 confidence=recommendation.confidence,
-                reason="BO shadow comparator.",
+                reason="CPBO shadow comparator.",
             )
             validate_dreamer_action(candidate, current=current_recipe, bounds=self._safety_bounds)
         except ValueError as exc:
             safety_errors = (str(exc),)
         return _proposal(
-            source="bayesian_optimization",
+            source="cpbo",
             current_recipe=current_recipe,
             grind_delta_steps=recommendation.grind_delta_steps_from_current,
             next_dose_g=recommendation.next_dose_g,

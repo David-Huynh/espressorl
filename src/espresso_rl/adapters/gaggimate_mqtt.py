@@ -13,6 +13,7 @@ from espresso_rl.domain.events import (
     LocalResetEvent,
     MachineStateEvent,
     OptimizerSettingsEvent,
+    PreferenceFeedbackEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotCorrectionEvent,
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 SHOT_TOPIC = "gaggimate/+/shot/profile"
 FEEDBACK_TOPIC = "gaggimate/+/rl/rating"
+PREFERENCE_TOPIC = "gaggimate/+/rl/preference"
 CORRECTION_TOPIC = "gaggimate/+/rl/shot/correction"
 UPLOAD_REQUEUE_TOPIC = "gaggimate/+/rl/upload/requeue"
 DECISION_TOPIC = "gaggimate/+/rl/recommendation/decision"
@@ -47,6 +49,20 @@ DREAMER_ACK_TOPIC = "gaggimate/+/rl/dreamer/ack"
 DREAMER_TELEMETRY_TOPIC = "gaggimate/+/rl/dreamer/telemetry"
 _SHOT_FINISH_SETTLE_SAMPLES = 2
 _SHOT_FINISH_SETTLE_MAX_DELTA_G = 1.0
+_PREFERENCE_FIELDS = frozenset(
+    {
+        "event_type",
+        "schema_version",
+        "optimization_run_id",
+        "new_shot_id",
+        "anchor_shot_id",
+        "label",
+        "install_id",
+        "machine_id",
+        "timestamp",
+        "source",
+    }
+)
 
 _DREAMER_ACK_FIELDS = frozenset(
     {
@@ -124,6 +140,7 @@ class GaggimateMQTTClient:
         on_decision: Callable[[RecommendationDecisionEvent], None],
         on_apply: Callable[[RecommendationApplyEvent], None],
         on_machine_state: Callable[[MachineStateEvent], None],
+        on_preference: Callable[[PreferenceFeedbackEvent], None] | None = None,
         on_optimizer_settings: Callable[[OptimizerSettingsEvent], None] | None = None,
         on_local_reset: Callable[[LocalResetEvent], None] | None = None,
         on_dreamer_live_ack: Callable[[DreamerLiveControlAcknowledgement], None] | None = None,
@@ -137,6 +154,7 @@ class GaggimateMQTTClient:
         self._on_decision = on_decision
         self._on_apply = on_apply
         self._on_machine_state = on_machine_state
+        self._on_preference = on_preference or (lambda event: None)
         self._on_optimizer_settings = on_optimizer_settings or (lambda event: None)
         self._on_local_reset = on_local_reset or (lambda event: None)
         self._on_dreamer_live_ack = on_dreamer_live_ack or (lambda event: None)
@@ -163,6 +181,10 @@ class GaggimateMQTTClient:
             "schema_version": 1,
             "shot_id": recommendation.source_shot_id,
             "recommendation_id": recommendation.recommendation_id,
+            "optimization_run_id": recommendation.optimization_run_id,
+            "comparison_anchor_shot_id": recommendation.comparison_anchor_shot_id,
+            "comparison_mode": recommendation.comparison_mode,
+            "preference_feedback_required": recommendation.preference_feedback_required,
             "install_id": recommendation.install_id,
             "machine_id": recommendation.machine_id,
             "bean_context_id": recommendation.bean_context_id,
@@ -265,6 +287,7 @@ class GaggimateMQTTClient:
         if reason_code == 0:
             client.subscribe(SHOT_TOPIC)
             client.subscribe(FEEDBACK_TOPIC)
+            client.subscribe(PREFERENCE_TOPIC)
             client.subscribe(CORRECTION_TOPIC)
             client.subscribe(UPLOAD_REQUEUE_TOPIC)
             client.subscribe(DECISION_TOPIC)
@@ -275,9 +298,10 @@ class GaggimateMQTTClient:
             client.subscribe(DREAMER_ACK_TOPIC)
             client.subscribe(DREAMER_TELEMETRY_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
                 FEEDBACK_TOPIC,
+                PREFERENCE_TOPIC,
                 CORRECTION_TOPIC,
                 UPLOAD_REQUEUE_TOPIC,
                 DECISION_TOPIC,
@@ -309,6 +333,8 @@ class GaggimateMQTTClient:
                 self._on_shot(self.translate_shot_payload(payload, mac))
             elif msg.topic.endswith("/rl/rating"):
                 self._on_feedback(self.translate_feedback_payload(payload, mac))
+            elif msg.topic.endswith("/rl/preference"):
+                self._on_preference(self.translate_preference_payload(payload, mac))
             elif msg.topic.endswith("/rl/shot/correction"):
                 self._on_correction(self.translate_correction_payload(payload, mac))
             elif msg.topic.endswith("/rl/upload/requeue"):
@@ -567,6 +593,41 @@ class GaggimateMQTTClient:
             user_note=payload.get("user_note"),
             skipped=skipped,
             source=payload.get("source", "gaggimate_mqtt"),
+        )
+
+    def translate_preference_payload(
+        self,
+        payload: dict[str, Any],
+        mac: str,
+    ) -> PreferenceFeedbackEvent:
+        _require_exact_object_fields(payload, _PREFERENCE_FIELDS, "preference feedback")
+        if payload.get("event_type") != "preference_feedback":
+            raise ValueError("preference feedback event_type is invalid")
+        schema_version = _strict_non_negative_int(payload.get("schema_version"), "schema_version")
+        if schema_version != 1:
+            raise ValueError("preference feedback schema_version is unsupported")
+        topic_machine_id = f"gaggimate:{mac}"
+        machine_id = _required_bounded_string(payload.get("machine_id"), "machine_id", maximum=160)
+        if not _same_gaggimate_machine_id(topic_machine_id, machine_id):
+            raise ValueError("preference feedback machine_id does not match topic")
+        return PreferenceFeedbackEvent(
+            optimization_run_id=_required_bounded_string(
+                payload.get("optimization_run_id"),
+                "optimization_run_id",
+                maximum=256,
+            ),
+            new_shot_id=_required_bounded_string(payload.get("new_shot_id"), "new_shot_id", maximum=256),
+            anchor_shot_id=_required_bounded_string(
+                payload.get("anchor_shot_id"),
+                "anchor_shot_id",
+                maximum=256,
+            ),
+            label=_required_bounded_string(payload.get("label"), "label", maximum=32),
+            install_id=_required_bounded_string(payload.get("install_id"), "install_id", maximum=160),
+            machine_id=machine_id,
+            timestamp=_strict_non_negative_int(payload.get("timestamp"), "timestamp"),
+            source=_required_bounded_string(payload.get("source"), "source", maximum=80),
+            schema_version=schema_version,
         )
 
     def translate_correction_payload(self, payload: dict[str, Any], mac: str) -> ShotCorrectionEvent:
@@ -888,7 +949,7 @@ def _require_exact_object_fields(
     label: str,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise ValueError(f"Dreamer live {label} must be an object")
+        raise ValueError(f"{label} must be an object")
     actual = set(value)
     unknown = sorted(str(key) for key in actual - expected)
     missing = sorted(expected - actual)
@@ -898,7 +959,7 @@ def _require_exact_object_fields(
             details.append(f"unsupported fields: {', '.join(unknown[:5])}")
         if missing:
             details.append(f"missing fields: {', '.join(missing[:5])}")
-        raise ValueError(f"Dreamer live {label} fields are invalid ({'; '.join(details)})")
+        raise ValueError(f"{label} fields are invalid ({'; '.join(details)})")
     return value
 
 

@@ -48,7 +48,7 @@ from espresso_rl.application.upload_payloads import (
     make_shot_upload_item,
 )
 from espresso_rl.application.rule_priors import rule_prior_signals
-from espresso_rl.ports.optimizers import Optimizer, PriorProvider
+from espresso_rl.ports.optimizers import Optimizer, PriorProvider, StatefulOptimizerHandoff
 from espresso_rl.ports.repositories import (
     RecommendationRepository,
     ShotRepository,
@@ -71,6 +71,7 @@ class IngestResult:
     shot: ShotRecord | None
     recommendation: Recommendation | None
     dropped_reason: str | None = None
+    optimizer_handoff_mode: str | None = None
 
     @property
     def stored(self) -> bool:
@@ -81,6 +82,7 @@ class IngestResult:
 class FeedbackResult:
     shot: ShotRecord
     recommendation: Recommendation | None
+    optimizer_handoff_mode: str | None = None
 
 
 def _recommendation_signature(recommendation: Recommendation) -> tuple:
@@ -108,6 +110,10 @@ def _recommendation_signature(recommendation: Recommendation) -> tuple:
         round(recommendation.target_ratio, 4),
         recommendation.mode.value,
         recommendation.grinder_context_id,
+        recommendation.optimization_run_id,
+        recommendation.comparison_anchor_shot_id,
+        recommendation.comparison_mode,
+        recommendation.preference_feedback_required,
         round(recommendation.confidence, 4),
         recommendation.reason,
     )
@@ -282,6 +288,7 @@ class EspressoRLService:
         safety_bounds: SafetyBounds | None = None,
         clock: Callable[[], int] = now_ts,
         community_upload_enabled_default: bool = False,
+        stateful_preference_mode: bool = False,
     ) -> None:
         self._shots = shots
         self._recommendations = recommendations
@@ -291,6 +298,7 @@ class EspressoRLService:
         self._safety_bounds = safety_bounds or SafetyBounds()
         self._clock = clock
         self._community_upload_enabled_default = bool(community_upload_enabled_default)
+        self._stateful_preference_mode = bool(stateful_preference_mode)
         self._community_upload_enabled_by_machine: dict[tuple[str, str], bool] = {}
         self._prior_mode_by_machine: dict[tuple[str, str], PriorSelectionMode] = {}
         self._prior_rules_by_machine: dict[tuple[str, str], tuple[PriorRule, ...]] = {}
@@ -406,24 +414,35 @@ class EspressoRLService:
         shot.reward_confidence = reward.confidence
         self._store_shot(shot, now, community_upload_enabled=event.community_upload_enabled)
 
+        if self._stateful_preference_mode:
+            return IngestResult(shot=shot, recommendation=None)
         if not shot.feedback_recorded:
             return IngestResult(shot=shot, recommendation=None)
-        recommendation = self.generate_recommendation(
-            install_id=shot.install_id,
-            machine_id=shot.machine_id,
-            bean_context_id=shot.bean_context_id,
-            bean_context_name=shot.bean_context_name,
-            grinder_context_id=shot.grinder_context_id,
-            current_recipe=self._current_recipe_for_shot(shot),
-            now=now,
-            grinder_calibration_mode=shot.grinder_calibration_mode,
-            grinder_step_direction=shot.grinder_step_direction,
-            grinder_adjustment_mode=shot.grinder_adjustment_mode,
-            grinder_reference_label=shot.grinder_reference_label,
-            current_absolute_step=shot.current_absolute_step,
-            absolute_reference_step=shot.absolute_reference_step,
-            profile_id=shot.profile_id,
-        )
+        try:
+            recommendation = self.generate_recommendation(
+                install_id=shot.install_id,
+                machine_id=shot.machine_id,
+                bean_context_id=shot.bean_context_id,
+                bean_context_name=shot.bean_context_name,
+                grinder_context_id=shot.grinder_context_id,
+                current_recipe=self._current_recipe_for_shot(shot),
+                now=now,
+                grinder_calibration_mode=shot.grinder_calibration_mode,
+                grinder_step_direction=shot.grinder_step_direction,
+                grinder_adjustment_mode=shot.grinder_adjustment_mode,
+                grinder_reference_label=shot.grinder_reference_label,
+                current_absolute_step=shot.current_absolute_step,
+                absolute_reference_step=shot.absolute_reference_step,
+                profile_id=shot.profile_id,
+            )
+        except StatefulOptimizerHandoff as exc:
+            self._stateful_preference_mode = True
+            logger.warning("Optimizer handed shot %s to %s: %s", shot.shot_id, exc.target_mode, exc.reason)
+            return IngestResult(
+                shot=shot,
+                recommendation=None,
+                optimizer_handoff_mode=exc.target_mode,
+            )
         return IngestResult(shot=shot, recommendation=recommendation)
 
     def record_feedback(self, event: ShotFeedbackEvent) -> FeedbackResult:
@@ -465,6 +484,9 @@ class EspressoRLService:
         shot.updated_at = now
         self._store_shot(shot, now)
 
+        if self._stateful_preference_mode:
+            return FeedbackResult(shot=shot, recommendation=None)
+
         recent = self._shots.list_recent(
             install_id=shot.install_id,
             machine_id=shot.machine_id,
@@ -486,22 +508,31 @@ class EspressoRLService:
         if not feedback_changed and current is not None and current.source_shot_id == shot.shot_id:
             return FeedbackResult(shot=shot, recommendation=current)
 
-        recommendation = self.generate_recommendation(
-            install_id=shot.install_id,
-            machine_id=shot.machine_id,
-            bean_context_id=shot.bean_context_id,
-            bean_context_name=shot.bean_context_name,
-            grinder_context_id=shot.grinder_context_id,
-            current_recipe=self._current_recipe_for_shot(shot),
-            now=now,
-            grinder_calibration_mode=shot.grinder_calibration_mode,
-            grinder_step_direction=shot.grinder_step_direction,
-            grinder_adjustment_mode=shot.grinder_adjustment_mode,
-            grinder_reference_label=shot.grinder_reference_label,
-            current_absolute_step=shot.current_absolute_step,
-            absolute_reference_step=shot.absolute_reference_step,
-            profile_id=shot.profile_id,
-        )
+        try:
+            recommendation = self.generate_recommendation(
+                install_id=shot.install_id,
+                machine_id=shot.machine_id,
+                bean_context_id=shot.bean_context_id,
+                bean_context_name=shot.bean_context_name,
+                grinder_context_id=shot.grinder_context_id,
+                current_recipe=self._current_recipe_for_shot(shot),
+                now=now,
+                grinder_calibration_mode=shot.grinder_calibration_mode,
+                grinder_step_direction=shot.grinder_step_direction,
+                grinder_adjustment_mode=shot.grinder_adjustment_mode,
+                grinder_reference_label=shot.grinder_reference_label,
+                current_absolute_step=shot.current_absolute_step,
+                absolute_reference_step=shot.absolute_reference_step,
+                profile_id=shot.profile_id,
+            )
+        except StatefulOptimizerHandoff as exc:
+            self._stateful_preference_mode = True
+            logger.warning("Optimizer handed feedback shot %s to %s: %s", shot.shot_id, exc.target_mode, exc.reason)
+            return FeedbackResult(
+                shot=shot,
+                recommendation=None,
+                optimizer_handoff_mode=exc.target_mode,
+            )
         return FeedbackResult(shot=shot, recommendation=recommendation)
 
     def record_shot_correction(self, event: ShotCorrectionEvent) -> ShotRecord:
@@ -742,23 +773,35 @@ class EspressoRLService:
             return None
         if not _has_optimizer_observation(recent):
             return None
-        recommendation = self.generate_recommendation(
-            install_id=event.install_id,
-            machine_id=event.machine_id,
-            bean_context_id=event.bean_context_id,
-            bean_context_name=event.bean_context_name,
-            grinder_context_id=event.grinder_context_id,
-            current_recipe=current_recipe,
-            now=now,
-            grinder_calibration_mode=event.grinder_calibration_mode,
-            grinder_step_direction=event.grinder_step_direction,
-            grinder_adjustment_mode=event.grinder_adjustment_mode,
-            grinder_reference_label=event.grinder_reference_label,
-            current_absolute_step=event.current_absolute_step,
-            absolute_reference_step=event.absolute_reference_step,
-            profile_id=event.profile_id,
-            raw_profile_hash=event.raw_profile_hash,
-        )
+        if self._stateful_preference_mode:
+            return None
+        try:
+            recommendation = self.generate_recommendation(
+                install_id=event.install_id,
+                machine_id=event.machine_id,
+                bean_context_id=event.bean_context_id,
+                bean_context_name=event.bean_context_name,
+                grinder_context_id=event.grinder_context_id,
+                current_recipe=current_recipe,
+                now=now,
+                grinder_calibration_mode=event.grinder_calibration_mode,
+                grinder_step_direction=event.grinder_step_direction,
+                grinder_adjustment_mode=event.grinder_adjustment_mode,
+                grinder_reference_label=event.grinder_reference_label,
+                current_absolute_step=event.current_absolute_step,
+                absolute_reference_step=event.absolute_reference_step,
+                profile_id=event.profile_id,
+                raw_profile_hash=event.raw_profile_hash,
+            )
+        except StatefulOptimizerHandoff as exc:
+            self._stateful_preference_mode = True
+            logger.warning(
+                "Optimizer handed machine %s to %s: %s",
+                event.machine_id,
+                exc.target_mode,
+                exc.reason,
+            )
+            return None
         return self._mark_recommendation_shown(recommendation, now)
 
     def generate_recommendation(
@@ -894,6 +937,30 @@ class EspressoRLService:
 
     def set_community_upload_enabled(self, install_id: str, machine_id: str, enabled: bool) -> None:
         self._community_upload_enabled_by_machine[(install_id, machine_id)] = bool(enabled)
+
+    def set_stateful_preference_mode(self, enabled: bool) -> None:
+        self._stateful_preference_mode = bool(enabled)
+
+    def persist_generated_recommendation(self, recommendation: Recommendation) -> None:
+        """Persist a recommendation produced by a stateful optimizer service."""
+
+        now = self._clock()
+        recommendation.updated_at = now
+        self._recommendations.supersede_active(
+            install_id=recommendation.install_id,
+            machine_id=recommendation.machine_id,
+            bean_context_id=recommendation.bean_context_id,
+            now=now,
+            except_recommendation_id=recommendation.recommendation_id,
+            grinder_context_id=recommendation.grinder_context_id,
+            profile_id=recommendation.profile_id,
+            raw_profile_hash=(
+                recommendation.raw_profile_hash
+                if recommendation.profile_id is None
+                else None
+            ),
+        )
+        self._store_recommendation(recommendation, now)
 
     def configure_prior_policy(
         self,

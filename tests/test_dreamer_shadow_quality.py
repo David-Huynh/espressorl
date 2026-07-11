@@ -388,7 +388,7 @@ def _evaluation(
         current_target_yield_g=36.0,
         current_target_ratio=2.0,
         dreamer_proposal=_proposal("dreamer_v3", safety_valid=safety_valid),
-        bo_proposal=_proposal("bayesian_optimization"),
+        bo_proposal=_proposal("cpbo"),
         source_reward=source_reward,
         status=status,
         outcome_shot_id=None if pending else (outcome_shot_id or f"outcome_{index}"),

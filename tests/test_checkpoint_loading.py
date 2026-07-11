@@ -16,7 +16,7 @@ from espresso_rl.domain.dreamer_taste import DEFAULT_DREAMER_TASTE_OBJECTIVE_SPE
 from espresso_rl.domain.model_manifest import CHECKPOINT_ARTIFACT_FORMAT, CHECKPOINT_ARTIFACT_SCHEMA_VERSION
 from espresso_rl.domain.model_release import DreamerReleaseAuthorization
 from espresso_rl.domain.optimization import (
-    DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_CPBO,
     OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
 )
@@ -32,16 +32,6 @@ class MemoryModelArtifactStore:
         if len(payload) > max_bytes:
             raise ValueError("artifact exceeds limit")
         return payload
-
-
-class RecordingBOOptimizer:
-    def __init__(self) -> None:
-        self.result = object()
-        self.contexts = []
-
-    def recommend(self, context):
-        self.contexts.append(context)
-        return self.result
 
 
 class CheckpointLoadingTests(unittest.TestCase):
@@ -211,7 +201,7 @@ class CheckpointLoadingTests(unittest.TestCase):
                 expected_artifact_sha256=bundle["artifact_sha256"],
             )
 
-    def test_verified_preview_does_not_enable_dreamer_or_remove_bo_fallback(self) -> None:
+    def test_verified_preview_keeps_cpbo_as_recipe_fallback(self) -> None:
         bundle = checkpoint_bundle()
         with tempfile.TemporaryDirectory() as temporary_directory:
             artifact_path = Path(temporary_directory) / "dreamer_v3.safetensors"
@@ -224,7 +214,6 @@ class CheckpointLoadingTests(unittest.TestCase):
                 manifest_reference=str(manifest_path),
                 expected_artifact_sha256=bundle["artifact_sha256"],
             )
-            bo_optimizer = RecordingBOOptimizer()
             optimizer = RuntimeOptimizer(
                 optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_SHADOW,
                 model_artifact_path=str(artifact_path),
@@ -232,19 +221,20 @@ class CheckpointLoadingTests(unittest.TestCase):
                 model_manifest_path=str(manifest_path),
                 verified_checkpoint=checkpoint,
                 checkpoint_inference_parity_verified=True,
-                bo_optimizer=bo_optimizer,
             )
 
         self.assertFalse(checkpoint.inference_ready)
-        self.assertEqual(optimizer.status().effective_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(
+            optimizer.status().effective_mode,
+            OPTIMIZER_MODE_CPBO,
+        )
         self.assertFalse(optimizer.status().dreamer_v3_available)
         self.assertTrue(optimizer.status().checkpoint_verified)
         self.assertFalse(optimizer.status().checkpoint_inference_ready)
         self.assertTrue(optimizer.status().checkpoint_inference_parity_verified)
         self.assertIn("not enabled", optimizer.status().checkpoint_unavailable_reason or "")
-        context = object()
-        self.assertIs(optimizer.recommend(context), bo_optimizer.result)
-        self.assertEqual(bo_optimizer.contexts, [context])
+        with self.assertRaisesRegex(RuntimeError, "PreferentialOptimizationService"):
+            optimizer.recommend(object())
 
     def test_local_store_enforces_size_limit_and_reads_exact_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

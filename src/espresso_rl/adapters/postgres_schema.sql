@@ -169,6 +169,10 @@ CREATE TABLE IF NOT EXISTS recommendations (
     used_at BIGINT,
     superseded_at BIGINT,
     source_shot_id TEXT,
+    optimization_run_id TEXT,
+    comparison_anchor_shot_id TEXT,
+    comparison_mode TEXT,
+    preference_feedback_required BOOLEAN NOT NULL DEFAULT FALSE,
     apply_status TEXT NOT NULL DEFAULT 'unknown',
     apply_acknowledged_at BIGINT,
     applied_fields_json TEXT NOT NULL DEFAULT '{}',
@@ -413,3 +417,70 @@ CREATE TABLE IF NOT EXISTS admin_action_log (
 
 CREATE INDEX IF NOT EXISTS idx_admin_action_log_requested_at
     ON admin_action_log (requested_at DESC, action_id DESC);
+
+CREATE TABLE IF NOT EXISTS cpbo_runs (
+    run_id TEXT PRIMARY KEY,
+    context_fingerprint TEXT NOT NULL,
+    install_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    active BOOLEAN NOT NULL,
+    created_at BIGINT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cpbo_runs_active_context
+    ON cpbo_runs (context_fingerprint)
+    WHERE active = TRUE;
+
+CREATE TABLE IF NOT EXISTS cpbo_recipes (
+    recipe_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cpbo_recipes_run
+    ON cpbo_recipes (run_id, created_at, recipe_id);
+
+CREATE TABLE IF NOT EXISTS cpbo_shots (
+    shot_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    recipe_id TEXT NOT NULL,
+    sequence_number INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    UNIQUE (run_id, sequence_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cpbo_shots_run_sequence
+    ON cpbo_shots (run_id, sequence_number);
+
+CREATE TABLE IF NOT EXISTS cpbo_comparisons (
+    comparison_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    new_shot_id TEXT NOT NULL UNIQUE,
+    anchor_shot_id TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cpbo_comparisons_run_created
+    ON cpbo_comparisons (run_id, created_at, comparison_id);
+
+CREATE TABLE IF NOT EXISTS cpbo_states (
+    run_id TEXT PRIMARY KEY,
+    updated_at BIGINT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cpbo_suggestions (
+    suggestion_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    recipe_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cpbo_suggestions_pending
+    ON cpbo_suggestions (run_id, status, created_at DESC);

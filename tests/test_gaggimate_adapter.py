@@ -33,7 +33,7 @@ from espresso_rl.domain.models import (
 )
 from espresso_rl.domain.profile import build_fixed_cadence_sequence, resample_profile, resample_shot_metadata
 from espresso_rl.main import maybe_publish_startup_recommendation
-from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
+from tests.optimizer_stub import DeterministicOptimizer
 
 
 class FakeMQTT:
@@ -69,6 +69,43 @@ class FakeStartupMQTT:
 
 
 class GaggimateAdapterTests(unittest.TestCase):
+    def test_preference_payload_is_strict_and_oriented(self) -> None:
+        client = GaggimateMQTTClient(
+            config=Config(mqtt_host="localhost", data_dir=Path("/tmp")),
+            on_shot=lambda event: None,
+            on_feedback=lambda event: None,
+            on_correction=lambda event: None,
+            on_upload_maintenance=lambda event: None,
+            on_decision=lambda event: None,
+            on_apply=lambda event: None,
+            on_machine_state=lambda event: None,
+        )
+        payload = {
+            "event_type": "preference_feedback",
+            "schema_version": 1,
+            "optimization_run_id": "run_1",
+            "new_shot_id": "shot_new",
+            "anchor_shot_id": "shot_anchor",
+            "label": "tie",
+            "install_id": "install_1",
+            "machine_id": "gaggimate:AA_BB",
+            "timestamp": 100,
+            "source": "gaggimate_webui",
+        }
+
+        event = client.translate_preference_payload(payload, "AA_BB")
+
+        self.assertEqual(event.new_shot_id, "shot_new")
+        self.assertEqual(event.anchor_shot_id, "shot_anchor")
+        self.assertEqual(event.label.value, "tie")
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            client.translate_preference_payload({**payload, "rating": 5}, "AA_BB")
+        with self.assertRaisesRegex(ValueError, "does not match topic"):
+            client.translate_preference_payload(
+                {**payload, "machine_id": "gaggimate:CC_DD"},
+                "AA_BB",
+            )
+
     def test_empty_mqtt_payload_is_ignored(self) -> None:
         received = []
         client = GaggimateMQTTClient(
@@ -751,6 +788,10 @@ class GaggimateAdapterTests(unittest.TestCase):
             confidence=0.3,
             reason="test",
             source_shot_id="shot_1",
+            optimization_run_id="run_1",
+            comparison_anchor_shot_id="shot_1",
+            comparison_mode="best_incumbent",
+            preference_feedback_required=True,
             grinder_calibration_mode="absolute_display_calibrated",
             grinder_step_direction="higher_is_finer",
             grinder_adjustment_mode=GrinderAdjustmentMode.STEPLESS,
@@ -769,6 +810,10 @@ class GaggimateAdapterTests(unittest.TestCase):
         decoded = json.loads(payload)
         self.assertEqual(decoded["shot_id"], "shot_1")
         self.assertEqual(decoded["recommendation_id"], "rec_1")
+        self.assertEqual(decoded["optimization_run_id"], "run_1")
+        self.assertEqual(decoded["comparison_anchor_shot_id"], "shot_1")
+        self.assertEqual(decoded["comparison_mode"], "best_incumbent")
+        self.assertTrue(decoded["preference_feedback_required"])
         self.assertEqual(decoded["grinder_context_id"], "grinder_1")
         self.assertEqual(decoded["grind_delta_steps_from_current"], 0.5)
         self.assertEqual(decoded["grinder_adjustment_mode"], "stepless")
@@ -1061,7 +1106,7 @@ class GaggimateAdapterTests(unittest.TestCase):
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 shots = SQLiteShotRepository(store)
                 recs = SQLiteRecommendationRepository(store)
-                service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+                service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
                 mqtt = FakeStartupMQTT()
 
                 maybe_publish_startup_recommendation(
@@ -1279,7 +1324,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 service = EspressoRLService(
                     SQLiteShotRepository(store),
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 100,
                 )
                 client = GaggimateMQTTClient(

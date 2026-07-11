@@ -16,7 +16,12 @@
   "initial_dose_g": 18.0,
   "initial_target_yield_g": 36.0,
   "alpha": 0.5,
-  "optimizer_mode": "bayesian_optimization",
+  "optimizer_mode": "cpbo",
+  "cpbo": {
+    "profile_name": "application",
+    "comparison_mode": "best_incumbent",
+    "random_seed": 17
+  },
   "optimizer_model_artifact_path": "",
   "optimizer_model_artifact_sha256": "",
   "optimizer_model_manifest_path": "",

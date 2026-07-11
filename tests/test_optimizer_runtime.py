@@ -9,19 +9,18 @@ from unittest.mock import patch
 
 import espresso_rl.config as config_module
 from espresso_rl.domain.dreamer_runtime_audit import (
-    DREAMER_FALLBACK_REASON_ACTIVE_UNAVAILABLE,
     DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED,
     DREAMER_RUNTIME_EVENT_ACTIVE_RECOMMENDATION,
-    DREAMER_RUNTIME_EVENT_BO_FALLBACK,
+    DREAMER_RUNTIME_EVENT_CPBO_FALLBACK,
 )
 from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_CPBO,
     OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
-    OptimizationContext,
 )
-from espresso_rl.domain.models import Recipe, SafetyBounds
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
+from espresso_rl.ports.optimizers import StatefulOptimizerHandoff
 
 
 class RecordingOptimizer:
@@ -62,15 +61,24 @@ class FakeCheckpoint:
 
 
 class RuntimeOptimizerTests(unittest.TestCase):
+    def test_container_configuration_defaults_to_cpbo(self) -> None:
+        config = config_module.Config(mqtt_host="localhost")
+
+        self.assertEqual(config.optimizer_mode, OPTIMIZER_MODE_CPBO)
+        self.assertEqual(config.cpbo.comparison_mode.value, "best_incumbent")
+
     def test_dreamer_mode_without_model_files_is_not_configured(self) -> None:
         optimizer = RuntimeOptimizer(optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_SHADOW)
 
         status = optimizer.status()
 
         self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
-        self.assertEqual(status.effective_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(status.effective_mode, OPTIMIZER_MODE_CPBO)
         self.assertFalse(status.dreamer_v3_available)
-        self.assertEqual(status.available_modes, (DEFAULT_OPTIMIZER_MODE,))
+        self.assertEqual(
+            status.available_modes,
+            (OPTIMIZER_MODE_CPBO,),
+        )
         self.assertIn(OPTIMIZER_MODE_DREAMER_V3_SHADOW, status.unavailable_modes or {})
         self.assertIn(OPTIMIZER_MODE_DREAMER_V3_ACTIVE, status.unavailable_modes or {})
 
@@ -89,12 +97,12 @@ class RuntimeOptimizerTests(unittest.TestCase):
             status = optimizer.status()
 
         self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
-        self.assertEqual(status.effective_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(status.effective_mode, OPTIMIZER_MODE_CPBO)
         self.assertTrue(status.model_artifact_verified)
         self.assertFalse(status.model_manifest_verified)
         self.assertFalse(status.dreamer_v3_available)
 
-    def test_dreamer_mode_with_manifest_only_falls_back_to_bo_until_checkpoint_is_loaded(self) -> None:
+    def test_dreamer_mode_with_manifest_only_falls_back_to_cpbo_until_checkpoint_is_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             model_path = Path(tmp) / "dreamer.pt"
             model_path.write_bytes(b"verified model")
@@ -111,7 +119,7 @@ class RuntimeOptimizerTests(unittest.TestCase):
             status = optimizer.status()
 
         self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
-        self.assertEqual(status.effective_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(status.effective_mode, OPTIMIZER_MODE_CPBO)
         self.assertFalse(status.dreamer_v3_available)
         self.assertTrue(status.model_artifact_verified)
         self.assertTrue(status.model_manifest_verified)
@@ -146,39 +154,18 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertTrue(status.model_manifest_verified)
         self.assertFalse(status.checkpoint_verified)
 
-    def test_taste_objective_conditions_optimizer_query_without_changing_context_identity(self) -> None:
-        bo = RecordingOptimizer("recommendation")
-        optimizer = RuntimeOptimizer(bo_optimizer=bo)
-        status = optimizer.configure(
-            optimizer_mode=DEFAULT_OPTIMIZER_MODE,
-            taste_objective={"mode": "custom", "sweet": "high"},
-        )
-        context = OptimizationContext(
-            install_id="install_1",
-            machine_id="machine_1",
-            bean_context_id="bean_1",
-            grinder_context_id="grinder_1",
-            machine_adapter="gaggimate",
-            current_recipe=Recipe(
-                relative_grind_steps_from_reference=0.0,
-                microns_per_step=10.0,
-                dose_g=18.0,
-                target_yield_g=36.0,
-                target_ratio=2.0,
-            ),
-            shots=(),
-            safety_bounds=SafetyBounds(),
-            now=1,
-        )
+    def test_cpbo_cannot_use_scalar_optimizer_port(self) -> None:
+        optimizer = RuntimeOptimizer(optimizer_mode=OPTIMIZER_MODE_CPBO)
 
-        optimizer.recommend(context)
+        with self.assertRaisesRegex(RuntimeError, "PreferentialOptimizationService"):
+            optimizer.recommend(object())
 
-        self.assertEqual(status.taste_objective, {"mode": "custom", "sweet": "high"})
-        self.assertEqual(bo.contexts[0].taste_objective, status.taste_objective)
-        self.assertEqual(bo.contexts[0].bean_context_id, context.bean_context_id)
-        self.assertEqual(bo.contexts[0].grinder_context_id, context.grinder_context_id)
+    def test_custom_skeleton_names_are_not_runtime_modes(self) -> None:
+        for mode in ("custom_skeleton", "custom_optimizer", "skeleton"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "optimizer_mode"):
+                RuntimeOptimizer(optimizer_mode=mode)
 
-    def test_verified_shadow_checkpoint_keeps_bo_effective_and_lists_shadow_mode(self) -> None:
+    def test_verified_shadow_checkpoint_keeps_cpbo_effective_and_lists_shadow_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             model_path, digest, manifest_path, manifest_sha = write_model_bundle(Path(tmp), inference_ready=False)
             checkpoint = FakeCheckpoint(
@@ -188,7 +175,6 @@ class RuntimeOptimizerTests(unittest.TestCase):
                 manifest_sha256=manifest_sha,
                 inference_ready=False,
             )
-            bo = RecordingOptimizer("bo")
             optimizer = RuntimeOptimizer(
                 optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_SHADOW,
                 model_artifact_path=str(model_path),
@@ -196,20 +182,18 @@ class RuntimeOptimizerTests(unittest.TestCase):
                 model_manifest_path=str(manifest_path),
                 verified_checkpoint=checkpoint,
                 checkpoint_inference_parity_verified=True,
-                bo_optimizer=bo,
             )
 
             status = optimizer.status()
 
         self.assertEqual(status.configured_mode, OPTIMIZER_MODE_DREAMER_V3_SHADOW)
-        self.assertEqual(status.effective_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(status.effective_mode, OPTIMIZER_MODE_CPBO)
         self.assertTrue(status.dreamer_v3_shadow_available)
         self.assertFalse(status.dreamer_v3_active_available)
         self.assertIn(OPTIMIZER_MODE_DREAMER_V3_SHADOW, status.available_modes)
         self.assertNotIn(OPTIMIZER_MODE_DREAMER_V3_ACTIVE, status.available_modes)
-        context = object()
-        self.assertEqual(optimizer.recommend(context), "bo")
-        self.assertEqual(bo.contexts, [context])
+        with self.assertRaisesRegex(RuntimeError, "PreferentialOptimizationService"):
+            optimizer.recommend(object())
 
     def test_active_mode_uses_dreamer_only_for_inference_ready_release_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -225,7 +209,6 @@ class RuntimeOptimizerTests(unittest.TestCase):
                 manifest_sha256=manifest_sha,
                 inference_ready=True,
             )
-            bo = RecordingOptimizer("bo")
             dreamer = RecordingOptimizer("dreamer")
             optimizer = RuntimeOptimizer(
                 optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
@@ -234,7 +217,6 @@ class RuntimeOptimizerTests(unittest.TestCase):
                 model_manifest_path=str(manifest_path),
                 verified_checkpoint=checkpoint,
                 checkpoint_inference_parity_verified=True,
-                bo_optimizer=bo,
                 dreamer_optimizer=dreamer,
             )
 
@@ -248,7 +230,7 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertEqual(
             status.available_modes,
             (
-                DEFAULT_OPTIMIZER_MODE,
+                OPTIMIZER_MODE_CPBO,
                 OPTIMIZER_MODE_DREAMER_V3_SHADOW,
                 OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
             ),
@@ -256,16 +238,15 @@ class RuntimeOptimizerTests(unittest.TestCase):
         context = object()
         self.assertEqual(optimizer.recommend(context), "dreamer")
         self.assertEqual(dreamer.contexts, [context])
-        self.assertEqual(bo.contexts, [])
         runtime_status = optimizer.status()
         self.assertEqual(runtime_status.dreamer_v3_active_recommendation_count, 1)
-        self.assertEqual(runtime_status.dreamer_v3_bo_fallback_count, 0)
+        self.assertEqual(runtime_status.dreamer_v3_cpbo_fallback_count, 0)
         self.assertEqual(
             runtime_status.dreamer_v3_last_runtime_event,
             DREAMER_RUNTIME_EVENT_ACTIVE_RECOMMENDATION,
         )
 
-    def test_active_mode_falls_back_to_bo_without_dreamer_optimizer_or_on_safety_error(self) -> None:
+    def test_active_mode_hands_off_to_cpbo_without_dreamer_or_on_safety_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             model_path, digest, manifest_path, manifest_sha = write_model_bundle(
                 Path(tmp),
@@ -279,7 +260,6 @@ class RuntimeOptimizerTests(unittest.TestCase):
                 manifest_sha256=manifest_sha,
                 inference_ready=True,
             )
-            bo = RecordingOptimizer("bo")
             optimizer = RuntimeOptimizer(
                 optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
                 model_artifact_path=str(model_path),
@@ -287,12 +267,10 @@ class RuntimeOptimizerTests(unittest.TestCase):
                 model_manifest_path=str(manifest_path),
                 verified_checkpoint=checkpoint,
                 checkpoint_inference_parity_verified=True,
-                bo_optimizer=bo,
             )
 
             unavailable = optimizer.status()
 
-            bo_on_error = RecordingOptimizer("bo_after_error")
             fallback = RuntimeOptimizer(
                 optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
                 model_artifact_path=str(model_path),
@@ -300,39 +278,35 @@ class RuntimeOptimizerTests(unittest.TestCase):
                 model_manifest_path=str(manifest_path),
                 verified_checkpoint=checkpoint,
                 checkpoint_inference_parity_verified=True,
-                bo_optimizer=bo_on_error,
                 dreamer_optimizer=FailingOptimizer(),
             )
 
         self.assertEqual(unavailable.configured_mode, OPTIMIZER_MODE_DREAMER_V3_ACTIVE)
-        self.assertEqual(unavailable.effective_mode, DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(unavailable.effective_mode, OPTIMIZER_MODE_CPBO)
         self.assertFalse(unavailable.dreamer_v3_active_available)
         self.assertIn(OPTIMIZER_MODE_DREAMER_V3_ACTIVE, unavailable.unavailable_modes or {})
         context = object()
-        self.assertEqual(optimizer.recommend(context), "bo")
-        unavailable_after_recommend = optimizer.status()
-        self.assertEqual(unavailable_after_recommend.dreamer_v3_active_recommendation_count, 0)
-        self.assertEqual(unavailable_after_recommend.dreamer_v3_bo_fallback_count, 1)
-        self.assertEqual(
-            unavailable_after_recommend.dreamer_v3_bo_fallback_reason_counts,
-            {DREAMER_FALLBACK_REASON_ACTIVE_UNAVAILABLE: 1},
-        )
-        self.assertEqual(
-            unavailable_after_recommend.dreamer_v3_last_runtime_event,
-            DREAMER_RUNTIME_EVENT_BO_FALLBACK,
-        )
-        self.assertEqual(fallback.recommend(context), "bo_after_error")
+        with self.assertRaisesRegex(RuntimeError, "PreferentialOptimizationService"):
+            optimizer.recommend(context)
+        with self.assertRaises(StatefulOptimizerHandoff) as raised:
+            fallback.recommend(context)
+        self.assertEqual(raised.exception.target_mode, OPTIMIZER_MODE_CPBO)
         fallback_status = fallback.status()
         fallback_payload = json.dumps(fallback_status.to_dict(), sort_keys=True)
         self.assertEqual(fallback_status.dreamer_v3_active_recommendation_count, 0)
-        self.assertEqual(fallback_status.dreamer_v3_bo_fallback_count, 1)
+        self.assertEqual(fallback_status.effective_mode, OPTIMIZER_MODE_CPBO)
+        self.assertEqual(fallback_status.dreamer_v3_cpbo_fallback_count, 1)
         self.assertEqual(
-            fallback_status.dreamer_v3_bo_fallback_reason_counts,
+            fallback_status.dreamer_v3_cpbo_fallback_reason_counts,
             {DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED: 1},
         )
         self.assertEqual(
-            fallback_status.dreamer_v3_last_bo_fallback_reason,
+            fallback_status.dreamer_v3_last_cpbo_fallback_reason,
             DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED,
+        )
+        self.assertEqual(
+            fallback_status.dreamer_v3_last_runtime_event,
+            DREAMER_RUNTIME_EVENT_CPBO_FALLBACK,
         )
         self.assertNotIn("raw grind=42", fallback_payload)
 
@@ -461,10 +435,15 @@ class RuntimeOptimizerTests(unittest.TestCase):
         self.assertEqual(config.optimizer_model_manifest_path, "/models/trainer_manifest.json")
         self.assertEqual(config.default_optimizer_model_artifact_sha256, release_digest)
 
-    def test_aliases_normalize_to_bayesian_optimization(self) -> None:
-        optimizer = RuntimeOptimizer(optimizer_mode="bo")
+    def test_persisted_numeric_bo_names_migrate_to_cpbo(self) -> None:
+        for mode in ("bo", "bayesian_optimization"):
+            with self.subTest(mode=mode):
+                optimizer = RuntimeOptimizer(optimizer_mode=mode)
+                self.assertEqual(optimizer.status().configured_mode, OPTIMIZER_MODE_CPBO)
 
-        self.assertEqual(optimizer.status().configured_mode, DEFAULT_OPTIMIZER_MODE)
+    def test_conservative_bo_name_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "optimizer_mode"):
+            RuntimeOptimizer(optimizer_mode="conservative_bo")
 
     def test_invalid_mode_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "optimizer_mode"):

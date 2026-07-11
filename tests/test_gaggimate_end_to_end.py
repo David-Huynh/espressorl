@@ -18,9 +18,8 @@ from espresso_rl.application.runtime_coordinator import AutoTuningRuntimeCoordin
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
 from espresso_rl.domain.models import UploadQueueStatus
-from espresso_rl.domain.optimization import OptimizationContext
 from espresso_rl.main import build_status_payload, upload_queue_for_service
-from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
+from tests.optimizer_stub import DeterministicOptimizer
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
@@ -39,13 +38,8 @@ class FakeMQTTMessage:
         self.payload = json.dumps(payload).encode("utf-8")
 
 
-class RecordingBOOptimizer(ConservativeBOOptimizer):
-    def __init__(self) -> None:
-        self.contexts: list[OptimizationContext] = []
-
-    def recommend(self, context: OptimizationContext):
-        self.contexts.append(context)
-        return super().recommend(context)
+class RecordingOptimizer(DeterministicOptimizer):
+    pass
 
 
 class FailOnceUploadClient:
@@ -77,7 +71,7 @@ class GaggimateEndToEndHarness:
         self.recommendations = SQLiteRecommendationRepository(store)
         self.uploads = SQLiteUploadQueueRepository(store)
         self.upload_maintenance = UploadQueueMaintenanceService(self.uploads, clock=self.config.now)
-        self.optimizer = RecordingBOOptimizer()
+        self.optimizer = RecordingOptimizer()
         self.service = EspressoRLService(
             shots=self.shots,
             recommendations=self.recommendations,

@@ -11,6 +11,15 @@ class Optimizer(Protocol):
         ...
 
 
+class StatefulOptimizerHandoff(RuntimeError):
+    """Signals that a stateless optimizer must hand control to a stateful mode."""
+
+    def __init__(self, target_mode: str, reason: str) -> None:
+        super().__init__(reason)
+        self.target_mode = target_mode
+        self.reason = reason
+
+
 class PriorProvider(Protocol):
     def get_prior_points(self, context: OptimizationContext) -> list[PriorPoint]:
         ...

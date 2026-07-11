@@ -146,6 +146,10 @@ RECOMMENDATION_RECORD_FIELDS = frozenset(
         "used_at",
         "superseded_at",
         "source_shot_id",
+        "optimization_run_id",
+        "comparison_anchor_shot_id",
+        "comparison_mode",
+        "preference_feedback_required",
         "apply_status",
         "apply_acknowledged_at",
         "applied_fields",
@@ -438,7 +442,17 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
     _optional_enum(
         payload,
         "mode",
-        {"zero_observe", "zero_immediate_bo", "warm_started_bo", "local_bo", "dreamer_candidate", "dreamer_active", "bo_fallback"},
+        {
+            "zero_observe",
+            "zero_immediate_bo",
+            "warm_started_bo",
+            "local_bo",
+            "cpbo_global_previous",
+            "cpbo_best_incumbent",
+            "dreamer_candidate",
+            "dreamer_active",
+            "bo_fallback",
+        },
         errors,
     )
     _optional_number_range(payload, "confidence", 0, 1, errors)
@@ -454,6 +468,29 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
     _optional_number_range(payload, "used_at", 0, 9_007_199_254_740_991, errors)
     _optional_number_range(payload, "superseded_at", 0, 9_007_199_254_740_991, errors)
     _optional_identifier(payload, "source_shot_id", errors)
+    _optional_identifier(payload, "optimization_run_id", errors)
+    _optional_identifier(payload, "comparison_anchor_shot_id", errors)
+    _optional_enum(
+        payload,
+        "comparison_mode",
+        {"global_previous", "best_incumbent"},
+        errors,
+    )
+    _optional_bool(payload, "preference_feedback_required", errors)
+    if payload.get("mode") in {"cpbo_global_previous", "cpbo_best_incumbent"}:
+        if not payload.get("optimization_run_id"):
+            errors.append("CPBO recommendation requires optimization_run_id")
+        if not payload.get("comparison_anchor_shot_id"):
+            errors.append("CPBO recommendation requires comparison_anchor_shot_id")
+        if payload.get("preference_feedback_required") is not True:
+            errors.append("CPBO recommendation requires preference_feedback_required=true")
+        expected_comparison_mode = (
+            "global_previous"
+            if payload.get("mode") == "cpbo_global_previous"
+            else "best_incumbent"
+        )
+        if payload.get("comparison_mode") != expected_comparison_mode:
+            errors.append("CPBO recommendation comparison_mode does not match mode")
     _optional_enum(payload, "apply_status", {"unknown", "applied", "partially_applied", "manual_required", "failed"}, errors)
     _optional_number_range(payload, "apply_acknowledged_at", 0, 9_007_199_254_740_991, errors)
     _optional_object(payload, "applied_fields", errors)

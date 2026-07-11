@@ -23,7 +23,7 @@ from espresso_rl.application.upload_payloads import payload_hash as hash_payload
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.domain.events import RecommendationApplyEvent, ShotFeedbackEvent, ShotProfileEvent
 from espresso_rl.domain.models import RecommendationApplyStatus, UploadQueueItem, UploadQueueStatus
-from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
+from tests.optimizer_stub import DeterministicOptimizer
 from espresso_rl.adapters.supabase_upload import (
     SignedSupabaseUploadClient,
     SignedUploadConfig,
@@ -152,7 +152,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 shots = SQLiteShotRepository(store)
                 recs = SQLiteRecommendationRepository(store)
-                service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+                service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
                 result = service.ingest_shot_profile(
                     shot_event(
@@ -221,7 +221,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 shots = SQLiteShotRepository(store)
                 recs = SQLiteRecommendationRepository(store)
-                service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+                service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
                 service.ingest_shot_profile(
                     shot_event(shot_id="shot_a", bean_context_id="bean_1", grinder_context_id="grinder_a")
@@ -277,7 +277,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(
                     SQLiteShotRepository(store),
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 10,
                 )
 
@@ -292,7 +292,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 shots = SQLiteShotRepository(store)
                 recs = SQLiteRecommendationRepository(store)
-                service = EspressoRLService(shots, recs, ConservativeBOOptimizer(), clock=lambda: 10)
+                service = EspressoRLService(shots, recs, DeterministicOptimizer(), clock=lambda: 10)
 
                 service.ingest_shot_profile(shot_event())
                 status = build_status_payload(
@@ -315,6 +315,36 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 self.assertEqual(recent[0]["shot_end_state"], "manual_or_interrupted")
                 self.assertNotIn("profile_resampled", recent[0])
 
+    def test_status_payload_without_runtime_status_migrates_numeric_bo_to_cpbo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(
+                mqtt_host="localhost",
+                data_dir=Path(tmp),
+                install_id="install_1",
+                optimizer_mode="bayesian_optimization",
+            )
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    DeterministicOptimizer(),
+                    clock=lambda: 10,
+                )
+                status = build_status_payload(
+                    config=config,
+                    service=service,
+                    shot_repo=None,
+                    upload_maintenance=None,
+                    upload_queue_repo=None,
+                    machine_id="machine_1",
+                    bean_context_id=None,
+                )
+
+        self.assertEqual(status["optimizer_configured_mode"], "cpbo")
+        self.assertEqual(status["optimizer_effective_mode"], "cpbo")
+        self.assertEqual(status["optimizer_available_modes"], ["cpbo"])
+        self.assertIsNone(status["optimizer_fallback_reason"])
+
     def test_status_payload_scopes_progress_and_best_recipe_to_active_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(mqtt_host="localhost", data_dir=Path(tmp), install_id="install_1")
@@ -324,7 +354,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(
                     shots,
                     recommendations,
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 10,
                 )
                 service.ingest_shot_profile(shot_event())
@@ -412,7 +442,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(
                     SQLiteShotRepository(store),
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 10,
                 )
                 status = build_status_payload(
@@ -460,7 +490,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(
                     shots,
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 10,
                 )
 
@@ -496,7 +526,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(
                     SQLiteShotRepository(store),
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 10,
                 )
 
@@ -509,8 +539,8 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                     machine_id="machine_1",
                     bean_context_id=None,
                     optimizer_status={
-                        "configured_mode": "bayesian_optimization",
-                        "effective_mode": "bayesian_optimization",
+                        "configured_mode": "cpbo",
+                        "effective_mode": "cpbo",
                         "model_artifact_path": "models/dreamer.pt",
                         "model_artifact_sha256": "a" * 64,
                         "model_artifact_actual_sha256": "a" * 64,
@@ -540,18 +570,18 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                         "checkpoint_inference_parity_reason": None,
                         "dreamer_v3_available": False,
                         "dreamer_v3_active_recommendation_count": 2,
-                        "dreamer_v3_bo_fallback_count": 1,
-                        "dreamer_v3_bo_fallback_reason_counts": {"dreamer_candidate_rejected": 1},
-                        "dreamer_v3_last_runtime_event": "bo_fallback",
-                        "dreamer_v3_last_bo_fallback_reason": "dreamer_candidate_rejected",
-                        "available_modes": ["bayesian_optimization"],
+                        "dreamer_v3_cpbo_fallback_count": 1,
+                        "dreamer_v3_cpbo_fallback_reason_counts": {"dreamer_candidate_rejected": 1},
+                        "dreamer_v3_last_runtime_event": "cpbo_fallback",
+                        "dreamer_v3_last_cpbo_fallback_reason": "dreamer_candidate_rejected",
+                        "available_modes": ["cpbo"],
                         "unavailable_modes": {"dreamer_v3_shadow": "Runtime inference is not enabled."},
                         "fallback_reason": None,
                     },
                 )
 
-            self.assertEqual(status["optimizer_configured_mode"], "bayesian_optimization")
-            self.assertEqual(status["optimizer_effective_mode"], "bayesian_optimization")
+            self.assertEqual(status["optimizer_configured_mode"], "cpbo")
+            self.assertEqual(status["optimizer_effective_mode"], "cpbo")
             self.assertFalse(status["optimizer_dreamer_v3_available"])
             self.assertTrue(status["optimizer_checkpoint_verified"])
             self.assertFalse(status["optimizer_checkpoint_inference_ready"])
@@ -570,14 +600,14 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             self.assertNotIn("dreamer_v3_shadow", status["optimizer_available_modes"])
             self.assertIn("not enabled", status["optimizer_checkpoint_unavailable_reason"])
             self.assertEqual(status["optimizer_dreamer_v3_active_recommendation_count"], 2)
-            self.assertEqual(status["optimizer_dreamer_v3_bo_fallback_count"], 1)
+            self.assertEqual(status["optimizer_dreamer_v3_cpbo_fallback_count"], 1)
             self.assertEqual(
-                status["optimizer_dreamer_v3_bo_fallback_reason_counts"],
+                status["optimizer_dreamer_v3_cpbo_fallback_reason_counts"],
                 {"dreamer_candidate_rejected": 1},
             )
-            self.assertEqual(status["optimizer_dreamer_v3_last_runtime_event"], "bo_fallback")
+            self.assertEqual(status["optimizer_dreamer_v3_last_runtime_event"], "cpbo_fallback")
             self.assertEqual(
-                status["optimizer_dreamer_v3_last_bo_fallback_reason"],
+                status["optimizer_dreamer_v3_last_cpbo_fallback_reason"],
                 "dreamer_candidate_rejected",
             )
 
@@ -588,7 +618,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(
                     SQLiteShotRepository(store),
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 10,
                 )
 
@@ -655,7 +685,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(
                     SQLiteShotRepository(store),
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 10,
                 )
                 quality = AggregateQualityService()
@@ -692,7 +722,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(
                     SQLiteShotRepository(store),
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 10,
                 )
 
@@ -727,7 +757,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 service = EspressoRLService(
                     SQLiteShotRepository(store),
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                     clock=lambda: 10,
                 )
 
@@ -1118,7 +1148,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 EspressoRLService(
                     shots,
                     SQLiteRecommendationRepository(store),
-                    ConservativeBOOptimizer(),
+                    DeterministicOptimizer(),
                 ).ingest_shot_profile(shot_event())
                 queue.enqueue(uploadable_queue_item("u_a"))
                 worker = UploadQueueWorker(queue, RejectingClient(), clock=lambda: 100)
@@ -1140,7 +1170,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 shots = SQLiteShotRepository(store)
                 queue = SQLiteUploadQueueRepository(store)
-                EspressoRLService(shots, SQLiteRecommendationRepository(store), ConservativeBOOptimizer()).ingest_shot_profile(
+                EspressoRLService(shots, SQLiteRecommendationRepository(store), DeterministicOptimizer()).ingest_shot_profile(
                     shot_event()
                 )
                 queue.enqueue(uploadable_queue_item("u_a"))

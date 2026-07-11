@@ -628,7 +628,7 @@ class TrainerArtifactTests(unittest.TestCase):
     def test_rejects_training_config_with_non_dreamer_adaptive_control(self) -> None:
         dataset_text, manifest_text = dataset_export_text([training_row(1)])
         config = default_training_config()
-        config["dreamer_control_spec"]["optimizer_family"] = "bayesian_optimization"
+        config["dreamer_control_spec"]["optimizer_family"] = "cpbo"
         config["dreamer_control_spec"]["dynamic_control_enabled"] = True
         config["dreamer_control_spec"]["pressure_control_allowed"] = True
 

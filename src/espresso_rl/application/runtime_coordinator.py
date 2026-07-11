@@ -6,11 +6,13 @@ from collections.abc import Callable
 from espresso_rl.application.services import EspressoRLService, FeedbackResult, IngestResult
 from espresso_rl.domain.events import MachineStateEvent, ShotFeedbackEvent, ShotProfileEvent
 from espresso_rl.domain.models import Recommendation, ShotRecord
+from espresso_rl.domain.optimization import OPTIMIZER_MODE_CPBO
 from espresso_rl.ports.runtime import AutoTuningRuntimePublisher
 
 logger = logging.getLogger(__name__)
 
 OutcomeObserver = Callable[[ShotRecord, Recommendation | None], None]
+PostShotRecommendation = Callable[[ShotRecord], Recommendation | None]
 
 
 class AutoTuningRuntimeCoordinator:
@@ -21,10 +23,12 @@ class AutoTuningRuntimeCoordinator:
         service: EspressoRLService,
         publisher: AutoTuningRuntimePublisher,
         outcome_observer: OutcomeObserver | None = None,
+        post_shot_recommendation: PostShotRecommendation | None = None,
     ) -> None:
         self._service = service
         self._publisher = publisher
         self._outcome_observer = outcome_observer
+        self._post_shot_recommendation = post_shot_recommendation
 
     def handle_shot(self, event: ShotProfileEvent) -> IngestResult:
         result = self._service.ingest_shot_profile(event)
@@ -37,6 +41,8 @@ class AutoTuningRuntimeCoordinator:
             return result
 
         recommendation = result.recommendation
+        if recommendation is None and self._post_shot_recommendation is not None:
+            recommendation = self._post_shot_recommendation(result.shot)
         if recommendation is None:
             logger.info(
                 "Shot %s stored type=%s local_optimization=%s; waiting for feedback before recommendation",
@@ -75,6 +81,12 @@ class AutoTuningRuntimeCoordinator:
         result = self._service.record_feedback(event)
         shot = result.shot
         recommendation = result.recommendation
+        if (
+            recommendation is None
+            and result.optimizer_handoff_mode == OPTIMIZER_MODE_CPBO
+            and self._post_shot_recommendation is not None
+        ):
+            recommendation = self._post_shot_recommendation(shot)
         logger.info(
             "Feedback for shot %s stored rating=%s reward=%.3f confidence=%.3f",
             shot.shot_id,

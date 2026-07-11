@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
+from espresso_rl.optimizers.cpbo_config import (
+    CPBOConfig,
+    application_cpbo_config,
+    cpbo_config_from_dict,
+)
 
 _OPTIONS_PATH = Path("/data/options.json")
 _DATA_DIR = Path("/data/espresso_rl")
@@ -42,6 +47,7 @@ class Config:
     # Reward weighting: r = alpha*human + (1-alpha)*profile_score
     alpha: float = 0.5
     optimizer_mode: str = DEFAULT_OPTIMIZER_MODE
+    cpbo: CPBOConfig = field(default_factory=application_cpbo_config)
     optimizer_model_artifact_path: str = ""
     optimizer_model_artifact_sha256: str = ""
     optimizer_model_manifest_path: str = ""
@@ -154,6 +160,7 @@ class Config:
                     os.getenv("ESPRESSORL_OPTIMIZER_MODE", DEFAULT_OPTIMIZER_MODE),
                 )
             ),
+            cpbo=cpbo_config_from_dict(opts.get("cpbo")),
             optimizer_model_artifact_path=_model_artifact_path(opts),
             optimizer_model_artifact_sha256=_model_artifact_sha256(opts),
             optimizer_model_manifest_path=_model_manifest_path(opts),

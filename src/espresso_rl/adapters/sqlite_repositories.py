@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +28,30 @@ from espresso_rl.domain.models import (
 from espresso_rl.domain.shadow_evaluation import DreamerShadowEvaluation, ShadowEvaluationStatus
 from espresso_rl.domain.shadow_contract import SHADOW_INFERENCE_CONTRACT_LEGACY_V1
 from espresso_rl.domain.shadow_quality import DreamerShadowQualityReport
+from espresso_rl.domain.cpbo import (
+    OptimizationRun,
+    OptimizationRunContext,
+    OptimizerState,
+    PhysicalShotStatus,
+    PreferenceComparison,
+    PreferenceShot,
+    RecipePoint,
+    Suggestion,
+)
+from espresso_rl.adapters.cpbo_serialization import (
+    comparison_from_json,
+    comparison_to_json,
+    recipe_from_json,
+    recipe_to_json,
+    run_from_json,
+    run_to_json,
+    shot_from_json,
+    shot_to_json,
+    state_from_json,
+    state_to_json,
+    suggestion_from_json,
+    suggestion_to_json,
+)
 
 
 class SQLiteStore:
@@ -168,6 +194,10 @@ class SQLiteStore:
                 used_at INTEGER,
                 superseded_at INTEGER,
                 source_shot_id TEXT,
+                optimization_run_id TEXT,
+                comparison_anchor_shot_id TEXT,
+                comparison_mode TEXT,
+                preference_feedback_required INTEGER NOT NULL DEFAULT 0,
                 apply_status TEXT NOT NULL DEFAULT 'unknown',
                 apply_acknowledged_at INTEGER,
                 applied_fields_json TEXT NOT NULL DEFAULT '{}',
@@ -281,6 +311,14 @@ class SQLiteStore:
         self._ensure_column("recommendations", "current_absolute_step", "REAL")
         self._ensure_column("recommendations", "absolute_reference_step", "REAL")
         self._ensure_column("recommendations", "projected_absolute_step", "REAL")
+        self._ensure_column("recommendations", "optimization_run_id", "TEXT")
+        self._ensure_column("recommendations", "comparison_anchor_shot_id", "TEXT")
+        self._ensure_column("recommendations", "comparison_mode", "TEXT")
+        self._ensure_column(
+            "recommendations",
+            "preference_feedback_required",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         self._ensure_column("shots", "grinder_context_id", "TEXT")
         self._ensure_column("shots", "bean_context_name", "TEXT")
         self._ensure_column("shots", "grinder_calibration_mode", "TEXT NOT NULL DEFAULT 'relative_calibrated'")
@@ -352,6 +390,66 @@ class SQLiteStore:
             ON upload_queue (local_record_type, local_record_id)
             """
         )
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS cpbo_runs (
+                run_id TEXT PRIMARY KEY,
+                context_fingerprint TEXT NOT NULL,
+                install_id TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_cpbo_runs_active_context
+                ON cpbo_runs (context_fingerprint)
+                WHERE active = 1;
+            CREATE TABLE IF NOT EXISTS cpbo_recipes (
+                recipe_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cpbo_recipes_run
+                ON cpbo_recipes (run_id, created_at, recipe_id);
+            CREATE TABLE IF NOT EXISTS cpbo_shots (
+                shot_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                recipe_id TEXT NOT NULL,
+                sequence_number INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                UNIQUE (run_id, sequence_number)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cpbo_shots_run_sequence
+                ON cpbo_shots (run_id, sequence_number);
+            CREATE TABLE IF NOT EXISTS cpbo_comparisons (
+                comparison_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                new_shot_id TEXT NOT NULL UNIQUE,
+                anchor_shot_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cpbo_comparisons_run_created
+                ON cpbo_comparisons (run_id, created_at, comparison_id);
+            CREATE TABLE IF NOT EXISTS cpbo_states (
+                run_id TEXT PRIMARY KEY,
+                updated_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS cpbo_suggestions (
+                suggestion_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                recipe_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cpbo_suggestions_pending
+                ON cpbo_suggestions (run_id, status, created_at DESC);
+            """
+        )
         self.conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -387,6 +485,340 @@ def _profile_scope_clause(
         params.append(raw_profile_hash)
         return f"raw_profile_hash={placeholder}"
     return "1=1"
+
+
+class SQLitePreferentialOptimizationRepository:
+    def __init__(self, store: SQLiteStore) -> None:
+        self._store = store
+        self._lock = threading.RLock()
+
+    def find_active_run(self, context: OptimizationRunContext) -> OptimizationRun | None:
+        row = self._store.conn.execute(
+            "SELECT payload_json FROM cpbo_runs WHERE context_fingerprint=? AND active=1",
+            (context.fingerprint,),
+        ).fetchone()
+        return run_from_json(row["payload_json"]) if row else None
+
+    def get_run(self, run_id: str) -> OptimizationRun | None:
+        row = self._store.conn.execute(
+            "SELECT payload_json FROM cpbo_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        return run_from_json(row["payload_json"]) if row else None
+
+    def create_run(
+        self,
+        run: OptimizationRun,
+        baseline_recipe: RecipePoint,
+        state: OptimizerState,
+    ) -> None:
+        if baseline_recipe.optimization_run_id != run.run_id or state.optimization_run_id != run.run_id:
+            raise ValueError("run, baseline recipe, and state identifiers disagree")
+        with self._lock, self._store.conn:
+            self._store.conn.execute(
+                """
+                INSERT INTO cpbo_runs (
+                    run_id, context_fingerprint, install_id, machine_id, active, created_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.run_id,
+                    run.context.fingerprint,
+                    run.context.install_id,
+                    run.context.machine_id,
+                    int(run.active),
+                    run.created_at,
+                    run_to_json(run),
+                ),
+            )
+            self._insert_recipe(baseline_recipe)
+            self._upsert_state(state)
+
+    def deactivate_run(self, run_id: str) -> None:
+        with self._lock, self._store.conn:
+            row = self._store.conn.execute(
+                "SELECT payload_json FROM cpbo_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("cannot deactivate an unknown CPBO run")
+            run = run_from_json(row["payload_json"])
+            if not run.active:
+                return
+            inactive = replace(run, active=False)
+            cursor = self._store.conn.execute(
+                "UPDATE cpbo_runs SET active=0, payload_json=? WHERE run_id=? AND active=1",
+                (run_to_json(inactive), run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("CPBO run could not be deactivated")
+
+    def get_recipe(self, recipe_id: str) -> RecipePoint | None:
+        row = self._store.conn.execute(
+            "SELECT payload_json FROM cpbo_recipes WHERE recipe_id=?",
+            (recipe_id,),
+        ).fetchone()
+        return recipe_from_json(row["payload_json"]) if row else None
+
+    def list_recipes(self, run_id: str) -> list[RecipePoint]:
+        rows = self._store.conn.execute(
+            "SELECT payload_json FROM cpbo_recipes WHERE run_id=? ORDER BY created_at, recipe_id",
+            (run_id,),
+        ).fetchall()
+        return [recipe_from_json(row["payload_json"]) for row in rows]
+
+    def list_shots(self, run_id: str) -> list[PreferenceShot]:
+        rows = self._store.conn.execute(
+            "SELECT payload_json FROM cpbo_shots WHERE run_id=? ORDER BY sequence_number",
+            (run_id,),
+        ).fetchall()
+        return [shot_from_json(row["payload_json"]) for row in rows]
+
+    def get_shot(self, shot_id: str) -> PreferenceShot | None:
+        row = self._store.conn.execute(
+            "SELECT payload_json FROM cpbo_shots WHERE shot_id=?",
+            (shot_id,),
+        ).fetchone()
+        return shot_from_json(row["payload_json"]) if row else None
+
+    def list_comparisons(self, run_id: str) -> list[PreferenceComparison]:
+        rows = self._store.conn.execute(
+            """
+            SELECT payload_json FROM cpbo_comparisons
+            WHERE run_id=? ORDER BY created_at, comparison_id
+            """,
+            (run_id,),
+        ).fetchall()
+        return [comparison_from_json(row["payload_json"]) for row in rows]
+
+    def get_state(self, run_id: str) -> OptimizerState | None:
+        row = self._store.conn.execute(
+            "SELECT payload_json FROM cpbo_states WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        return state_from_json(row["payload_json"]) if row else None
+
+    def get_pending_suggestion(self, run_id: str) -> Suggestion | None:
+        row = self._store.conn.execute(
+            """
+            SELECT payload_json FROM cpbo_suggestions
+            WHERE run_id=? AND status IN ('pending', 'awaiting_preference')
+            ORDER BY created_at DESC, suggestion_id DESC LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        return suggestion_from_json(row["payload_json"]) if row else None
+
+    def save_suggestion(
+        self,
+        recipe: RecipePoint,
+        suggestion: Suggestion,
+        state: OptimizerState,
+    ) -> None:
+        if not (
+            recipe.optimization_run_id
+            == suggestion.optimization_run_id
+            == state.optimization_run_id
+        ):
+            raise ValueError("suggestion transaction spans multiple runs")
+        if state.pending_recipe_id != recipe.recipe_id or state.pending_anchor_shot_id != suggestion.anchor_shot_id:
+            raise ValueError("suggestion state does not identify the saved suggestion")
+        with self._lock, self._store.conn:
+            unresolved = self._store.conn.execute(
+                """
+                SELECT COUNT(*) AS count FROM cpbo_suggestions
+                WHERE run_id=? AND status IN ('pending', 'awaiting_preference')
+                """,
+                (state.optimization_run_id,),
+            ).fetchone()["count"]
+            if unresolved:
+                raise ValueError("run already has an unresolved suggestion")
+            self._insert_recipe(recipe)
+            self._store.conn.execute(
+                """
+                INSERT INTO cpbo_suggestions (
+                    suggestion_id, run_id, recipe_id, status, created_at, payload_json
+                ) VALUES (?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    suggestion.suggestion_id,
+                    suggestion.optimization_run_id,
+                    recipe.recipe_id,
+                    suggestion.created_at,
+                    suggestion_to_json(suggestion),
+                ),
+            )
+            self._upsert_state(state)
+
+    def record_shot(
+        self,
+        recipe: RecipePoint,
+        shot: PreferenceShot,
+        state: OptimizerState,
+    ) -> None:
+        if shot.optimization_run_id != state.optimization_run_id:
+            raise ValueError("shot and optimizer state belong to different runs")
+        if recipe.recipe_id != shot.recipe_id or recipe.optimization_run_id != shot.optimization_run_id:
+            raise ValueError("physical shot and recipe identifiers disagree")
+        with self._lock, self._store.conn:
+            self._insert_recipe(recipe)
+            self._store.conn.execute(
+                """
+                INSERT INTO cpbo_shots (
+                    shot_id, run_id, recipe_id, sequence_number, status, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    shot.shot_id,
+                    shot.optimization_run_id,
+                    shot.recipe_id,
+                    shot.sequence_number,
+                    shot.status.value,
+                    shot_to_json(shot),
+                ),
+            )
+            pending = self._store.conn.execute(
+                """
+                SELECT suggestion_id FROM cpbo_suggestions
+                WHERE run_id=? AND status='pending'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (shot.optimization_run_id,),
+            ).fetchone()
+            if pending is not None:
+                suggestion_status = (
+                    "awaiting_preference"
+                    if shot.status == PhysicalShotStatus.VALID
+                    else "invalid_shot"
+                )
+                cursor = self._store.conn.execute(
+                    """
+                    UPDATE cpbo_suggestions SET status=?
+                    WHERE suggestion_id=(
+                        SELECT suggestion_id FROM cpbo_suggestions
+                        WHERE run_id=? AND status='pending'
+                        ORDER BY created_at DESC LIMIT 1
+                    )
+                    """,
+                    (suggestion_status, shot.optimization_run_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("physical shot could not resolve its pending suggestion")
+            elif state.pending_shot_id is not None:
+                raise ValueError("optimizer state expects a pending suggestion that is missing")
+            self._upsert_state(state)
+
+    def record_comparison(
+        self,
+        comparison: PreferenceComparison,
+        state: OptimizerState,
+    ) -> None:
+        if comparison.optimization_run_id != state.optimization_run_id:
+            raise ValueError("comparison and optimizer state belong to different runs")
+        with self._lock, self._store.conn:
+            self._store.conn.execute(
+                """
+                INSERT INTO cpbo_comparisons (
+                    comparison_id, run_id, new_shot_id, anchor_shot_id, created_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    comparison.comparison_id,
+                    comparison.optimization_run_id,
+                    comparison.new_shot_id,
+                    comparison.anchor_shot_id,
+                    comparison.created_at,
+                    comparison_to_json(comparison),
+                ),
+            )
+            new_shot = self._store.conn.execute(
+                "SELECT recipe_id FROM cpbo_shots WHERE shot_id=?",
+                (comparison.new_shot_id,),
+            ).fetchone()
+            if new_shot is None:
+                raise ValueError("comparison new shot is missing")
+            cursor = self._store.conn.execute(
+                """
+                UPDATE cpbo_suggestions SET status='resolved'
+                WHERE suggestion_id=(
+                    SELECT suggestion_id FROM cpbo_suggestions
+                    WHERE run_id=? AND status='awaiting_preference'
+                    ORDER BY created_at DESC LIMIT 1
+                )
+                """,
+                (comparison.optimization_run_id,),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("comparison has no awaiting suggestion")
+            self._upsert_state(state)
+
+    def reset_owner(self, install_id: str, machine_id: str) -> dict[str, int]:
+        with self._lock, self._store.conn:
+            run_rows = self._store.conn.execute(
+                "SELECT run_id FROM cpbo_runs WHERE install_id=? AND machine_id=?",
+                (install_id, machine_id),
+            ).fetchall()
+            run_ids = [row["run_id"] for row in run_rows]
+            counts = {name: 0 for name in ("suggestions", "comparisons", "shots", "recipes", "states", "runs")}
+            for run_id in run_ids:
+                for table, key in (
+                    ("cpbo_suggestions", "suggestions"),
+                    ("cpbo_comparisons", "comparisons"),
+                    ("cpbo_shots", "shots"),
+                    ("cpbo_recipes", "recipes"),
+                    ("cpbo_states", "states"),
+                ):
+                    cursor = self._store.conn.execute(f"DELETE FROM {table} WHERE run_id=?", (run_id,))
+                    counts[key] += cursor.rowcount
+            cursor = self._store.conn.execute(
+                "DELETE FROM cpbo_runs WHERE install_id=? AND machine_id=?",
+                (install_id, machine_id),
+            )
+            counts["runs"] = cursor.rowcount
+            return counts
+
+    def _insert_recipe(self, recipe: RecipePoint) -> None:
+        encoded = recipe_to_json(recipe)
+        existing = self._store.conn.execute(
+            "SELECT payload_json FROM cpbo_recipes WHERE recipe_id=?",
+            (recipe.recipe_id,),
+        ).fetchone()
+        if existing is not None:
+            stored = recipe_from_json(existing["payload_json"])
+            if not _same_cpbo_recipe_values(stored, recipe):
+                raise ValueError("recipe identifier collision has inconsistent values")
+            return
+        self._store.conn.execute(
+            """
+            INSERT INTO cpbo_recipes (recipe_id, run_id, created_at, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (recipe.recipe_id, recipe.optimization_run_id, recipe.created_at, encoded),
+        )
+
+    def _upsert_state(self, state: OptimizerState) -> None:
+        self._store.conn.execute(
+            """
+            INSERT INTO cpbo_states (run_id, updated_at, payload_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                updated_at=excluded.updated_at,
+                payload_json=excluded.payload_json
+            """,
+            (state.optimization_run_id, state.updated_at, state_to_json(state)),
+        )
+
+
+def _same_cpbo_recipe_values(left: RecipePoint, right: RecipePoint) -> bool:
+    return (
+        left.recipe_id == right.recipe_id
+        and left.optimization_run_id == right.optimization_run_id
+        and left.grind_size == right.grind_size
+        and left.dose_g == right.dose_g
+        and left.target_output_g == right.target_output_g
+        and left.brew_ratio == right.brew_ratio
+        and left.normalized_x == right.normalized_x
+    )
 
 
 class SQLiteShotRepository:
@@ -830,7 +1262,9 @@ class SQLiteRecommendationRepository:
                 grind_delta_steps_from_current, grind_delta_um_from_current, projected_relative_step_from_reference, projected_relative_grind_um_from_reference, next_dose_g,
                 target_yield_g, target_ratio, mode, confidence, reason, status,
                 shown_count, accepted_at, ignored_at, edited_at, used_at,
-                superseded_at, source_shot_id, apply_status,
+                superseded_at, source_shot_id, optimization_run_id,
+                comparison_anchor_shot_id, comparison_mode,
+                preference_feedback_required, apply_status,
                 apply_acknowledged_at, applied_fields_json, manual_fields_json,
                 apply_error, grinder_calibration_mode, grinder_step_direction,
                 grinder_adjustment_mode, grinder_reference_label, current_absolute_step,
@@ -842,7 +1276,9 @@ class SQLiteRecommendationRepository:
                 :grind_delta_steps_from_current, :grind_delta_um_from_current, :projected_relative_step_from_reference, :projected_relative_grind_um_from_reference, :next_dose_g,
                 :target_yield_g, :target_ratio, :mode, :confidence, :reason, :status,
                 :shown_count, :accepted_at, :ignored_at, :edited_at, :used_at,
-                :superseded_at, :source_shot_id, :apply_status,
+                :superseded_at, :source_shot_id, :optimization_run_id,
+                :comparison_anchor_shot_id, :comparison_mode,
+                :preference_feedback_required, :apply_status,
                 :apply_acknowledged_at, :applied_fields_json, :manual_fields_json,
                 :apply_error, :grinder_calibration_mode, :grinder_step_direction,
                 :grinder_adjustment_mode, :grinder_reference_label, :current_absolute_step,
@@ -1683,6 +2119,10 @@ def _recommendation_to_row(recommendation: Recommendation) -> dict:
         "used_at": recommendation.used_at,
         "superseded_at": recommendation.superseded_at,
         "source_shot_id": recommendation.source_shot_id,
+        "optimization_run_id": recommendation.optimization_run_id,
+        "comparison_anchor_shot_id": recommendation.comparison_anchor_shot_id,
+        "comparison_mode": recommendation.comparison_mode,
+        "preference_feedback_required": recommendation.preference_feedback_required,
         "apply_status": recommendation.apply_status.value,
         "apply_acknowledged_at": recommendation.apply_acknowledged_at,
         "applied_fields_json": json.dumps(recommendation.applied_fields),
@@ -1728,6 +2168,10 @@ def _row_to_recommendation(row: sqlite3.Row) -> Recommendation:
         used_at=row["used_at"],
         superseded_at=row["superseded_at"],
         source_shot_id=row["source_shot_id"],
+        optimization_run_id=row["optimization_run_id"],
+        comparison_anchor_shot_id=row["comparison_anchor_shot_id"],
+        comparison_mode=row["comparison_mode"],
+        preference_feedback_required=bool(row["preference_feedback_required"]),
         apply_status=RecommendationApplyStatus(row["apply_status"]),
         apply_acknowledged_at=row["apply_acknowledged_at"],
         applied_fields=json.loads(row["applied_fields_json"]),

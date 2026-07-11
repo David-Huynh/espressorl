@@ -204,7 +204,7 @@ class DreamerShadowEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(evaluation.status, ShadowEvaluationStatus.PENDING_OUTCOME)
         self.assertEqual(evaluation.dreamer_proposal.source, "dreamer_v3")
-        self.assertEqual(evaluation.bo_proposal.source, "bayesian_optimization")
+        self.assertEqual(evaluation.bo_proposal.source, "cpbo")
         self.assertAlmostEqual(
             evaluation.dreamer_proposal.projected_relative_step_from_reference,
             row["action"]["relative_grind_steps_from_reference"]

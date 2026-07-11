@@ -12,9 +12,11 @@ Gaggimate -> MQTT broker -> EspressoRL -> MQTT broker -> Gaggimate
                          -> optional Supabase upload
 ```
 
-The default active optimizer is conservative Bayesian optimization. DreamerV3
-support is present behind model and safety gates, but BO remains the available
-fallback path unless a verified release-ready Dreamer model is configured.
+The default optimizer is Consecutive Preferential Bayesian Optimization
+(CPBO). It asks whether the new shot, its comparison anchor, or neither tasted
+better; it does not turn numeric ratings into optimizer observations. Legacy
+numeric BO has been removed. Dreamer shadow mode and unavailable active models
+use the stateful CPBO workflow for recipe recommendations.
 
 ## Idea / Purpose
 
@@ -72,9 +74,13 @@ Set at least these fields in `data/options.json`:
   "machine_id": "gaggimate:YOUR_GAGGIMATE_TOPIC_ID",
   "storage_backend": "postgres",
   "postgres_dsn": "postgresql://espresso_rl:espresso_rl@postgres:5432/espresso_rl",
-  "optimizer_mode": "bayesian_optimization"
+  "optimizer_mode": "cpbo"
 }
 ```
+
+Valid `optimizer_mode` values are `cpbo`, `dreamer_v3_shadow`, and
+`dreamer_v3`. Persisted `bayesian_optimization` settings migrate to `cpbo`;
+the removed implementation is not selectable.
 
 Start EspressoRL and Postgres:
 
@@ -119,6 +125,7 @@ Gaggimate should publish:
 ```text
 gaggimate/{topic_id}/shot/profile
 gaggimate/{topic_id}/machine/state
+gaggimate/{topic_id}/rl/preference
 gaggimate/{topic_id}/rl/rating
 gaggimate/{topic_id}/rl/shot/correction
 gaggimate/{topic_id}/rl/recommendation/decision
@@ -134,16 +141,15 @@ gaggimate/{topic_id}/rl/dreamer/live_target
 gaggimate/{topic_id}/rl/dreamer/fail_safe
 ```
 
-Typical recommendation loop:
+Default CPBO loop:
 
 ```text
 1. Gaggimate publishes a completed shot profile.
-2. EspressoRL stores the shot and waits for rating or skip feedback.
-3. Gaggimate sends rating/taste feedback.
-4. EspressoRL recomputes reward and generates a bounded recommendation.
-5. EspressoRL publishes the recommendation to Gaggimate.
-6. Gaggimate records accept/ignore/apply acknowledgement.
-7. The next actual shot determines whether the recommendation was followed.
+2. The first valid shot establishes the baseline without a comparison.
+3. EspressoRL publishes one quantized candidate recipe and its anchor shot.
+4. After a valid candidate shot, Gaggimate asks new better, anchor better, or tie.
+5. EspressoRL stores the oriented preference and publishes the next candidate.
+6. Failed or aborted shots never become ties or preference observations.
 ```
 
 Apply acknowledgement is not treated as proof that a recommendation was
@@ -157,6 +163,8 @@ machine_id
 bean_context_id
 grinder_context_id
 profile_id when available
+raw_profile_hash when available
+basket, water, and user context when available
 ```
 
 Use separate grinder contexts for different grinders. Bean/grinder/profile
@@ -182,6 +190,11 @@ More detail:
   dashboard, catalogs, and queue cleanup.
 - [docs/model-artifacts.md](docs/model-artifacts.md): training exports,
   model manifests, release bundles, and Dreamer runtime gates.
+- [docs/cpbo.md](docs/cpbo.md): preference likelihood, CPBO-MES, trust region,
+  persistence, configuration, and operational API.
+
+An intentionally non-selectable optimizer-port example lives at
+`examples/custom_optimizer.py`. It is development guidance, not a runtime mode.
 
 ## Development
 

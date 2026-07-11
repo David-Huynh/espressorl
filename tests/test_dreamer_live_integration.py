@@ -14,9 +14,13 @@ from espresso_rl.application.services import EspressoRLService
 from espresso_rl.config import Config
 from espresso_rl.domain.dreamer_control import DreamerControlSpec
 from espresso_rl.domain.dreamer_telemetry import DreamerLiveEpisodeContext
-from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_ACTIVE
+from espresso_rl.domain.optimization import (
+    DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_CPBO,
+    OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+)
 from espresso_rl.main import build_status_payload
-from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
+from tests.optimizer_stub import DeterministicOptimizer
 from espresso_rl.optimizers.runtime import RuntimeOptimizer
 from tests.test_dreamer_live_inference import _inference, _select_live_actions
 
@@ -248,7 +252,7 @@ class DreamerLiveIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(action["pressure_target_bar"], 3.5)
         self.assertNotIn("flow_target_ml_s", action)
 
-    def test_active_dreamer_request_without_release_ready_model_reports_bo_fallback_status(self) -> None:
+    def test_active_dreamer_request_without_release_ready_model_reports_cpbo_fallback_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             runtime_optimizer = RuntimeOptimizer(optimizer_mode=OPTIMIZER_MODE_DREAMER_V3_ACTIVE)
@@ -280,7 +284,10 @@ class DreamerLiveIntegrationTests(unittest.TestCase):
 
         self.assertEqual(status["optimizer_profile_id"], "dreamer_auto")
         self.assertEqual(status["optimizer_configured_mode"], OPTIMIZER_MODE_DREAMER_V3_ACTIVE)
-        self.assertEqual(status["optimizer_effective_mode"], DEFAULT_OPTIMIZER_MODE)
+        self.assertEqual(
+            status["optimizer_effective_mode"],
+            OPTIMIZER_MODE_CPBO,
+        )
         self.assertFalse(status["optimizer_dreamer_v3_available"])
         self.assertFalse(status["optimizer_dreamer_v3_active_available"])
         self.assertIn(DEFAULT_OPTIMIZER_MODE, status["optimizer_available_modes"])

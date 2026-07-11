@@ -6,10 +6,11 @@ from typing import Sequence
 from .models import Recipe, Recommendation, SafetyBounds, ShotRecord
 from .dreamer_taste import normalize_dreamer_taste_objective
 
-DEFAULT_OPTIMIZER_MODE = "bayesian_optimization"
+OPTIMIZER_MODE_CPBO = "cpbo"
+DEFAULT_OPTIMIZER_MODE = OPTIMIZER_MODE_CPBO
 OPTIMIZER_MODE_DREAMER_V3_ACTIVE = "dreamer_v3"
 OPTIMIZER_MODE_DREAMER_V3_SHADOW = "dreamer_v3_shadow"
-OPTIMIZER_FAMILY_BAYESIAN_OPTIMIZATION = "bayesian_optimization"
+OPTIMIZER_FAMILY_CPBO = "cpbo"
 OPTIMIZER_FAMILY_TRUST_REGION_BO = "trust_region_bo"
 OPTIMIZER_FAMILY_TRUST_REGION_PPO = "trust_region_ppo"
 OPTIMIZER_FAMILY_DREAMER_V3 = "dreamer_v3"
@@ -20,15 +21,19 @@ VALID_OPTIMIZER_MODES = {
 }
 SHOT_LEVEL_OPTIMIZER_FAMILIES = frozenset(
     {
-        OPTIMIZER_FAMILY_BAYESIAN_OPTIMIZATION,
+        OPTIMIZER_FAMILY_CPBO,
         OPTIMIZER_FAMILY_TRUST_REGION_BO,
         OPTIMIZER_FAMILY_TRUST_REGION_PPO,
     }
 )
 ADAPTIVE_PROFILE_CONTROL_OPTIMIZER_FAMILIES = frozenset({OPTIMIZER_FAMILY_DREAMER_V3})
 OPTIMIZER_MODE_ALIASES = {
-    "bo": DEFAULT_OPTIMIZER_MODE,
-    "conservative_bo": DEFAULT_OPTIMIZER_MODE,
+    "preferential_bo": OPTIMIZER_MODE_CPBO,
+    "consecutive_preferential_bo": OPTIMIZER_MODE_CPBO,
+    # Configuration migration only. These values no longer identify a
+    # selectable optimizer and are canonicalized to CPBO on load.
+    "bayesian_optimization": OPTIMIZER_MODE_CPBO,
+    "bo": OPTIMIZER_MODE_CPBO,
     "dreamer": OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     "dreamerv3": OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     "dreamer_v3_active": OPTIMIZER_MODE_DREAMER_V3_ACTIVE,

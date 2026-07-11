@@ -16,20 +16,20 @@ from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
 from espresso_rl.domain.model_manifest import ModelManifestValidation, validate_model_manifest
 from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_CPBO,
     OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
     OptimizationContext,
     normalize_optimizer_mode,
 )
 from espresso_rl.domain.models import Recommendation
-from espresso_rl.optimizers.conservative_bo import ConservativeBOOptimizer
-from espresso_rl.ports.optimizers import Optimizer
+from espresso_rl.ports.optimizers import Optimizer, StatefulOptimizerHandoff
 
 _DREAMER_SHADOW_FALLBACK_REASON = (
-    "DreamerV3 shadow mode is not active inference; Bayesian Optimization is serving recommendations."
+    "DreamerV3 shadow mode does not control recipes; CPBO is serving recommendations."
 )
 _DREAMER_ACTIVE_FALLBACK_REASON = (
-    "DreamerV3 active mode is unavailable; Bayesian Optimization is serving recommendations."
+    "DreamerV3 active mode is unavailable; CPBO is serving recommendations."
 )
 _HASH_CHUNK_BYTES = 1024 * 1024
 _MANIFEST_MAX_BYTES = 256 * 1024
@@ -102,14 +102,14 @@ class RuntimeOptimizerStatus:
     dreamer_v3_available: bool = False
     dreamer_v3_shadow_available: bool = False
     dreamer_v3_active_available: bool = False
-    available_modes: tuple[str, ...] = (DEFAULT_OPTIMIZER_MODE,)
+    available_modes: tuple[str, ...] = (OPTIMIZER_MODE_CPBO,)
     unavailable_modes: dict[str, str] | None = None
     fallback_reason: str | None = None
     dreamer_v3_active_recommendation_count: int = 0
-    dreamer_v3_bo_fallback_count: int = 0
-    dreamer_v3_bo_fallback_reason_counts: dict[str, int] | None = None
+    dreamer_v3_cpbo_fallback_count: int = 0
+    dreamer_v3_cpbo_fallback_reason_counts: dict[str, int] | None = None
     dreamer_v3_last_runtime_event: str | None = None
-    dreamer_v3_last_bo_fallback_reason: str | None = None
+    dreamer_v3_last_cpbo_fallback_reason: str | None = None
     taste_objective: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -153,12 +153,12 @@ class RuntimeOptimizerStatus:
             "unavailable_modes": dict(self.unavailable_modes or {}),
             "fallback_reason": self.fallback_reason,
             "dreamer_v3_active_recommendation_count": self.dreamer_v3_active_recommendation_count,
-            "dreamer_v3_bo_fallback_count": self.dreamer_v3_bo_fallback_count,
-            "dreamer_v3_bo_fallback_reason_counts": dict(
-                self.dreamer_v3_bo_fallback_reason_counts or {}
+            "dreamer_v3_cpbo_fallback_count": self.dreamer_v3_cpbo_fallback_count,
+            "dreamer_v3_cpbo_fallback_reason_counts": dict(
+                self.dreamer_v3_cpbo_fallback_reason_counts or {}
             ),
             "dreamer_v3_last_runtime_event": self.dreamer_v3_last_runtime_event,
-            "dreamer_v3_last_bo_fallback_reason": self.dreamer_v3_last_bo_fallback_reason,
+            "dreamer_v3_last_cpbo_fallback_reason": self.dreamer_v3_last_cpbo_fallback_reason,
             "taste_objective": dict(self.taste_objective or {"mode": "auto"}),
         }
 
@@ -178,14 +178,12 @@ class RuntimeOptimizer:
         checkpoint_unavailable_reason: str | None = None,
         checkpoint_inference_parity_verified: bool = False,
         checkpoint_inference_parity_reason: str | None = None,
-        bo_optimizer: Optimizer | None = None,
         dreamer_optimizer: Optimizer | None = None,
         taste_objective: dict[str, str] | None = None,
     ) -> None:
         if model_artifact_max_bytes <= 0:
             raise ValueError("model_artifact_max_bytes must be positive")
         self._lock = RLock()
-        self._bo_optimizer = bo_optimizer or ConservativeBOOptimizer()
         self._dreamer_optimizer = dreamer_optimizer
         self._model_artifact_max_bytes = model_artifact_max_bytes
         self._verified_checkpoint = verified_checkpoint
@@ -283,7 +281,9 @@ class RuntimeOptimizer:
             or "DreamerV3 active model artifact is not verified."
         )
 
-        modes = [DEFAULT_OPTIMIZER_MODE]
+        modes = [
+            OPTIMIZER_MODE_CPBO,
+        ]
         unavailable_modes: dict[str, str] = {}
         if dreamer_v3_shadow_available:
             modes.append(OPTIMIZER_MODE_DREAMER_V3_SHADOW)
@@ -296,15 +296,18 @@ class RuntimeOptimizer:
         available_modes = tuple(modes)
 
         configured_mode = requested_mode
-        effective_mode = DEFAULT_OPTIMIZER_MODE
+        effective_mode = requested_mode
         fallback_reason = None
         if requested_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE and dreamer_v3_active_available:
             effective_mode = OPTIMIZER_MODE_DREAMER_V3_ACTIVE
         elif requested_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE:
+            effective_mode = OPTIMIZER_MODE_CPBO
             fallback_reason = _DREAMER_ACTIVE_FALLBACK_REASON
         elif requested_mode == OPTIMIZER_MODE_DREAMER_V3_SHADOW and dreamer_v3_shadow_available:
+            effective_mode = OPTIMIZER_MODE_CPBO
             fallback_reason = _DREAMER_SHADOW_FALLBACK_REASON
         elif requested_mode == OPTIMIZER_MODE_DREAMER_V3_SHADOW:
+            effective_mode = OPTIMIZER_MODE_CPBO
             fallback_reason = _DREAMER_SHADOW_FALLBACK_REASON
 
         audit = self._dreamer_runtime_audit
@@ -356,10 +359,10 @@ class RuntimeOptimizer:
             unavailable_modes=unavailable_modes,
             fallback_reason=fallback_reason,
             dreamer_v3_active_recommendation_count=audit.active_recommendation_count,
-            dreamer_v3_bo_fallback_count=audit.bo_fallback_count,
-            dreamer_v3_bo_fallback_reason_counts=audit.fallback_reason_counts_dict(),
+            dreamer_v3_cpbo_fallback_count=audit.cpbo_fallback_count,
+            dreamer_v3_cpbo_fallback_reason_counts=audit.fallback_reason_counts_dict(),
             dreamer_v3_last_runtime_event=audit.last_runtime_event,
-            dreamer_v3_last_bo_fallback_reason=audit.last_bo_fallback_reason,
+            dreamer_v3_last_cpbo_fallback_reason=audit.last_cpbo_fallback_reason,
             taste_objective=resolved_taste_objective,
         )
         with self._lock:
@@ -381,37 +384,54 @@ class RuntimeOptimizer:
             if isinstance(context, OptimizationContext)
             else context
         )
+        if effective_mode == OPTIMIZER_MODE_CPBO:
+            raise RuntimeError(
+                "CPBO is stateful and must be invoked through "
+                "PreferentialOptimizationService, not the scalar optimizer port"
+            )
         if effective_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE and dreamer_optimizer is not None:
             try:
                 recommendation = dreamer_optimizer.recommend(conditioned_context)
-            except ValueError:
-                self._record_dreamer_bo_fallback(DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED)
-                return self._bo_optimizer.recommend(conditioned_context)
+            except ValueError as exc:
+                reason = DREAMER_FALLBACK_REASON_CANDIDATE_REJECTED
+                self._activate_cpbo_fallback(reason)
+                raise StatefulOptimizerHandoff(
+                    OPTIMIZER_MODE_CPBO,
+                    f"DreamerV3 candidate was rejected; CPBO handoff required: {exc}",
+                ) from exc
             self._record_dreamer_active_recommendation()
             return recommendation
         if configured_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE:
-            self._record_dreamer_bo_fallback(DREAMER_FALLBACK_REASON_ACTIVE_UNAVAILABLE)
-        return self._bo_optimizer.recommend(conditioned_context)
+            self._activate_cpbo_fallback(DREAMER_FALLBACK_REASON_ACTIVE_UNAVAILABLE)
+            raise StatefulOptimizerHandoff(
+                OPTIMIZER_MODE_CPBO,
+                "DreamerV3 active inference is unavailable; CPBO handoff required",
+            )
+        raise RuntimeError(f"unsupported stateless optimizer mode: {effective_mode}")
 
     def _record_dreamer_active_recommendation(self) -> None:
         with self._lock:
             self._dreamer_runtime_audit = self._dreamer_runtime_audit.record_active_recommendation()
             self._status = self._status_with_runtime_audit(self._status)
 
-    def _record_dreamer_bo_fallback(self, reason: str) -> None:
+    def _activate_cpbo_fallback(self, reason: str) -> None:
         with self._lock:
-            self._dreamer_runtime_audit = self._dreamer_runtime_audit.record_bo_fallback(reason)
-            self._status = self._status_with_runtime_audit(self._status)
+            self._dreamer_runtime_audit = self._dreamer_runtime_audit.record_cpbo_fallback(reason)
+            self._status = replace(
+                self._status_with_runtime_audit(self._status),
+                effective_mode=OPTIMIZER_MODE_CPBO,
+                fallback_reason=_DREAMER_ACTIVE_FALLBACK_REASON,
+            )
 
     def _status_with_runtime_audit(self, status: RuntimeOptimizerStatus) -> RuntimeOptimizerStatus:
         audit = self._dreamer_runtime_audit
         return replace(
             status,
             dreamer_v3_active_recommendation_count=audit.active_recommendation_count,
-            dreamer_v3_bo_fallback_count=audit.bo_fallback_count,
-            dreamer_v3_bo_fallback_reason_counts=audit.fallback_reason_counts_dict(),
+            dreamer_v3_cpbo_fallback_count=audit.cpbo_fallback_count,
+            dreamer_v3_cpbo_fallback_reason_counts=audit.fallback_reason_counts_dict(),
             dreamer_v3_last_runtime_event=audit.last_runtime_event,
-            dreamer_v3_last_bo_fallback_reason=audit.last_bo_fallback_reason,
+            dreamer_v3_last_cpbo_fallback_reason=audit.last_cpbo_fallback_reason,
         )
 
 

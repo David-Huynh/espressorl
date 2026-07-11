@@ -42,6 +42,8 @@ class RecommendationMode(str, Enum):
     ZERO_IMMEDIATE_BO = "zero_immediate_bo"
     WARM_STARTED_BO = "warm_started_bo"
     LOCAL_BO = "local_bo"
+    CPBO_GLOBAL_PREVIOUS = "cpbo_global_previous"
+    CPBO_BEST_INCUMBENT = "cpbo_best_incumbent"
     DREAMER_CANDIDATE = "dreamer_candidate"
     DREAMER_ACTIVE = "dreamer_active"
     BO_FALLBACK = "bo_fallback"
@@ -205,6 +207,10 @@ class Recommendation:
     used_at: int | None = None
     superseded_at: int | None = None
     source_shot_id: str | None = None
+    optimization_run_id: str | None = None
+    comparison_anchor_shot_id: str | None = None
+    comparison_mode: str | None = None
+    preference_feedback_required: bool = False
     apply_status: RecommendationApplyStatus = RecommendationApplyStatus.UNKNOWN
     apply_acknowledged_at: int | None = None
     applied_fields: dict[str, Any] = field(default_factory=dict)
@@ -232,6 +238,17 @@ class Recommendation:
             raise ValueError("target_yield_g must be positive")
         if self.target_ratio <= 0:
             raise ValueError("target_ratio must be positive")
+        if self.comparison_mode not in {None, "global_previous", "best_incumbent"}:
+            raise ValueError("comparison_mode is invalid")
+        if not isinstance(self.preference_feedback_required, bool):
+            raise ValueError("preference_feedback_required must be boolean")
+        if self.preference_feedback_required:
+            if not self.optimization_run_id:
+                raise ValueError("preference feedback requires optimization_run_id")
+            if not self.comparison_anchor_shot_id:
+                raise ValueError("preference feedback requires comparison_anchor_shot_id")
+            if self.comparison_mode is None:
+                raise ValueError("preference feedback requires comparison_mode")
 
     def active_at(self, timestamp: int) -> bool:
         if self.status in {

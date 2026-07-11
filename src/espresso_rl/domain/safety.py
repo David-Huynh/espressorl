@@ -69,6 +69,20 @@ def validate_recommendation(
         raise ValueError("recommendation ratio outside global bounds")
 
 
+def validate_preferential_recommendation(
+    recommendation: Recommendation,
+    bounds: SafetyBounds,
+) -> None:
+    """Validate CPBO against hard feasibility without imposing a local search rule."""
+
+    if not bounds.dose_min_g <= recommendation.next_dose_g <= bounds.dose_max_g:
+        raise ValueError("recommendation dose outside global bounds")
+    if not bounds.target_yield_min_g <= recommendation.target_yield_g <= bounds.target_yield_max_g:
+        raise ValueError("recommendation yield outside global bounds")
+    if not bounds.target_ratio_min <= recommendation.target_ratio <= bounds.target_ratio_max:
+        raise ValueError("recommendation ratio outside global bounds")
+
+
 def _round_grind_steps(value: float, mode: GrinderAdjustmentMode) -> float:
     if mode == GrinderAdjustmentMode.STEPLESS:
         return round(value, 1)

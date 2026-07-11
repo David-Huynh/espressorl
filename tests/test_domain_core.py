@@ -93,7 +93,7 @@ class DomainCoreTests(unittest.TestCase):
             optimizer_mode="bo",
         )
 
-        self.assertEqual(event.optimizer_mode, "bayesian_optimization")
+        self.assertEqual(event.optimizer_mode, "cpbo")
         self.assertEqual(event.taste_objective, {"mode": "auto"})
 
         custom = OptimizerSettingsEvent(

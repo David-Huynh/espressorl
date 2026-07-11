@@ -12,6 +12,7 @@ from espresso_rl.adapters.dreamer_history import CanonicalDreamerHistoryEncoder
 from espresso_rl.adapters.postgres_repositories import (
     PostgresCommunityWarehouse,
     PostgresLocalDataRepository,
+    PostgresPreferentialOptimizationRepository,
     PostgresRecommendationRepository,
     PostgresShadowEvaluationRepository,
     PostgresShadowQualityReportRepository,
@@ -21,6 +22,7 @@ from espresso_rl.adapters.postgres_repositories import (
 )
 from espresso_rl.adapters.sqlite_repositories import (
     SQLiteLocalDataRepository,
+    SQLitePreferentialOptimizationRepository,
     SQLiteRecommendationRepository,
     SQLiteShadowEvaluationRepository,
     SQLiteShadowQualityReportRepository,
@@ -69,6 +71,7 @@ from espresso_rl.application.community_credentials import CommunityCredentialSer
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.community_priors import CommunityPriorGenerationService
 from espresso_rl.application.community_validation import CommunityValidationService
+from espresso_rl.application.cpbo_runtime import CPBORuntimeBridge, strict_context_from_shot
 from espresso_rl.application.local_data import LocalDataService
 from espresso_rl.application.training_export import TrainingDatasetExportService
 from espresso_rl.application.training_export import local_training_transition_from_shot
@@ -78,6 +81,9 @@ from espresso_rl.application.prior_providers import (
     LocalHistoryPriorProvider,
 )
 from espresso_rl.application.runtime_coordinator import AutoTuningRuntimeCoordinator
+from espresso_rl.application.preference_optimization import (
+    ConsecutivePreferenceOptimizationService,
+)
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
@@ -91,23 +97,35 @@ from espresso_rl.domain.events import (
     LocalResetEvent,
     MachineStateEvent,
     OptimizerSettingsEvent,
+    PreferenceFeedbackEvent,
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotCorrectionEvent,
     UploadQueueMaintenanceEvent,
 )
-from espresso_rl.domain.models import Recommendation, SafetyBounds, UploadQueueStatus
+from espresso_rl.domain.cpbo import RecipeParameter, RecipeSpace
+from espresso_rl.domain.models import (
+    GrinderAdjustmentMode,
+    Recipe,
+    Recommendation,
+    SafetyBounds,
+    UploadQueueStatus,
+)
 from espresso_rl.domain.model_checkpoint import VerifiedDreamerCheckpoint
 from espresso_rl.domain.optimization import (
     DEFAULT_OPTIMIZER_MODE,
+    OPTIMIZER_MODE_CPBO,
     OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     OPTIMIZER_MODE_DREAMER_V3_SHADOW,
 )
 from espresso_rl.dreamer.dataset import DREAMER_CONTEXT_WINDOW_SIZE
 from espresso_rl.dreamer.live_inference import CheckpointDreamerLiveInference
 from espresso_rl.optimizers.runtime import RuntimeOptimizer, verify_model_artifact, verify_model_manifest_file
+from espresso_rl.optimizers.cpbo import ConsecutivePreferentialBayesianOptimizer
+from espresso_rl.optimizers.cpbo_trace import TRACE_FEATURE_NAMES, extract_trace_features
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.repositories import LocalDataRepository, RecommendationRepository, ShotRepository, UploadQueueRepository
+from espresso_rl.ports.preference_optimization import PreferentialOptimizationRepository
 from espresso_rl.ports.shadow_evaluations import ShadowEvaluationRepository
 from espresso_rl.ports.shadow_quality_reports import ShadowQualityReportRepository
 
@@ -133,7 +151,7 @@ def main() -> None:
     )
     if config.training_mode:
         logger.warning(
-            "DreamerV3 training is not wired into the active path yet; BO remains the safe recommendation path."
+            "DreamerV3 training is not wired into the active path yet; its recipe fallback is CPBO."
         )
 
     (
@@ -143,7 +161,9 @@ def main() -> None:
         local_data_repo,
         shadow_evaluation_repo,
         shadow_quality_report_repo,
+        preference_optimization_repo,
     ) = open_repositories(config)
+    safety_bounds = SafetyBounds()
     verified_checkpoint, checkpoint_unavailable_reason = load_configured_dreamer_checkpoint(config)
     checkpoint_inference_parity_verified = False
     checkpoint_inference_parity_reason = None
@@ -158,7 +178,7 @@ def main() -> None:
     dreamer_recommendation_service = (
         DreamerRecommendationService(
             session=dreamer_shadow_session,
-            safety_bounds=SafetyBounds(),
+            safety_bounds=safety_bounds,
         )
         if dreamer_shadow_session is not None
         else None
@@ -175,11 +195,28 @@ def main() -> None:
         checkpoint_inference_parity_reason=checkpoint_inference_parity_reason,
         dreamer_optimizer=dreamer_recommendation_service,
     )
+    cpbo_optimizer = ConsecutivePreferentialBayesianOptimizer(config.cpbo)
+    cpbo_service = ConsecutivePreferenceOptimizationService(
+        repository=preference_optimization_repo,
+        optimizer=cpbo_optimizer,
+        recipe_space_factory=lambda baseline: build_cpbo_recipe_space(
+            baseline,
+            config=config,
+            safety_bounds=safety_bounds,
+        ),
+        random_seed=config.cpbo.random_seed,
+        configuration_version=config.cpbo.effective_configuration_version,
+        trace_feature_extractor=lambda sequence: (
+            TRACE_FEATURE_NAMES,
+            extract_trace_features(sequence, config.cpbo.trace).values,
+        ),
+        clock=config.now,
+    )
     shadow_evaluation_service = (
         DreamerShadowEvaluationService(
             session=dreamer_shadow_session,
             repository=shadow_evaluation_repo,
-            safety_bounds=SafetyBounds(),
+            safety_bounds=safety_bounds,
             clock=config.now,
         )
         if dreamer_shadow_session is not None and config.optimizer_mode != OPTIMIZER_MODE_DREAMER_V3_ACTIVE
@@ -203,9 +240,20 @@ def main() -> None:
         optimizer=runtime_optimizer,
         upload_queue=upload_queue_for_service(config, upload_queue_repo),
         prior_provider=open_prior_provider(config),
-        safety_bounds=SafetyBounds(),
+        safety_bounds=safety_bounds,
         clock=config.now,
         community_upload_enabled_default=False,
+        stateful_preference_mode=(
+            runtime_optimizer.status().effective_mode == OPTIMIZER_MODE_CPBO
+        ),
+    )
+    cpbo_runtime = CPBORuntimeBridge(
+        optimizer=cpbo_service,
+        shots=shot_repo,
+        recommendation_sink=service.persist_generated_recommendation,
+        context_factory=strict_context_from_shot,
+        comparison_mode=config.cpbo.comparison_mode,
+        safety_bounds=safety_bounds,
     )
     upload_maintenance = UploadQueueMaintenanceService(upload_queue_repo, clock=config.now)
     local_data_service = LocalDataService(
@@ -349,11 +397,55 @@ def main() -> None:
         context_provider=(dreamer_live_context if dreamer_live_inference is not None else None),
         enabled=runtime_optimizer.status().effective_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
     )
+
+    def cpbo_recommendation_after_shot(shot) -> Recommendation | None:
+        if runtime_optimizer.status().effective_mode != OPTIMIZER_MODE_CPBO:
+            return None
+        outcome = cpbo_runtime.handle_shot(shot)
+        if outcome.skipped_reason is not None:
+            logger.warning(
+                "CPBO skipped shot %s reason=%s",
+                shot.shot_id,
+                outcome.skipped_reason,
+            )
+        elif outcome.awaiting_preference:
+            logger.info(
+                "CPBO shot %s stored in run %s; awaiting three-outcome preference",
+                shot.shot_id,
+                outcome.optimization_run_id,
+            )
+        return outcome.recommendation
+
     runtime_coordinator = AutoTuningRuntimeCoordinator(
         service=service,
         publisher=runtime_publisher,
         outcome_observer=record_shadow_evaluation,
+        post_shot_recommendation=cpbo_recommendation_after_shot,
     )
+
+    def on_preference(event: PreferenceFeedbackEvent) -> None:
+        if runtime_optimizer.status().effective_mode != OPTIMIZER_MODE_CPBO:
+            raise ValueError("preference feedback received while CPBO is not active")
+        recommendation = cpbo_runtime.handle_preference(event)
+        logger.info(
+            "CPBO preference stored run=%s new=%s anchor=%s label=%s next=%s",
+            event.optimization_run_id,
+            event.new_shot_id,
+            event.anchor_shot_id,
+            event.label.value,
+            recommendation.recommendation_id,
+        )
+        mqtt_client.publish_recommendation(recommendation)
+        publish_status(
+            recommendation.machine_id,
+            recommendation.bean_context_id,
+            recommendation.grinder_context_id,
+            profile_id=recommendation.profile_id,
+            last_shot_id=event.new_shot_id,
+            last_recommendation_id=recommendation.recommendation_id,
+            last_recommendation_at=recommendation.updated_at,
+            mode=recommendation.mode.value,
+        )
 
     def on_correction(event: ShotCorrectionEvent) -> None:
         shot = service.record_shot_correction(event)
@@ -459,6 +551,9 @@ def main() -> None:
         dreamer_live_telemetry.set_enabled(
             status.effective_mode == OPTIMIZER_MODE_DREAMER_V3_ACTIVE
         )
+        service.set_stateful_preference_mode(
+            status.effective_mode == OPTIMIZER_MODE_CPBO
+        )
         logger.info(
             "Optimizer settings accepted machine=%s configured=%s effective=%s prior_mode=%s rules=%d",
             event.machine_id,
@@ -485,6 +580,8 @@ def main() -> None:
             result.counts,
         )
         if not event.dry_run:
+            cpbo_counts = cpbo_runtime.reset_owner(event.install_id, event.machine_id)
+            logger.warning("CPBO reset counts=%s", cpbo_counts)
             dreamer_live_acknowledgements.reset(event.machine_id)
             mqtt_client.clear_recommendation(event.machine_id)
         publish_status(event.machine_id, None, None)
@@ -526,6 +623,7 @@ def main() -> None:
         config=config,
         on_shot=runtime_coordinator.handle_shot,
         on_feedback=runtime_coordinator.handle_feedback,
+        on_preference=on_preference,
         on_correction=on_correction,
         on_upload_maintenance=on_upload_maintenance,
         on_decision=on_decision,
@@ -899,12 +997,22 @@ def build_status_payload(
     config_optimizer_mode = (
         config.optimizer_mode
         if config.optimizer_mode
-        in {DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_DREAMER_V3_ACTIVE, OPTIMIZER_MODE_DREAMER_V3_SHADOW}
+        in {
+            DEFAULT_OPTIMIZER_MODE,
+            OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+            OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+        }
         else DEFAULT_OPTIMIZER_MODE
     )
+    fallback_effective_optimizer_mode = config_optimizer_mode
+    if config_optimizer_mode in {
+        OPTIMIZER_MODE_DREAMER_V3_ACTIVE,
+        OPTIMIZER_MODE_DREAMER_V3_SHADOW,
+    }:
+        fallback_effective_optimizer_mode = OPTIMIZER_MODE_CPBO
     optimizer_status = optimizer_status or {
         "configured_mode": config_optimizer_mode,
-        "effective_mode": DEFAULT_OPTIMIZER_MODE,
+        "effective_mode": fallback_effective_optimizer_mode,
         "model_artifact_path": model_artifact_status.path,
         "model_artifact_sha256": model_artifact_status.expected_sha256,
         "model_artifact_actual_sha256": model_artifact_status.actual_sha256,
@@ -938,7 +1046,9 @@ def build_status_payload(
         "dreamer_v3_available": config_dreamer_v3_available,
         "dreamer_v3_shadow_available": config_dreamer_v3_shadow_available,
         "dreamer_v3_active_available": config_dreamer_v3_available,
-        "available_modes": [DEFAULT_OPTIMIZER_MODE]
+        "available_modes": [
+            DEFAULT_OPTIMIZER_MODE,
+        ]
         + ([OPTIMIZER_MODE_DREAMER_V3_SHADOW] if config_dreamer_v3_shadow_available else [])
         + ([OPTIMIZER_MODE_DREAMER_V3_ACTIVE] if config_dreamer_v3_available else []),
         "unavailable_modes": {}
@@ -952,13 +1062,16 @@ def build_status_payload(
             or "DreamerV3 active model artifact is not verified.",
         },
         "fallback_reason": None
-        if config_optimizer_mode == DEFAULT_OPTIMIZER_MODE
-        else "Bayesian Optimization is serving recommendations.",
+        if config_optimizer_mode
+        in {
+            DEFAULT_OPTIMIZER_MODE,
+        }
+        else "CPBO is serving recipe recommendations.",
         "dreamer_v3_active_recommendation_count": 0,
-        "dreamer_v3_bo_fallback_count": 0,
-        "dreamer_v3_bo_fallback_reason_counts": {},
+        "dreamer_v3_cpbo_fallback_count": 0,
+        "dreamer_v3_cpbo_fallback_reason_counts": {},
         "dreamer_v3_last_runtime_event": None,
-        "dreamer_v3_last_bo_fallback_reason": None,
+        "dreamer_v3_last_cpbo_fallback_reason": None,
     }
     shadow_summary = {
         "inference_contract_id": None,
@@ -1116,15 +1229,15 @@ def build_status_payload(
         "optimizer_dreamer_v3_active_recommendation_count": int(
             optimizer_status.get("dreamer_v3_active_recommendation_count") or 0
         ),
-        "optimizer_dreamer_v3_bo_fallback_count": int(
-            optimizer_status.get("dreamer_v3_bo_fallback_count") or 0
+        "optimizer_dreamer_v3_cpbo_fallback_count": int(
+            optimizer_status.get("dreamer_v3_cpbo_fallback_count") or 0
         ),
-        "optimizer_dreamer_v3_bo_fallback_reason_counts": (
-            optimizer_status.get("dreamer_v3_bo_fallback_reason_counts") or {}
+        "optimizer_dreamer_v3_cpbo_fallback_reason_counts": (
+            optimizer_status.get("dreamer_v3_cpbo_fallback_reason_counts") or {}
         ),
         "optimizer_dreamer_v3_last_runtime_event": optimizer_status.get("dreamer_v3_last_runtime_event"),
-        "optimizer_dreamer_v3_last_bo_fallback_reason": optimizer_status.get(
-            "dreamer_v3_last_bo_fallback_reason"
+        "optimizer_dreamer_v3_last_cpbo_fallback_reason": optimizer_status.get(
+            "dreamer_v3_last_cpbo_fallback_reason"
         ),
         "dreamer_live_control_ack": _dreamer_live_ack_status_payload(dreamer_live_ack_summary),
         "dreamer_shadow_evaluation": shadow_summary,
@@ -1861,6 +1974,50 @@ def open_prior_provider(config: Config) -> CompositePriorProvider:
     return CompositePriorProvider(providers)
 
 
+def build_cpbo_recipe_space(
+    baseline: Recipe,
+    *,
+    config: Config,
+    safety_bounds: SafetyBounds,
+) -> RecipeSpace:
+    grind_resolution = (
+        config.cpbo.stepless_grind_resolution
+        if baseline.grinder_adjustment_mode == GrinderAdjustmentMode.STEPLESS
+        else config.cpbo.stepped_grind_resolution
+    )
+    grind_radius = config.cpbo.grind_domain_radius_steps
+    return RecipeSpace(
+        grind=RecipeParameter(
+            name="grind_size",
+            physical_min=baseline.relative_grind_steps_from_reference - grind_radius,
+            physical_max=baseline.relative_grind_steps_from_reference + grind_radius,
+            resolution=grind_resolution,
+            unit="grinder_step_from_reference",
+            safety_constraints=("configured_grinder_search_domain",),
+        ),
+        dose=RecipeParameter(
+            name="dose_g",
+            physical_min=safety_bounds.dose_min_g,
+            physical_max=safety_bounds.dose_max_g,
+            resolution=config.cpbo.dose_resolution_g,
+            unit="g",
+            safety_constraints=("basket_dose_limit",),
+        ),
+        target_output=RecipeParameter(
+            name="target_output_g",
+            physical_min=safety_bounds.target_yield_min_g,
+            physical_max=safety_bounds.target_yield_max_g,
+            resolution=config.cpbo.target_output_resolution_g,
+            unit="g",
+            safety_constraints=("machine_output_limit",),
+        ),
+        grinder_step_direction=baseline.grinder_step_direction,
+        brew_ratio_min=safety_bounds.target_ratio_min,
+        brew_ratio_max=safety_bounds.target_ratio_max,
+        version=config.cpbo.effective_configuration_version,
+    )
+
+
 def open_repositories(
     config: Config,
 ) -> tuple[
@@ -1870,6 +2027,7 @@ def open_repositories(
     LocalDataRepository,
     ShadowEvaluationRepository,
     ShadowQualityReportRepository,
+    PreferentialOptimizationRepository,
 ]:
     if config.storage_backend == "postgres":
         logger.info("Using Postgres storage backend")
@@ -1881,6 +2039,7 @@ def open_repositories(
             PostgresLocalDataRepository(store),
             PostgresShadowEvaluationRepository(store),
             PostgresShadowQualityReportRepository(store),
+            PostgresPreferentialOptimizationRepository(store),
         )
 
     logger.warning("Using SQLite storage backend; Postgres is the intended container/admin runtime backend.")
@@ -1892,6 +2051,7 @@ def open_repositories(
         SQLiteLocalDataRepository(store),
         SQLiteShadowEvaluationRepository(store),
         SQLiteShadowQualityReportRepository(store),
+        SQLitePreferentialOptimizationRepository(store),
     )
 
 

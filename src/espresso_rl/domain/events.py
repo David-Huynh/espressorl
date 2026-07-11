@@ -16,6 +16,7 @@ from .models import (
     VALID_TASTE_TAGS,
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
+from .cpbo import PreferenceLabel
 from .dreamer_taste import normalize_dreamer_taste_objective
 from .prior_rules import PriorRule, PriorSelectionMode, parse_prior_rules
 from .taste import normalize_taste_tags
@@ -378,6 +379,42 @@ class ShotFeedbackEvent:
         invalid_tags = set(self.taste_tags) - VALID_TASTE_TAGS
         if invalid_tags:
             raise ValueError(f"invalid taste tags: {sorted(invalid_tags)}")
+
+
+@dataclass(frozen=True)
+class PreferenceFeedbackEvent:
+    optimization_run_id: str
+    new_shot_id: str
+    anchor_shot_id: str
+    label: PreferenceLabel
+    install_id: str
+    machine_id: str
+    timestamp: int
+    source: str = "unknown"
+    schema_version: int = 1
+
+    event_type: str = field(default="preference_feedback", init=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported preference feedback schema_version")
+        for field_name in (
+            "optimization_run_id",
+            "new_shot_id",
+            "anchor_shot_id",
+            "install_id",
+            "machine_id",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip() or len(value) > 256:
+                raise ValueError(f"{field_name} is invalid")
+        if self.new_shot_id == self.anchor_shot_id:
+            raise ValueError("preference feedback requires distinct physical shots")
+        if self.timestamp < 0:
+            raise ValueError("preference feedback timestamp must be nonnegative")
+        if not isinstance(self.source, str) or not self.source.strip() or len(self.source) > 80:
+            raise ValueError("preference feedback source is invalid")
+        object.__setattr__(self, "label", PreferenceLabel(self.label))
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,7 @@ from espresso_rl.domain.dreamer_control import (
     validate_dynamic_action_for_control_spec,
 )
 from espresso_rl.domain.optimization import (
-    OPTIMIZER_FAMILY_BAYESIAN_OPTIMIZATION,
+    OPTIMIZER_FAMILY_CPBO,
     OPTIMIZER_FAMILY_DREAMER_V3,
     OPTIMIZER_FAMILY_TRUST_REGION_BO,
     OPTIMIZER_FAMILY_TRUST_REGION_PPO,
@@ -53,18 +53,18 @@ class DreamerControlContractTests(unittest.TestCase):
     def test_adaptive_profile_control_is_dreamer_only(self) -> None:
         self.assertTrue(optimizer_family_allows_adaptive_profile_control(OPTIMIZER_FAMILY_DREAMER_V3))
         self.assertFalse(
-            optimizer_family_allows_adaptive_profile_control(OPTIMIZER_FAMILY_BAYESIAN_OPTIMIZATION)
+            optimizer_family_allows_adaptive_profile_control(OPTIMIZER_FAMILY_CPBO)
         )
         self.assertFalse(optimizer_family_allows_adaptive_profile_control(OPTIMIZER_FAMILY_TRUST_REGION_BO))
         self.assertFalse(optimizer_family_allows_adaptive_profile_control(OPTIMIZER_FAMILY_TRUST_REGION_PPO))
 
         require_adaptive_profile_control_optimizer(OPTIMIZER_FAMILY_DREAMER_V3)
         with self.assertRaisesRegex(ValueError, "only available for DreamerV3"):
-            require_adaptive_profile_control_optimizer(OPTIMIZER_FAMILY_BAYESIAN_OPTIMIZATION)
+            require_adaptive_profile_control_optimizer(OPTIMIZER_FAMILY_CPBO)
 
         with self.assertRaisesRegex(ValueError, "only available for Dreamer"):
             DreamerControlSpec(
-                optimizer_family=OPTIMIZER_FAMILY_BAYESIAN_OPTIMIZATION,
+                optimizer_family=OPTIMIZER_FAMILY_CPBO,
                 dynamic_control_enabled=True,
                 pressure_control_allowed=True,
             )
