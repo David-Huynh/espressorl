@@ -194,12 +194,16 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 baseline["dose_observed"] = False
                 baseline["dose_target_confirmed"] = True
                 _send(client, transport, "gaggimate/AA_BB/shot/profile", baseline)
+                baseline_ack = json.loads(transport.published[-1][1])
+                self.assertEqual(baseline_ack["outcome"], "accepted")
                 first = recommendations.get_current(
                     "install_1", "gaggimate:AA_BB", "bean_1", clock(),
                     grinder_context_id="grinder_1", profile_id="profile_1",
                 )
                 self.assertIsNotNone(first)
                 _send(client, transport, "gaggimate/AA_BB/shot/profile", baseline)
+                replay_ack = json.loads(transport.published[-1][1])
+                self.assertEqual(replay_ack["outcome"], "already_processed")
                 self.assertEqual(
                     len(cpbo_repository.list_shots(first.optimization_run_id)),  # type: ignore[union-attr]
                     1,

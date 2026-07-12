@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -35,6 +36,9 @@ APPLY_TOPIC = "gaggimate/+/rl/recommendation/apply"
 MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
 OPTIMIZER_SETTINGS_TOPIC = "gaggimate/+/rl/settings"
 LOCAL_RESET_TOPIC = "gaggimate/+/rl/local/reset"
+SHOT_ACK_EVENT_TYPE = "shot_delivery_ack"
+SHOT_ACK_TOPIC_SUFFIX = "rl/shot/ack"
+_MACHINE_TOPIC_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _SHOT_FINISH_SETTLE_SAMPLES = 2
 _SHOT_FINISH_SETTLE_MAX_DELTA_G = 1.0
 _PREFERENCE_FIELDS = frozenset(
@@ -60,7 +64,7 @@ class GaggimateMQTTClient:
     def __init__(
         self,
         config: Config,
-        on_shot: Callable[[ShotProfileEvent], None],
+        on_shot: Callable[[ShotProfileEvent], object | None],
         on_correction: Callable[[ShotCorrectionEvent], None],
         on_upload_maintenance: Callable[[UploadQueueMaintenanceEvent], None],
         on_decision: Callable[[RecommendationDecisionEvent], None],
@@ -203,7 +207,7 @@ class GaggimateMQTTClient:
                 return
             payload = json.loads(payload_text)
             if msg.topic.endswith("/shot/profile"):
-                self._on_shot(self.translate_shot_payload(payload, mac))
+                self._handle_shot_message(payload, mac)
             elif msg.topic.endswith("/rl/preference"):
                 self._on_preference(self.translate_preference_payload(payload, mac))
             elif msg.topic.endswith("/rl/shot/correction"):
@@ -223,9 +227,89 @@ class GaggimateMQTTClient:
         except Exception:
             logger.exception("Error handling message on %s", msg.topic)
 
+    def _handle_shot_message(self, payload: Any, mac: str) -> None:
+        shot_id = _acknowledgeable_shot_id(payload)
+        try:
+            if not isinstance(payload, dict):
+                raise ValueError("shot profile must be an object")
+            event = self.translate_shot_payload(payload, mac)
+            shot_id = event.shot_id
+        except (TypeError, ValueError):
+            if shot_id is not None:
+                self._publish_shot_ack(
+                    mac,
+                    shot_id,
+                    f"gaggimate:{mac}",
+                    outcome="permanent_rejection",
+                    reason="invalid_shot",
+                )
+            logger.warning("Permanently rejected invalid shot delivery %s", shot_id or "without_id")
+            return
+
+        try:
+            outcome, reason = _shot_delivery_outcome(self._on_shot(event))
+        except ValueError:
+            self._publish_shot_ack(
+                mac,
+                shot_id,
+                event.machine_id,
+                outcome="permanent_rejection",
+                reason="invalid_shot",
+            )
+            logger.warning("Permanently rejected shot delivery %s", shot_id)
+            return
+        except Exception:
+            self._publish_shot_ack(
+                mac,
+                shot_id,
+                event.machine_id,
+                outcome="transient_failure",
+                reason="ingest_unavailable",
+            )
+            logger.exception("Transient failure while ingesting shot %s", shot_id)
+            return
+
+        self._publish_shot_ack(
+            mac,
+            shot_id,
+            event.machine_id,
+            outcome=outcome,
+            reason=reason,
+        )
+
+    def _publish_shot_ack(
+        self,
+        mac: str,
+        shot_id: str,
+        machine_id: str,
+        *,
+        outcome: str,
+        reason: str,
+    ) -> None:
+        if not _MACHINE_TOPIC_ID.fullmatch(mac):
+            logger.warning("Refusing to publish shot acknowledgement for invalid machine topic")
+            return
+        retryable = outcome == "transient_failure"
+        payload = {
+            "event_type": SHOT_ACK_EVENT_TYPE,
+            "schema_version": 1,
+            "shot_id": shot_id,
+            "machine_id": machine_id,
+            "outcome": outcome,
+            "retryable": retryable,
+            "reason": reason,
+            "timestamp": int(self._config.now()),
+        }
+        topic = f"gaggimate/{mac}/{SHOT_ACK_TOPIC_SUFFIX}"
+        self._client.publish(topic, json.dumps(payload), qos=1, retain=False)
+        logger.info("Acknowledged shot %s outcome=%s on %s", shot_id, outcome, topic)
+
     def translate_shot_payload(self, payload: dict[str, Any], mac: str) -> ShotProfileEvent:
         install_id = str(payload.get("install_id") or self._config.install_id)
-        machine_id = str(payload.get("machine_id") or f"gaggimate:{mac}")
+        topic_machine_id = f"gaggimate:{mac}"
+        machine_id = str(payload.get("machine_id") or topic_machine_id)
+        if not _same_gaggimate_machine_id(topic_machine_id, machine_id):
+            raise ValueError("shot profile machine_id does not match topic")
         payload = dict(payload)
         shot_time_s = payload.get("shot_time_s")
         time_ms, trimmed_to_shot_time = _trim_profile_payload_to_shot_time(
@@ -719,6 +803,32 @@ def _require_exact_object_fields(
 
 def _same_gaggimate_machine_id(left: str, right: str) -> bool:
     return _machine_topic_id(left).casefold() == _machine_topic_id(right).casefold()
+
+
+def _acknowledgeable_shot_id(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("shot_id") or payload.get("id")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if 0 < len(value) <= 256 else None
+
+
+def _shot_delivery_outcome(result: object | None) -> tuple[str, str]:
+    if result is None:
+        return "accepted", "stored"
+    if getattr(result, "replayed", False) is True:
+        return "already_processed", "already_processed"
+    if getattr(result, "shot", object()) is None:
+        dropped_reason = str(getattr(result, "dropped_reason", "") or "")
+        reason = (
+            "local_optimization_disabled"
+            if dropped_reason == "local_optimization_disabled"
+            else "not_optimizable"
+        )
+        return "permanent_rejection", reason
+    return "accepted", "stored"
 
 
 def _machine_topic_id(machine_id: str) -> str:

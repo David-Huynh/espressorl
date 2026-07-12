@@ -14,7 +14,23 @@ gaggimate/{topic_id}/machine/state
 gaggimate/{topic_id}/rl/preference
 gaggimate/{topic_id}/rl/recommendation
 gaggimate/{topic_id}/rl/status
+gaggimate/{topic_id}/rl/shot/ack
 ```
+
+Shot profiles and acknowledgements use QoS 1. The acknowledgement is an
+adapter protocol emitted only after the canonical application use case returns:
+
+- `accepted`: the physical shot was stored and processing completed.
+- `already_processed`: an exact immutable replay was handled idempotently.
+- `transient_failure`: storage or runtime processing was unavailable; retry.
+- `permanent_rejection`: the payload or application classification is terminal;
+  do not retry.
+
+Every receipt carries the original `shot_id`, topic-bound `machine_id`, a
+bounded reason code, retryability, and timestamp. Shot `machine_id` must match
+the MQTT topic. Exception text and infrastructure details are never published.
+The receipt is non-retained, so a lost receipt causes a safe idempotent replay
+rather than accepting stale broker state.
 
 Corrections may exclude bad puck preparation, utility brews, or unobserved
 recipe controls. Failed and aborted physical shots remain operational records
@@ -62,6 +78,9 @@ Numeric ratings and scalar rewards are rejected. A delayed comparison never
 withholds a useful physical trajectory. Transient failures retry; permanent
 schema or credential failures discard only the upload snapshot and preserve
 local data.
+
+Community upload has its own signed HTTP queue. Local MQTT retries never enqueue
+another community copy; the two delivery lifecycles are independent.
 
 Deploy current Supabase resources with:
 

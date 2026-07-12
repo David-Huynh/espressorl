@@ -84,6 +84,16 @@ gaggimate/{topic_id}/rl/recommendation
 gaggimate/{topic_id}/rl/status
 ```
 
+It also publishes non-retained QoS 1 delivery receipts on:
+
+```text
+gaggimate/{topic_id}/rl/shot/ack
+```
+
+Gaggimate retains the immutable shot locally until EspressoRL responds with
+`accepted` or `already_processed`. Missing or explicitly transient receipts
+retry with backoff; permanent validation failures do not retry.
+
 The first valid shot establishes a baseline. CPBO then proposes exactly one
 quantized recipe and identifies its comparison anchor. After the candidate is
 pulled, the user supplies one of the three preference outcomes and CPBO emits

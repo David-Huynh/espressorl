@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from espresso_rl.adapters.gaggimate_mqtt import (
     APPLY_TOPIC,
@@ -13,6 +14,8 @@ from espresso_rl.adapters.gaggimate_mqtt import (
     OPTIMIZER_SETTINGS_TOPIC,
     PREFERENCE_TOPIC,
     SHOT_TOPIC,
+    SHOT_ACK_EVENT_TYPE,
+    SHOT_ACK_TOPIC_SUFFIX,
     UPLOAD_REQUEUE_TOPIC,
     GaggimateMQTTClient,
 )
@@ -121,6 +124,13 @@ class GaggimateAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dose_target_g"):
             self.client.translate_shot_payload(payload, "AA_BB")
 
+    def test_shot_payload_rejects_machine_identity_mismatch(self) -> None:
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        payload["machine_id"] = "gaggimate:DIFFERENT"
+
+        with self.assertRaisesRegex(ValueError, "machine_id does not match topic"):
+            self.client.translate_shot_payload(payload, "AA_BB")
+
     def test_optimizer_settings_accepts_cpbo_and_rejects_removed_dreamer(self) -> None:
         event = self.client.translate_optimizer_settings_payload(
             {
@@ -192,6 +202,72 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.client.publish_status("gaggimate:AA_BB", {"optimizer_mode": "cpbo_best_incumbent"})
         self.client.clear_recommendation("gaggimate:AA_BB")
         self.assertTrue(all(item[3] for item in mqtt.published))
+
+    def test_shot_delivery_acknowledges_acceptance_and_duplicate_replay(self) -> None:
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        mqtt = FakeMQTT()
+        outcomes = iter(
+            (
+                SimpleNamespace(shot=object(), replayed=False, dropped_reason=None),
+                SimpleNamespace(shot=object(), replayed=True, dropped_reason=None),
+            )
+        )
+        self.client._client = mqtt  # type: ignore[assignment]
+        self.client._on_shot = lambda event: next(outcomes)
+
+        self.client._handle_shot_message(payload, "AA_BB")
+        self.client._handle_shot_message(payload, "AA_BB")
+
+        first = json.loads(mqtt.published[-2][1])
+        second = json.loads(mqtt.published[-1][1])
+        self.assertEqual(mqtt.published[-1][0], f"gaggimate/AA_BB/{SHOT_ACK_TOPIC_SUFFIX}")
+        self.assertEqual((mqtt.published[-1][2], mqtt.published[-1][3]), (1, False))
+        self.assertEqual(first["event_type"], SHOT_ACK_EVENT_TYPE)
+        self.assertEqual(first["outcome"], "accepted")
+        self.assertFalse(first["retryable"])
+        self.assertEqual(second["outcome"], "already_processed")
+        self.assertFalse(second["retryable"])
+
+    def test_shot_delivery_classifies_permanent_and_transient_failures(self) -> None:
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        mqtt = FakeMQTT()
+        self.client._client = mqtt  # type: ignore[assignment]
+
+        self.client._on_shot = lambda event: (_ for _ in ()).throw(ValueError("bad shot"))
+        self.client._handle_shot_message(payload, "AA_BB")
+        permanent = json.loads(mqtt.published[-1][1])
+        self.assertEqual(permanent["outcome"], "permanent_rejection")
+        self.assertEqual(permanent["reason"], "invalid_shot")
+        self.assertFalse(permanent["retryable"])
+
+        self.client._on_shot = lambda event: (_ for _ in ()).throw(RuntimeError("database offline"))
+        self.client._handle_shot_message(payload, "AA_BB")
+        transient = json.loads(mqtt.published[-1][1])
+        self.assertEqual(transient["outcome"], "transient_failure")
+        self.assertEqual(transient["reason"], "ingest_unavailable")
+        self.assertTrue(transient["retryable"])
+        self.assertNotIn("database offline", mqtt.published[-1][1])
+
+        self.client._on_shot = lambda event: (_ for _ in ()).throw(TypeError("runtime bug"))
+        self.client._handle_shot_message(payload, "AA_BB")
+        programming_failure = json.loads(mqtt.published[-1][1])
+        self.assertEqual(programming_failure["outcome"], "transient_failure")
+
+    def test_shot_delivery_dropped_by_application_is_terminal(self) -> None:
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        mqtt = FakeMQTT()
+        self.client._client = mqtt  # type: ignore[assignment]
+        self.client._on_shot = lambda event: SimpleNamespace(
+            shot=None,
+            replayed=False,
+            dropped_reason="local_optimization_disabled",
+        )
+
+        self.client._handle_shot_message(payload, "AA_BB")
+
+        ack = json.loads(mqtt.published[-1][1])
+        self.assertEqual(ack["outcome"], "permanent_rejection")
+        self.assertEqual(ack["reason"], "local_optimization_disabled")
 
 
 def _recommendation() -> Recommendation:
