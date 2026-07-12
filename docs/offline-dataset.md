@@ -23,8 +23,15 @@ README.txt
 - source trust weights
 
 Recipe records retain `dose_target_g` independently from `dose_in_g` and the
-`action_observed.dose` flag, so an offline learner can distinguish the commanded
-recipe from a physically measured dose.
+`dose_observed`, `dose_target_confirmed`, and `action_observed.dose` flags, so an
+offline learner can distinguish a commanded target, a user-confirmed manual
+dose, and a physically measured dose. Unconfirmed controls remain masked rather
+than being replaced with fabricated observations.
+
+Hardware-scale records retain both the measured control-cutoff output and the
+separate predicted final output, including the prediction delay, instantaneous
+rate, and lead amount. This lets future models use the predictive-stop evidence
+without treating the estimate as a measured beverage weight.
 
 The label is exactly `new_better`, `anchor_better`, or `tie`. The exporter
 rejects numeric ratings, scalar rewards, reversed joins, mixed contexts,

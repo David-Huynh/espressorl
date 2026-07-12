@@ -216,6 +216,53 @@ class UploadMaintenanceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.errors, [])
 
+    def test_preflight_accepts_hardware_scale_cutoff_and_predicted_final_weight(self) -> None:
+        profile = valid_profile()
+        profile[4][-1] = 92.0
+
+        result = validate_upload_payload_json(
+            payload(
+                weight_source="hardware_scale",
+                beverage_out_g=33.2,
+                beverage_out_observation="control_cutoff",
+                predicted_final_beverage_out_g=36.0,
+                predictive_stop_applied=True,
+                predictive_stop_delay_ms=800.0,
+                predictive_stop_rate_g_per_s=3.5,
+                predictive_stop_lead_g=2.8,
+                target_yield_g=36.0,
+                profile_resampled=profile,
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, [])
+
+    def test_preflight_keeps_unknown_manual_dose_as_masked_partial_data(self) -> None:
+        result = validate_upload_payload_json(
+            payload(
+                dose_in_g=None,
+                dose_observed=False,
+                dose_target_confirmed=False,
+                action_observed={"grind": False, "dose": False, "target_yield": True},
+            )
+        )
+
+        self.assertTrue(result.ok)
+
+    def test_preflight_rejects_observed_dose_without_measurement_or_confirmation(self) -> None:
+        result = validate_upload_payload_json(
+            payload(
+                dose_in_g=None,
+                dose_observed=False,
+                dose_target_confirmed=False,
+                action_observed={"grind": False, "dose": True, "target_yield": True},
+            )
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("action_observed.dose cannot be true without a measured or confirmed dose", result.errors)
+
     def test_preflight_accepts_observed_pressure_overshoot_without_relaxing_target_pressure(self) -> None:
         profile = valid_profile()
         profile[0] = [15.4 for _ in range(100)]

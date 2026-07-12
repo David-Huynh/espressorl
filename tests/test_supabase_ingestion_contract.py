@@ -122,9 +122,11 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("rejectUnknownFields(payload, allowedRecommendationFields, errors)", source)
         self.assertIn("rejectUnknownFields(payload, allowedComparisonFields, errors)", source)
         self.assertIn("requireNumberRange(payload, 'schema_version', SUPPORTED_SCHEMA_VERSION", source)
-        self.assertIn("requireNumberRange(payload, 'dose_in_g', 5, 30", source)
+        self.assertIn("optionalNumberRange(payload, 'dose_in_g', 5, 30", source)
         self.assertIn("requireNumberRange(payload, 'dose_target_g', 5, 30", source)
+        self.assertIn("optionalBoolean(payload, 'dose_target_confirmed'", source)
         self.assertIn("optionalNumberRange(payload, 'beverage_out_g', 0, 120", source)
+        self.assertIn("optionalNumberRange(payload, 'predicted_final_beverage_out_g', 0, 120", source)
         self.assertIn("requireNumberRange(payload, 'target_yield_g', 5, 100", source)
         self.assertIn("optionalNumberRange(payload, 'shot_time_s', 0, 180", source)
         self.assertIn("requireNumberRange(payload, 'target_ratio', 1.2, 3.5", source)
@@ -145,6 +147,7 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("'action_observed'", source)
         self.assertIn("optionalActionObserved(payload, errors)", source)
         self.assertIn("action_observed.grind cannot be true without a grind measurement", source)
+        self.assertIn("action_observed.dose cannot be true without a measured or confirmed dose", source)
         self.assertIn("'grinder_adjustment_mode'", source)
         self.assertGreaterEqual(
             source.count("optionalEnum(payload, 'grinder_adjustment_mode', ['stepped', 'stepless']"),

@@ -418,10 +418,17 @@ class ShotRecord:
     grind_observed: bool = True
     dose_observed: bool = True
     dose_target_g: float | None = None
+    dose_target_confirmed: bool = False
     target_yield_observed: bool = True
     relative_grind_steps_from_reference: float | None = None
     relative_grind_um_from_reference: float | None = None
     beverage_out_g: float | None = None
+    beverage_out_observation: str | None = None
+    predicted_final_beverage_out_g: float | None = None
+    predictive_stop_applied: bool = False
+    predictive_stop_delay_ms: float | None = None
+    predictive_stop_rate_g_per_s: float | None = None
+    predictive_stop_lead_g: float | None = None
     brew_ratio: float | None = None
     target_ratio: float | None = None
     shot_time_s: float | None = None
@@ -520,7 +527,13 @@ class ShotRecord:
         self.optimization_weight = float(self.optimization_weight)
         if not 0.0 <= self.optimization_weight <= 1.0:
             raise ValueError("optimization_weight must be between 0 and 1")
-        for field_name in ("grind_observed", "dose_observed", "target_yield_observed"):
+        for field_name in (
+            "grind_observed",
+            "dose_observed",
+            "dose_target_confirmed",
+            "target_yield_observed",
+            "predictive_stop_applied",
+        ):
             if not isinstance(getattr(self, field_name), bool):
                 raise ValueError(f"{field_name} must be boolean")
         if self.microns_per_step <= 0:
@@ -545,8 +558,28 @@ class ShotRecord:
             )
         if self.relative_grind_steps_from_reference is None:
             self.grind_observed = False
-        if self.beverage_out_g is not None and self.brew_ratio is None and self.dose_observed:
-            self.brew_ratio = self.beverage_out_g / self.dose_in_g
+        if self.beverage_out_observation is not None:
+            self.beverage_out_observation = str(self.beverage_out_observation).strip() or None
+        for field_name in (
+            "predicted_final_beverage_out_g",
+            "predictive_stop_delay_ms",
+            "predictive_stop_rate_g_per_s",
+            "predictive_stop_lead_g",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                value = float(value)
+                if not math.isfinite(value) or value < 0:
+                    raise ValueError(f"{field_name} must be finite and nonnegative")
+                setattr(self, field_name, value)
+        if self.predicted_final_beverage_out_g == 0:
+            raise ValueError("predicted_final_beverage_out_g must be positive when present")
+        if self.beverage_out_g is not None and self.brew_ratio is None:
+            ratio_dose = self.dose_in_g if self.dose_observed else (
+                self.dose_target_g if self.dose_target_confirmed else None
+            )
+            if ratio_dose is not None:
+                self.brew_ratio = self.beverage_out_g / ratio_dose
         if self.target_ratio is None:
             ratio_dose = self.dose_target_g or self.dose_in_g
             self.target_ratio = self.target_yield_g / ratio_dose
@@ -604,6 +637,8 @@ class ShotRecord:
             raise ValueError("shot has no relative_grind_steps_from_reference")
         if self.dose_target_g is None:
             raise ValueError("shot has no known dose target")
+        if not (self.dose_observed or self.dose_target_confirmed):
+            raise ValueError("shot dose target was neither measured nor confirmed")
         return Recipe(
             relative_grind_steps_from_reference=self.relative_grind_steps_from_reference,
             microns_per_step=self.microns_per_step,
@@ -630,7 +665,7 @@ class ShotRecord:
     def action_observed(self) -> dict[str, bool]:
         return {
             "grind": self.grind_observed,
-            "dose": self.dose_observed,
+            "dose": self.dose_observed or self.dose_target_confirmed,
             "target_yield": self.target_yield_observed,
         }
 

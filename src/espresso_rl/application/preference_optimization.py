@@ -344,6 +344,9 @@ class ConsecutivePreferenceOptimizationService:
             raise ValueError(f"unknown CPBO shot {shot_id}")
         return shot
 
+    def find_shot(self, shot_id: str) -> PreferenceShot | None:
+        return self._repository.get_shot(shot_id)
+
     def get_comparison(
         self,
         run_id: str,

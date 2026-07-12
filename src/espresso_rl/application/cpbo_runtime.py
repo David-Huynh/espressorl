@@ -58,6 +58,15 @@ class CPBORuntimeBridge:
     def handle_shot(self, shot: ShotRecord) -> CPBOShotOutcome:
         if shot.shot_type != ShotType.ESPRESSO or shot.exclude_from_local_optimization:
             return CPBOShotOutcome(None, None, False, "shot_not_locally_optimizable")
+        existing_preference_shot = self._optimizer.find_shot(shot.shot_id)
+        if existing_preference_shot is not None:
+            state = self._optimizer.get_state(existing_preference_shot.optimization_run_id)
+            return CPBOShotOutcome(
+                existing_preference_shot.optimization_run_id,
+                None,
+                state.pending_shot_id == shot.shot_id,
+                "shot_already_processed",
+            )
         current_recipe = _known_recipe(shot)
         if current_recipe is None:
             return CPBOShotOutcome(None, None, False, "recipe_controls_not_fully_known")
@@ -216,6 +225,7 @@ def _known_recipe(shot: ShotRecord) -> Recipe | None:
     if not (
         shot.grind_observed
         and shot.dose_target_g is not None
+        and (shot.dose_observed or shot.dose_target_confirmed)
         and shot.target_yield_observed
         and shot.relative_grind_steps_from_reference is not None
     ):
@@ -254,6 +264,9 @@ def _shot_metadata(shot: ShotRecord) -> dict[str, object]:
         "profile_id": shot.profile_id,
         "dose_measured": shot.dose_observed,
         "dose_target_g": shot.dose_target_g,
+        "dose_target_confirmed": shot.dose_target_confirmed,
+        "predicted_final_beverage_out_g": shot.predicted_final_beverage_out_g,
+        "predictive_stop_applied": shot.predictive_stop_applied,
     }
 
 

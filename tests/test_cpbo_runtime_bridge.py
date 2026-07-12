@@ -229,13 +229,14 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         self.assertEqual(outcome.skipped_reason, "recipe_controls_not_fully_known")
         self.assertEqual(self.recommendations, [])
 
-    def test_explicit_dose_target_allows_cpbo_without_a_measured_dose(self) -> None:
+    def test_confirmed_dose_target_allows_cpbo_without_a_measured_dose(self) -> None:
         bridge = self.bridge([6.0, 7.0])
         shot = _shot(
             "manual-dose",
             grind=5.0,
             dose_observed=False,
             dose_target_g=18.0,
+            dose_target_confirmed=True,
         )
         self.shots.rows[shot.shot_id] = shot
 
@@ -252,10 +253,25 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
             grind=6.0,
             dose_observed=False,
             dose_target_g=18.0,
+            dose_target_confirmed=True,
         )
         self.shots.rows[candidate.shot_id] = candidate
         candidate_outcome = bridge.handle_shot(candidate)
         self.assertTrue(candidate_outcome.awaiting_preference)
+
+    def test_unconfirmed_manual_dose_is_not_a_cpbo_recipe_coordinate(self) -> None:
+        bridge = self.bridge([6.0])
+        shot = _shot(
+            "unconfirmed-dose",
+            grind=5.0,
+            dose_observed=False,
+            dose_target_g=18.0,
+            dose_target_confirmed=False,
+        )
+
+        outcome = bridge.handle_shot(shot)
+
+        self.assertEqual(outcome.skipped_reason, "recipe_controls_not_fully_known")
 
     def test_unmeasured_dose_without_an_explicit_target_is_not_fabricated(self) -> None:
         bridge = self.bridge([6.0])
@@ -337,6 +353,7 @@ def _shot(
     taste_goal: TasteGoal | None = None,
     dose_observed: bool = True,
     dose_target_g: float | None = None,
+    dose_target_confirmed: bool = False,
 ) -> ShotRecord:
     return ShotRecord(
         shot_id=shot_id,
@@ -351,6 +368,7 @@ def _shot(
         dose_in_g=18.0,
         dose_observed=dose_observed,
         dose_target_g=dose_target_g,
+        dose_target_confirmed=dose_target_confirmed,
         target_yield_g=36.0,
         target_yield_observed=True,
         beverage_out_g=35.5,

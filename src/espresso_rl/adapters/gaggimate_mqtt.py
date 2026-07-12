@@ -255,6 +255,7 @@ class GaggimateMQTTClient:
         payload_dose_target_g = _positive_control_float(payload.get("dose_target_g"), "dose_target_g")
         declared_dose_observed = _optional_bool(payload.get("dose_observed"))
         dose_observed = payload_dose_in_g is not None and declared_dose_observed is not False
+        dose_target_confirmed = _optional_bool(payload.get("dose_target_confirmed")) is True
         dose_in_g = payload_dose_in_g or payload_dose_target_g or self._config.initial_dose_g
         relative_grind_steps = _relative_grind_steps_from_payload(
             payload,
@@ -298,9 +299,24 @@ class GaggimateMQTTClient:
             dose_in_g=dose_in_g,
             dose_observed=dose_observed,
             dose_target_g=payload_dose_target_g or payload_dose_in_g,
+            dose_target_confirmed=dose_target_confirmed,
             target_yield_g=target_yield_g,
             target_yield_observed=target_yield_observed,
             beverage_out_g=beverage_out_g,
+            beverage_out_observation=_optional_string(payload.get("beverage_out_observation")),
+            predicted_final_beverage_out_g=_positive_optional_float(
+                payload.get("predicted_final_beverage_out_g")
+            ),
+            predictive_stop_applied=_optional_bool(payload.get("predictive_stop_applied")) is True,
+            predictive_stop_delay_ms=_nonnegative_control_float(
+                payload.get("predictive_stop_delay_ms"), "predictive_stop_delay_ms"
+            ),
+            predictive_stop_rate_g_per_s=_nonnegative_control_float(
+                payload.get("predictive_stop_rate_g_per_s"), "predictive_stop_rate_g_per_s"
+            ),
+            predictive_stop_lead_g=_nonnegative_control_float(
+                payload.get("predictive_stop_lead_g"), "predictive_stop_lead_g"
+            ),
             shot_time_s=_optional_float(shot_time_s),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
             bean_context_name=_optional_string(payload.get("bean_context_name")),
@@ -722,6 +738,15 @@ def _positive_optional_float(value: Any) -> float | None:
     parsed = _optional_float(value)
     if parsed is None or parsed <= 0:
         return None
+    return parsed
+
+
+def _nonnegative_control_float(value: Any, field_name: str) -> float | None:
+    parsed = _optional_float(value)
+    if parsed is None:
+        return None
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"{field_name} must be finite and nonnegative when present")
     return parsed
 
 

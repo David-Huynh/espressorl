@@ -27,7 +27,10 @@ const allowedShotFields = new Set([
   'relative_grind_steps_from_reference',
   'relative_grind_um_from_reference', 'current_absolute_step', 'absolute_reference_step',
   'action_observed',
-  'dose_in_g', 'dose_target_g', 'beverage_out_g', 'brew_ratio', 'target_yield_g', 'target_ratio',
+  'dose_in_g', 'dose_target_g', 'dose_observed', 'dose_target_confirmed',
+  'beverage_out_g', 'beverage_out_observation', 'predicted_final_beverage_out_g',
+  'predictive_stop_applied', 'predictive_stop_delay_ms', 'predictive_stop_rate_g_per_s',
+  'predictive_stop_lead_g', 'brew_ratio', 'target_yield_g', 'target_ratio',
   'shot_time_s', 'recommendation_id', 'recommended_grind_delta_steps_from_current',
   'recommended_grind_delta_um_from_current', 'recommended_projected_relative_step_from_reference',
   'recommended_dose_g', 'recommended_target_yield_g', 'recommended_target_ratio',
@@ -289,9 +292,17 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalString(payload, 'grinder_context_id', 120, errors);
   requireTasteGoal(payload, errors);
   requireNumberRange(payload, 'timestamp', 0, Number.MAX_SAFE_INTEGER, errors);
-  requireNumberRange(payload, 'dose_in_g', 5, 30, errors);
+  optionalNumberRange(payload, 'dose_in_g', 5, 30, errors);
   requireNumberRange(payload, 'dose_target_g', 5, 30, errors);
+  optionalBoolean(payload, 'dose_observed', errors);
+  optionalBoolean(payload, 'dose_target_confirmed', errors);
   optionalNumberRange(payload, 'beverage_out_g', 0, 120, errors);
+  optionalString(payload, 'beverage_out_observation', 40, errors);
+  optionalNumberRange(payload, 'predicted_final_beverage_out_g', 0, 120, errors);
+  optionalBoolean(payload, 'predictive_stop_applied', errors);
+  optionalNumberRange(payload, 'predictive_stop_delay_ms', 0, 10000, errors);
+  optionalNumberRange(payload, 'predictive_stop_rate_g_per_s', 0, 25, errors);
+  optionalNumberRange(payload, 'predictive_stop_lead_g', 0, 20, errors);
   optionalNumberRange(payload, 'brew_ratio', 0.1, 10, errors);
   requireNumberRange(payload, 'target_yield_g', 5, 100, errors);
   optionalNumberRange(payload, 'target_ratio', 1.2, 3.5, errors);
@@ -680,6 +691,13 @@ function optionalActionObserved(payload: JsonRecord, errors: string[]) {
       payload.absolute_reference_step !== null;
     if (!hasRelativeGrind && !hasAbsolutePair) {
       errors.push('action_observed.grind cannot be true without a grind measurement');
+    }
+  }
+  if (observed.dose === true) {
+    const measured = payload.dose_observed === true && payload.dose_in_g !== undefined && payload.dose_in_g !== null;
+    const confirmed = payload.dose_target_confirmed === true;
+    if (!measured && !confirmed) {
+      errors.push('action_observed.dose cannot be true without a measured or confirmed dose');
     }
   }
 }

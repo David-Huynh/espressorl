@@ -19,7 +19,14 @@ CREATE TABLE IF NOT EXISTS shots (
     grind_observed BOOLEAN NOT NULL DEFAULT TRUE,
     dose_observed BOOLEAN NOT NULL DEFAULT TRUE,
     dose_target_g DOUBLE PRECISION,
+    dose_target_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
     beverage_out_g DOUBLE PRECISION,
+    beverage_out_observation TEXT,
+    predicted_final_beverage_out_g DOUBLE PRECISION,
+    predictive_stop_applied BOOLEAN NOT NULL DEFAULT FALSE,
+    predictive_stop_delay_ms DOUBLE PRECISION,
+    predictive_stop_rate_g_per_s DOUBLE PRECISION,
+    predictive_stop_lead_g DOUBLE PRECISION,
     brew_ratio DOUBLE PRECISION,
     target_yield_g DOUBLE PRECISION NOT NULL,
     target_yield_observed BOOLEAN NOT NULL DEFAULT TRUE,
@@ -98,6 +105,27 @@ ALTER TABLE shots
 
 ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS dose_target_g DOUBLE PRECISION;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS dose_target_confirmed BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS beverage_out_observation TEXT;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS predicted_final_beverage_out_g DOUBLE PRECISION;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS predictive_stop_applied BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS predictive_stop_delay_ms DOUBLE PRECISION;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS predictive_stop_rate_g_per_s DOUBLE PRECISION;
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS predictive_stop_lead_g DOUBLE PRECISION;
 
 ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS relative_grind_steps_from_reference DOUBLE PRECISION;

@@ -44,7 +44,15 @@ SHOT_RECORD_FIELDS = frozenset(
         "action_observed",
         "dose_in_g",
         "dose_target_g",
+        "dose_observed",
+        "dose_target_confirmed",
         "beverage_out_g",
+        "beverage_out_observation",
+        "predicted_final_beverage_out_g",
+        "predictive_stop_applied",
+        "predictive_stop_delay_ms",
+        "predictive_stop_rate_g_per_s",
+        "predictive_stop_lead_g",
         "brew_ratio",
         "target_yield_g",
         "target_ratio",
@@ -324,9 +332,17 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_bool(payload, "raw_profile_available", errors)
     _optional_hash(payload, "raw_profile_hash", errors)
     _require_number_range(payload, "timestamp", 0, 9_007_199_254_740_991, errors)
-    _require_number_range(payload, "dose_in_g", 5, 30, errors)
+    _optional_number_range(payload, "dose_in_g", 5, 30, errors)
     _require_number_range(payload, "dose_target_g", 5, 30, errors)
+    _optional_bool(payload, "dose_observed", errors)
+    _optional_bool(payload, "dose_target_confirmed", errors)
     _optional_number_range(payload, "beverage_out_g", 0, 120, errors)
+    _optional_string(payload, "beverage_out_observation", 40, errors)
+    _optional_number_range(payload, "predicted_final_beverage_out_g", 0, 120, errors)
+    _optional_bool(payload, "predictive_stop_applied", errors)
+    _optional_number_range(payload, "predictive_stop_delay_ms", 0, 10_000, errors)
+    _optional_number_range(payload, "predictive_stop_rate_g_per_s", 0, 25, errors)
+    _optional_number_range(payload, "predictive_stop_lead_g", 0, 20, errors)
     _optional_number_range(payload, "brew_ratio", 0.1, 10, errors)
     _require_number_range(payload, "target_yield_g", 5, 100, errors)
     _optional_number_range(payload, "target_ratio", 1.2, 3.5, errors)
@@ -355,6 +371,11 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
         )
         if not has_relative_grind and not has_absolute_pair:
             errors.append("action_observed.grind cannot be true without a grind measurement")
+    if isinstance(action_observed, dict) and action_observed.get("dose") is True:
+        dose_measured = payload.get("dose_observed") is True and payload.get("dose_in_g") is not None
+        dose_confirmed = payload.get("dose_target_confirmed") is True
+        if not dose_measured and not dose_confirmed:
+            errors.append("action_observed.dose cannot be true without a measured or confirmed dose")
     _optional_identifier(payload, "recommendation_id", errors)
     _optional_number_range(payload, "recommended_grind_delta_steps_from_current", -1000, 1000, errors)
     _optional_number_range(payload, "recommended_grind_delta_um_from_current", -100_000, 100_000, errors)

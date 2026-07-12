@@ -126,6 +126,7 @@ class ShotProfileEvent:
     grind_observed: bool = True
     dose_observed: bool = True
     dose_target_g: float | None = None
+    dose_target_confirmed: bool = False
     target_yield_observed: bool = True
     temperature: list[float] | None = None
     target_temperature: list[float] | None = None
@@ -133,6 +134,12 @@ class ShotProfileEvent:
     valve_open: list[bool] | None = None
     relative_grind_steps_from_reference: float | None = None
     beverage_out_g: float | None = None
+    beverage_out_observation: str | None = None
+    predicted_final_beverage_out_g: float | None = None
+    predictive_stop_applied: bool = False
+    predictive_stop_delay_ms: float | None = None
+    predictive_stop_rate_g_per_s: float | None = None
+    predictive_stop_lead_g: float | None = None
     shot_time_s: float | None = None
     bean_context_id: str | None = None
     bean_context_name: str | None = None
@@ -205,7 +212,13 @@ class ShotProfileEvent:
             # commanded target was supplied by the machine adapter.
             object.__setattr__(self, "dose_target_g", self.dose_in_g)
         object.__setattr__(self, "target_yield_g", _number(self.target_yield_g, "target_yield_g"))
-        for field_name in ("grind_observed", "dose_observed", "target_yield_observed"):
+        for field_name in (
+            "grind_observed",
+            "dose_observed",
+            "dose_target_confirmed",
+            "target_yield_observed",
+            "predictive_stop_applied",
+        ):
             if not isinstance(getattr(self, field_name), bool):
                 raise ValueError(f"{field_name} must be boolean")
         if self.relative_grind_steps_from_reference is not None:
@@ -246,6 +259,20 @@ class ShotProfileEvent:
             )
         if self.beverage_out_g is not None:
             object.__setattr__(self, "beverage_out_g", _number(self.beverage_out_g, "beverage_out_g"))
+        object.__setattr__(
+            self,
+            "beverage_out_observation",
+            _optional_string(self.beverage_out_observation, "beverage_out_observation", 40),
+        )
+        for field_name in (
+            "predicted_final_beverage_out_g",
+            "predictive_stop_delay_ms",
+            "predictive_stop_rate_g_per_s",
+            "predictive_stop_lead_g",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _number(value, field_name))
         if self.shot_time_s is not None:
             object.__setattr__(self, "shot_time_s", _number(self.shot_time_s, "shot_time_s"))
         object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
@@ -355,6 +382,19 @@ class ShotProfileEvent:
             raise ValueError("target_yield_g must be positive")
         if self.beverage_out_g is not None and self.beverage_out_g <= 0:
             raise ValueError("beverage_out_g must be positive when present")
+        if (
+            self.predicted_final_beverage_out_g is not None
+            and self.predicted_final_beverage_out_g <= 0
+        ):
+            raise ValueError("predicted_final_beverage_out_g must be positive when present")
+        for field_name in (
+            "predictive_stop_delay_ms",
+            "predictive_stop_rate_g_per_s",
+            "predictive_stop_lead_g",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and value < 0:
+                raise ValueError(f"{field_name} must be nonnegative when present")
         if self.shot_time_s is not None and self.shot_time_s <= 0:
             raise ValueError("shot_time_s must be positive when present")
         if self.optimization_weight is not None and not 0.0 <= self.optimization_weight <= 1.0:

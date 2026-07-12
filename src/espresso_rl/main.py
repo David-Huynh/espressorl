@@ -247,7 +247,9 @@ def run_public(config: Config) -> None:
 
     def cpbo_recommendation_after_shot(shot) -> Recommendation | None:
         outcome = cpbo_runtime.handle_shot(shot)
-        if outcome.skipped_reason is not None:
+        if outcome.skipped_reason == "shot_already_processed":
+            logger.info("CPBO ignored idempotent replay of shot %s", shot.shot_id)
+        elif outcome.skipped_reason is not None:
             logger.warning("CPBO skipped shot %s reason=%s", shot.shot_id, outcome.skipped_reason)
         elif outcome.awaiting_preference:
             logger.info(

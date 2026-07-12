@@ -80,6 +80,65 @@ class ApplicationServiceTests(unittest.TestCase):
                 counts = queue.count_by_status()
                 self.assertEqual(counts.get(UploadQueueStatus.PENDING), 1)
 
+    def test_exact_shot_replay_is_idempotent_and_does_not_requeue_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                queue = SQLiteUploadQueueRepository(store)
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    upload_queue=queue,
+                    clock=lambda: 200,
+                )
+                event = _shot_event(community_upload_enabled=True)
+
+                first = service.ingest_shot_profile(event)
+                replay = service.ingest_shot_profile(event)
+
+                self.assertFalse(first.replayed)
+                self.assertTrue(replay.replayed)
+                self.assertEqual(queue.count_by_status().get(UploadQueueStatus.PENDING), 1)
+
+    def test_conflicting_shot_replay_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                service = EspressoRLService(
+                    SQLiteShotRepository(store),
+                    SQLiteRecommendationRepository(store),
+                    clock=lambda: 200,
+                )
+                service.ingest_shot_profile(_shot_event())
+
+                with self.assertRaisesRegex(ValueError, "conflicts with an existing immutable shot"):
+                    service.ingest_shot_profile(_shot_event(beverage_out_g=34.0))
+
+    def test_predictive_cutoff_diagnostics_round_trip_without_replacing_measured_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                service = EspressoRLService(
+                    shots,
+                    SQLiteRecommendationRepository(store),
+                    clock=lambda: 200,
+                )
+
+                service.ingest_shot_profile(
+                    _shot_event(
+                        beverage_out_g=33.2,
+                        beverage_out_observation="control_cutoff",
+                        predicted_final_beverage_out_g=36.0,
+                        predictive_stop_applied=True,
+                        predictive_stop_delay_ms=800.0,
+                        predictive_stop_rate_g_per_s=3.5,
+                        predictive_stop_lead_g=2.8,
+                    )
+                )
+
+                stored = shots.get("shot_1")
+                self.assertEqual(stored.beverage_out_g, 33.2)  # type: ignore[union-attr]
+                self.assertEqual(stored.predicted_final_beverage_out_g, 36.0)  # type: ignore[union-attr]
+                self.assertTrue(stored.predictive_stop_applied)  # type: ignore[union-attr]
+
     def test_recommendation_apply_rejects_cross_machine_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:

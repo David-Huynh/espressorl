@@ -192,12 +192,18 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 baseline = _shot_payload("shot_1", grind=2.0, community_upload_enabled=True)
                 baseline.pop("dose_in_g")
                 baseline["dose_observed"] = False
+                baseline["dose_target_confirmed"] = True
                 _send(client, transport, "gaggimate/AA_BB/shot/profile", baseline)
                 first = recommendations.get_current(
                     "install_1", "gaggimate:AA_BB", "bean_1", clock(),
                     grinder_context_id="grinder_1", profile_id="profile_1",
                 )
                 self.assertIsNotNone(first)
+                _send(client, transport, "gaggimate/AA_BB/shot/profile", baseline)
+                self.assertEqual(
+                    len(cpbo_repository.list_shots(first.optimization_run_id)),  # type: ignore[union-attr]
+                    1,
+                )
 
                 candidate = _shot_payload(
                     "shot_2",
@@ -207,6 +213,7 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 )
                 candidate.pop("dose_in_g")
                 candidate["dose_observed"] = False
+                candidate["dose_target_confirmed"] = True
                 _send(client, transport, "gaggimate/AA_BB/shot/profile", candidate)
                 _send(
                     client,

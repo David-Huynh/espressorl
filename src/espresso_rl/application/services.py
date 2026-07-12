@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -53,6 +54,7 @@ class IngestResult:
     shot: ShotRecord | None
     recommendation: Recommendation | None
     dropped_reason: str | None = None
+    replayed: bool = False
 
     @property
     def stored(self) -> bool:
@@ -150,6 +152,11 @@ class EspressoRLService:
         shot_metadata = resample_shot_metadata(event)
         fixed_cadence_sequence = build_fixed_cadence_sequence(event)
         stable_profile_hash = event.raw_profile_hash or profile_hash(profile_quality.profile)
+        existing = self._shots.get(event.shot_id)
+        if existing is not None:
+            if not _same_immutable_shot_event(existing, event, stable_profile_hash):
+                raise ValueError(f"shot_id {event.shot_id} conflicts with an existing immutable shot")
+            return IngestResult(shot=existing, recommendation=None, replayed=True)
         recommendation = self._recommendation_for_event(
             event,
             now,
@@ -168,9 +175,16 @@ class EspressoRLService:
             grind_observed=event.grind_observed,
             dose_observed=event.dose_observed,
             dose_target_g=event.dose_target_g,
+            dose_target_confirmed=event.dose_target_confirmed,
             target_yield_observed=event.target_yield_observed,
             relative_grind_steps_from_reference=event.relative_grind_steps_from_reference,
             beverage_out_g=event.beverage_out_g,
+            beverage_out_observation=event.beverage_out_observation,
+            predicted_final_beverage_out_g=event.predicted_final_beverage_out_g,
+            predictive_stop_applied=event.predictive_stop_applied,
+            predictive_stop_delay_ms=event.predictive_stop_delay_ms,
+            predictive_stop_rate_g_per_s=event.predictive_stop_rate_g_per_s,
+            predictive_stop_lead_g=event.predictive_stop_lead_g,
             shot_time_s=event.shot_time_s,
             bean_context_id=event.bean_context_id,
             bean_context_name=event.bean_context_name,
@@ -292,7 +306,7 @@ class EspressoRLService:
                 if shot.recommended_dose_g is not None:
                     shot.dose_in_g = shot.recommended_dose_g
                     shot.dose_target_g = shot.recommended_dose_g
-                shot.dose_observed = True
+                shot.dose_target_confirmed = True
                 shot.brew_ratio = (
                     shot.beverage_out_g / shot.dose_in_g
                     if shot.beverage_out_g is not None
@@ -301,6 +315,7 @@ class EspressoRLService:
                 shot.target_ratio = shot.target_yield_g / shot.dose_in_g
             else:
                 shot.dose_observed = False
+                shot.dose_target_confirmed = False
                 shot.brew_ratio = None
         if event.yield_followed is not None:
             shot.yield_followed = event.yield_followed
@@ -687,3 +702,54 @@ def _shot_is_community_uploadable(shot: ShotRecord) -> bool:
         and not shot.exclude_from_local_optimization
         and shot.optimization_weight > 0.0
     )
+
+
+def _same_immutable_shot_event(
+    shot: ShotRecord,
+    event: ShotProfileEvent,
+    stable_profile_hash: str,
+) -> bool:
+    exact_pairs = (
+        (shot.shot_id, event.shot_id),
+        (shot.timestamp, int(event.timestamp)),
+        (shot.install_id, event.install_id),
+        (shot.machine_id, event.machine_id),
+        (shot.machine_adapter, event.machine_adapter),
+        (shot.raw_profile_hash, stable_profile_hash),
+        (shot.bean_context_id, event.bean_context_id),
+        (shot.grinder_context_id, event.grinder_context_id),
+        (shot.profile_id, event.profile_id),
+        (shot.grind_observed, event.grind_observed),
+        (shot.dose_observed, event.dose_observed),
+        (shot.dose_target_confirmed, event.dose_target_confirmed),
+        (shot.target_yield_observed, event.target_yield_observed),
+        (shot.weight_source, event.weight_source),
+        (shot.beverage_out_observation, event.beverage_out_observation),
+        (shot.predictive_stop_applied, event.predictive_stop_applied),
+        (shot.shot_end_state, event.shot_end_state),
+        (shot.taste_goal.fingerprint, event.taste_goal.fingerprint),
+    )
+    if any(left != right for left, right in exact_pairs):
+        return False
+    if event.recommendation_id is not None and shot.recommendation_id != event.recommendation_id:
+        return False
+    numeric_pairs = (
+        (shot.microns_per_step, event.microns_per_step),
+        (shot.relative_grind_steps_from_reference, event.relative_grind_steps_from_reference),
+        (shot.dose_in_g, event.dose_in_g),
+        (shot.dose_target_g, event.dose_target_g),
+        (shot.target_yield_g, event.target_yield_g),
+        (shot.beverage_out_g, event.beverage_out_g),
+        (shot.shot_time_s, event.shot_time_s),
+        (shot.predicted_final_beverage_out_g, event.predicted_final_beverage_out_g),
+        (shot.predictive_stop_delay_ms, event.predictive_stop_delay_ms),
+        (shot.predictive_stop_rate_g_per_s, event.predictive_stop_rate_g_per_s),
+        (shot.predictive_stop_lead_g, event.predictive_stop_lead_g),
+    )
+    return all(_same_optional_number(left, right) for left, right in numeric_pairs)
+
+
+def _same_optional_number(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return math.isclose(float(left), float(right), rel_tol=1e-9, abs_tol=1e-9)
