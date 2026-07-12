@@ -43,6 +43,7 @@ SHOT_RECORD_FIELDS = frozenset(
         "absolute_reference_step",
         "action_observed",
         "dose_in_g",
+        "dose_target_g",
         "beverage_out_g",
         "brew_ratio",
         "target_yield_g",
@@ -324,6 +325,7 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_hash(payload, "raw_profile_hash", errors)
     _require_number_range(payload, "timestamp", 0, 9_007_199_254_740_991, errors)
     _require_number_range(payload, "dose_in_g", 5, 30, errors)
+    _require_number_range(payload, "dose_target_g", 5, 30, errors)
     _optional_number_range(payload, "beverage_out_g", 0, 120, errors)
     _optional_number_range(payload, "brew_ratio", 0.1, 10, errors)
     _require_number_range(payload, "target_yield_g", 5, 100, errors)

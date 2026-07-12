@@ -37,6 +37,7 @@ _RECIPE_FIELDS = (
     "current_absolute_step",
     "absolute_reference_step",
     "dose_in_g",
+    "dose_target_g",
     "target_yield_g",
     "target_ratio",
 )

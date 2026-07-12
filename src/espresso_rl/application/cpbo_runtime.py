@@ -58,9 +58,9 @@ class CPBORuntimeBridge:
     def handle_shot(self, shot: ShotRecord) -> CPBOShotOutcome:
         if shot.shot_type != ShotType.ESPRESSO or shot.exclude_from_local_optimization:
             return CPBOShotOutcome(None, None, False, "shot_not_locally_optimizable")
-        current_recipe = _observed_recipe(shot)
+        current_recipe = _known_recipe(shot)
         if current_recipe is None:
-            return CPBOShotOutcome(None, None, False, "recipe_controls_not_fully_observed")
+            return CPBOShotOutcome(None, None, False, "recipe_controls_not_fully_known")
         try:
             context = self._context_factory(shot)
         except ValueError as exc:
@@ -140,7 +140,7 @@ class CPBORuntimeBridge:
         shot = self._shots.get(event.new_shot_id)
         if shot is None:
             raise ValueError("canonical shot for CPBO preference is missing")
-        current_recipe = _observed_recipe(shot)
+        current_recipe = _known_recipe(shot)
         if current_recipe is None:
             raise ValueError("CPBO preference shot no longer has complete recipe controls")
         if self._comparison_sink is not None:
@@ -212,10 +212,10 @@ def strict_context_from_shot(shot: ShotRecord) -> OptimizationRunContext:
     )
 
 
-def _observed_recipe(shot: ShotRecord) -> Recipe | None:
+def _known_recipe(shot: ShotRecord) -> Recipe | None:
     if not (
         shot.grind_observed
-        and shot.dose_observed
+        and shot.dose_target_g is not None
         and shot.target_yield_observed
         and shot.relative_grind_steps_from_reference is not None
     ):
@@ -223,7 +223,7 @@ def _observed_recipe(shot: ShotRecord) -> Recipe | None:
     values = (
         shot.relative_grind_steps_from_reference,
         shot.microns_per_step,
-        shot.dose_in_g,
+        shot.dose_target_g,
         shot.target_yield_g,
     )
     if not all(math.isfinite(float(value)) for value in values):
@@ -252,6 +252,8 @@ def _shot_metadata(shot: ShotRecord) -> dict[str, object]:
         "shot_time_s": shot.shot_time_s,
         "weight_source": shot.weight_source,
         "profile_id": shot.profile_id,
+        "dose_measured": shot.dose_observed,
+        "dose_target_g": shot.dose_target_g,
     }
 
 

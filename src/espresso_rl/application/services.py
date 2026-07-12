@@ -167,6 +167,7 @@ class EspressoRLService:
             target_yield_g=event.target_yield_g,
             grind_observed=event.grind_observed,
             dose_observed=event.dose_observed,
+            dose_target_g=event.dose_target_g,
             target_yield_observed=event.target_yield_observed,
             relative_grind_steps_from_reference=event.relative_grind_steps_from_reference,
             beverage_out_g=event.beverage_out_g,
@@ -290,6 +291,7 @@ class EspressoRLService:
             if event.dose_followed:
                 if shot.recommended_dose_g is not None:
                     shot.dose_in_g = shot.recommended_dose_g
+                    shot.dose_target_g = shot.recommended_dose_g
                 shot.dose_observed = True
                 shot.brew_ratio = (
                     shot.beverage_out_g / shot.dose_in_g

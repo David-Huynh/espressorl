@@ -38,6 +38,7 @@ def shot_payload(shot_id: str, timestamp: int, **overrides) -> dict:
         "current_absolute_step": None,
         "absolute_reference_step": None,
         "dose_in_g": 18.0,
+        "dose_target_g": 18.0,
         "target_yield_g": 36.0,
         "target_ratio": 2.0,
         "beverage_out_g": 35.8,
@@ -99,6 +100,7 @@ class OfflineDatasetDomainTests(unittest.TestCase):
 
         self.assertEqual(record["comparison"]["label"], "tie")
         self.assertEqual(record["new_shot"]["recipe"]["dose_in_g"], 18.0)
+        self.assertEqual(record["new_shot"]["recipe"]["dose_target_g"], 18.0)
         self.assertIn("profile_resampled", record["new_shot"]["trajectory"])
         self.assertEqual(record["trust"]["example"], 0.1)
         encoded = json.dumps(record, sort_keys=True)

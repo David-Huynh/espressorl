@@ -61,6 +61,7 @@ def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
         "absolute_reference_step": shot.absolute_reference_step,
         "action_observed": shot.action_observed,
         "dose_in_g": shot.dose_in_g,
+        "dose_target_g": shot.dose_target_g,
         "beverage_out_g": shot.beverage_out_g,
         "brew_ratio": shot.brew_ratio,
         "target_yield_g": shot.target_yield_g,

@@ -226,7 +226,50 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
 
         outcome = bridge.handle_shot(shot)
 
-        self.assertEqual(outcome.skipped_reason, "recipe_controls_not_fully_observed")
+        self.assertEqual(outcome.skipped_reason, "recipe_controls_not_fully_known")
+        self.assertEqual(self.recommendations, [])
+
+    def test_explicit_dose_target_allows_cpbo_without_a_measured_dose(self) -> None:
+        bridge = self.bridge([6.0, 7.0])
+        shot = _shot(
+            "manual-dose",
+            grind=5.0,
+            dose_observed=False,
+            dose_target_g=18.0,
+        )
+        self.shots.rows[shot.shot_id] = shot
+
+        outcome = bridge.handle_shot(shot)
+
+        self.assertIsNotNone(outcome.recommendation)
+        stored = self.repository.get_shot("manual-dose")
+        recipe = self.repository.get_recipe(stored.recipe_id)
+        self.assertEqual(recipe.dose_g, 18.0)
+        self.assertFalse(stored.metadata["dose_measured"])
+
+        candidate = _shot(
+            "manual-dose-candidate",
+            grind=6.0,
+            dose_observed=False,
+            dose_target_g=18.0,
+        )
+        self.shots.rows[candidate.shot_id] = candidate
+        candidate_outcome = bridge.handle_shot(candidate)
+        self.assertTrue(candidate_outcome.awaiting_preference)
+
+    def test_unmeasured_dose_without_an_explicit_target_is_not_fabricated(self) -> None:
+        bridge = self.bridge([6.0])
+        shot = _shot(
+            "unknown-dose",
+            grind=5.0,
+            dose_observed=False,
+            dose_target_g=None,
+        )
+        self.shots.rows[shot.shot_id] = shot
+
+        outcome = bridge.handle_shot(shot)
+
+        self.assertEqual(outcome.skipped_reason, "recipe_controls_not_fully_known")
         self.assertEqual(self.recommendations, [])
 
     def test_machine_failure_is_not_stored_as_tie(self) -> None:
@@ -292,6 +335,8 @@ def _shot(
     shot_end_state: str = "finished",
     raw_profile_hash: str | None = None,
     taste_goal: TasteGoal | None = None,
+    dose_observed: bool = True,
+    dose_target_g: float | None = None,
 ) -> ShotRecord:
     return ShotRecord(
         shot_id=shot_id,
@@ -304,7 +349,8 @@ def _shot(
         relative_grind_steps_from_reference=grind,
         grind_observed=grind is not None,
         dose_in_g=18.0,
-        dose_observed=True,
+        dose_observed=dose_observed,
+        dose_target_g=dose_target_g,
         target_yield_g=36.0,
         target_yield_observed=True,
         beverage_out_g=35.5,

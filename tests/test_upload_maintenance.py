@@ -27,6 +27,7 @@ def payload(**overrides) -> str:
         "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
         "timestamp": 1,
         "dose_in_g": 18.0,
+        "dose_target_g": 18.0,
         "target_yield_g": 36.0,
         "target_ratio": 2.0,
         "beverage_out_g": 36.0,
@@ -99,6 +100,12 @@ class UploadMaintenanceTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.errors, [])
+
+    def test_preflight_requires_commanded_dose_separately_from_measured_dose(self) -> None:
+        result = validate_upload_payload_json(payload(dose_target_g=None))
+
+        self.assertFalse(result.ok)
+        self.assertIn("dose_target_g out of range", result.errors)
 
     def test_preflight_accepts_safe_execution_metadata(self) -> None:
         result = validate_upload_payload_json(

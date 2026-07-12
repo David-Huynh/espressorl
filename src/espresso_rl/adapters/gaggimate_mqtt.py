@@ -245,11 +245,14 @@ class GaggimateMQTTClient:
         pump_target_mode = _optional_int_channel(payload, "pump_target_mode", n)
         valve_open = _optional_bool_channel(payload, "valve_open", n)
         weight = _channel({"weight": weight}, "weight", n)
-        payload_target_yield_g = _positive_optional_float(payload.get("target_yield_g"))
+        payload_target_yield_g = _positive_control_float(
+            payload.get("target_yield_g"),
+            "target_yield_g",
+        )
         target_yield_observed = payload_target_yield_g is not None
         target_yield_g = payload_target_yield_g or self._config.initial_target_yield_g
-        payload_dose_in_g = _positive_optional_float(payload.get("dose_in_g"))
-        payload_dose_target_g = _positive_optional_float(payload.get("dose_target_g"))
+        payload_dose_in_g = _positive_control_float(payload.get("dose_in_g"), "dose_in_g")
+        payload_dose_target_g = _positive_control_float(payload.get("dose_target_g"), "dose_target_g")
         declared_dose_observed = _optional_bool(payload.get("dose_observed"))
         dose_observed = payload_dose_in_g is not None and declared_dose_observed is not False
         dose_in_g = payload_dose_in_g or payload_dose_target_g or self._config.initial_dose_g
@@ -294,6 +297,7 @@ class GaggimateMQTTClient:
             grind_observed=grind_observed,
             dose_in_g=dose_in_g,
             dose_observed=dose_observed,
+            dose_target_g=payload_dose_target_g or payload_dose_in_g,
             target_yield_g=target_yield_g,
             target_yield_observed=target_yield_observed,
             beverage_out_g=beverage_out_g,
@@ -718,6 +722,15 @@ def _positive_optional_float(value: Any) -> float | None:
     parsed = _optional_float(value)
     if parsed is None or parsed <= 0:
         return None
+    return parsed
+
+
+def _positive_control_float(value: Any, field_name: str) -> float | None:
+    parsed = _optional_float(value)
+    if parsed is None:
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"{field_name} must be finite and positive when present")
     return parsed
 
 

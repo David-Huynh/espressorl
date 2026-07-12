@@ -59,6 +59,12 @@ fineness, where a larger value always means finer. Candidate controls are
 converted back to physical units and quantized before identity, deduplication,
 or display.
 
+The commanded recipe dose is stored separately as `dose_target_g` from the
+measured physical dose in `dose_in_g`. CPBO may use an explicit commanded dose
+when no grind-by-weight measurement exists; `dose_observed` remains false in
+that case. If neither a commanded target nor a measured dose is available, the
+shot cannot define a recipe point and is not added to the preference run.
+
 Run context includes install, machine, bean, grinder, profile ID, raw profile
 hash, basket, water, user identifiers, and the selected taste goal when
 available. Missing identifiers are not fabricated. Materially different

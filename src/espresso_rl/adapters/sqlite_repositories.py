@@ -91,6 +91,7 @@ class SQLiteStore:
                 dose_in_g REAL NOT NULL,
                 grind_observed INTEGER NOT NULL DEFAULT 1,
                 dose_observed INTEGER NOT NULL DEFAULT 1,
+                dose_target_g REAL,
                 beverage_out_g REAL,
                 brew_ratio REAL,
                 target_yield_g REAL NOT NULL,
@@ -295,6 +296,7 @@ class SQLiteStore:
         self._ensure_column("shots", "optimization_weight", "REAL NOT NULL DEFAULT 1.0")
         self._ensure_column("shots", "grind_observed", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("shots", "dose_observed", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("shots", "dose_target_g", "REAL")
         self._ensure_column("shots", "target_yield_observed", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("shots", "grind_followed", "INTEGER")
         self._ensure_column("shots", "dose_followed", "INTEGER")
@@ -840,7 +842,7 @@ class SQLiteShotRepository:
                 bean_context_id, bean_context_name, grinder_context_id, taste_goal_json, taste_goal_fingerprint,
                 profile_resampled_blob, raw_profile_available,
                 raw_profile_hash, relative_grind_steps_from_reference, relative_grind_um_from_reference, microns_per_step,
-                dose_in_g, grind_observed, dose_observed,
+                dose_in_g, grind_observed, dose_observed, dose_target_g,
                 beverage_out_g, brew_ratio, target_yield_g, target_yield_observed,
                 target_ratio, shot_time_s, recommendation_id,
                 recommended_grind_delta_steps_from_current, recommended_grind_delta_um_from_current,
@@ -871,7 +873,7 @@ class SQLiteShotRepository:
                 :bean_context_id, :bean_context_name, :grinder_context_id, :taste_goal_json, :taste_goal_fingerprint,
                 :profile_resampled_blob, :raw_profile_available,
                 :raw_profile_hash, :relative_grind_steps_from_reference, :relative_grind_um_from_reference, :microns_per_step,
-                :dose_in_g, :grind_observed, :dose_observed,
+                :dose_in_g, :grind_observed, :dose_observed, :dose_target_g,
                 :beverage_out_g, :brew_ratio, :target_yield_g, :target_yield_observed,
                 :target_ratio, :shot_time_s, :recommendation_id,
                 :recommended_grind_delta_steps_from_current, :recommended_grind_delta_um_from_current,
@@ -1674,6 +1676,7 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "dose_in_g": shot.dose_in_g,
         "grind_observed": bool(shot.grind_observed),
         "dose_observed": bool(shot.dose_observed),
+        "dose_target_g": shot.dose_target_g,
         "beverage_out_g": shot.beverage_out_g,
         "brew_ratio": shot.brew_ratio,
         "target_yield_g": shot.target_yield_g,
@@ -1759,6 +1762,7 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         dose_in_g=row["dose_in_g"],
         grind_observed=bool(row["grind_observed"]),
         dose_observed=bool(row["dose_observed"]),
+        dose_target_g=row["dose_target_g"],
         beverage_out_g=row["beverage_out_g"],
         brew_ratio=row["brew_ratio"],
         target_yield_g=row["target_yield_g"],

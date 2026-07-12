@@ -123,6 +123,7 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("rejectUnknownFields(payload, allowedComparisonFields, errors)", source)
         self.assertIn("requireNumberRange(payload, 'schema_version', SUPPORTED_SCHEMA_VERSION", source)
         self.assertIn("requireNumberRange(payload, 'dose_in_g', 5, 30", source)
+        self.assertIn("requireNumberRange(payload, 'dose_target_g', 5, 30", source)
         self.assertIn("optionalNumberRange(payload, 'beverage_out_g', 0, 120", source)
         self.assertIn("requireNumberRange(payload, 'target_yield_g', 5, 100", source)
         self.assertIn("optionalNumberRange(payload, 'shot_time_s', 0, 180", source)

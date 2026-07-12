@@ -39,6 +39,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 stored_shot = shots.get("shot_1")
                 stored_recommendation = recommendations.get("rec_1")
                 self.assertEqual(stored_shot.relative_grind_steps_from_reference, 2.0)  # type: ignore[union-attr]
+                self.assertEqual(stored_shot.dose_target_g, 18.0)  # type: ignore[union-attr]
                 self.assertEqual(stored_recommendation.mode, RecommendationMode.CPBO_BEST_INCUMBENT)  # type: ignore[union-attr]
                 self.assertEqual(stored_shot.taste_goal, _taste_goal())  # type: ignore[union-attr]
                 self.assertEqual(stored_recommendation.taste_goal, _taste_goal())  # type: ignore[union-attr]
@@ -120,6 +121,7 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS community_validated_shots", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS community_comparisons", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS cpbo_comparisons", schema)
+        self.assertIn("dose_target_g DOUBLE PRECISION", schema)
         self.assertNotIn("human_rating", schema)
         self.assertNotIn("taste_tags_json", schema)
         self.assertNotIn("dreamer_shadow", schema)

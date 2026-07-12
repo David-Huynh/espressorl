@@ -27,7 +27,7 @@ const allowedShotFields = new Set([
   'relative_grind_steps_from_reference',
   'relative_grind_um_from_reference', 'current_absolute_step', 'absolute_reference_step',
   'action_observed',
-  'dose_in_g', 'beverage_out_g', 'brew_ratio', 'target_yield_g', 'target_ratio',
+  'dose_in_g', 'dose_target_g', 'beverage_out_g', 'brew_ratio', 'target_yield_g', 'target_ratio',
   'shot_time_s', 'recommendation_id', 'recommended_grind_delta_steps_from_current',
   'recommended_grind_delta_um_from_current', 'recommended_projected_relative_step_from_reference',
   'recommended_dose_g', 'recommended_target_yield_g', 'recommended_target_ratio',
@@ -290,6 +290,7 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   requireTasteGoal(payload, errors);
   requireNumberRange(payload, 'timestamp', 0, Number.MAX_SAFE_INTEGER, errors);
   requireNumberRange(payload, 'dose_in_g', 5, 30, errors);
+  requireNumberRange(payload, 'dose_target_g', 5, 30, errors);
   optionalNumberRange(payload, 'beverage_out_g', 0, 120, errors);
   optionalNumberRange(payload, 'brew_ratio', 0.1, 10, errors);
   requireNumberRange(payload, 'target_yield_g', 5, 100, errors);

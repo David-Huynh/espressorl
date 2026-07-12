@@ -190,6 +190,8 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 client._client = transport  # type: ignore[assignment]
 
                 baseline = _shot_payload("shot_1", grind=2.0, community_upload_enabled=True)
+                baseline.pop("dose_in_g")
+                baseline["dose_observed"] = False
                 _send(client, transport, "gaggimate/AA_BB/shot/profile", baseline)
                 first = recommendations.get_current(
                     "install_1", "gaggimate:AA_BB", "bean_1", clock(),
@@ -203,6 +205,8 @@ class GaggimateEndToEndTests(unittest.TestCase):
                     recommendation_id=first.recommendation_id,  # type: ignore[union-attr]
                     community_upload_enabled=True,
                 )
+                candidate.pop("dose_in_g")
+                candidate["dose_observed"] = False
                 _send(client, transport, "gaggimate/AA_BB/shot/profile", candidate)
                 _send(
                     client,

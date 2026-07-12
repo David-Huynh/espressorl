@@ -68,8 +68,6 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "install_id": "install_1",
                 "machine_id": "gaggimate:AA_BB",
                 "timestamp": 100,
-                "profile_id": "profile_1",
-                "profile_label": "Profile One",
                 "source": "webui",
             },
             "AA_BB",
@@ -102,6 +100,27 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(event.profile_id, payload["profile_id"])
         self.assertEqual(len(event.temperature or []), len(event.time_ms))
 
+    def test_shot_payload_keeps_commanded_dose_when_physical_dose_is_unmeasured(self) -> None:
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        payload.pop("dose_in_g")
+        payload["dose_observed"] = False
+        payload["dose_target_g"] = 18.2
+
+        event = self.client.translate_shot_payload(payload, "AA_BB")
+
+        self.assertFalse(event.dose_observed)
+        self.assertEqual(event.dose_target_g, 18.2)
+        self.assertEqual(event.dose_in_g, 18.2)
+
+    def test_shot_payload_rejects_an_invalid_declared_dose_target(self) -> None:
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        payload.pop("dose_in_g")
+        payload["dose_observed"] = False
+        payload["dose_target_g"] = -1
+
+        with self.assertRaisesRegex(ValueError, "dose_target_g"):
+            self.client.translate_shot_payload(payload, "AA_BB")
+
     def test_optimizer_settings_accepts_cpbo_and_rejects_removed_dreamer(self) -> None:
         event = self.client.translate_optimizer_settings_payload(
             {
@@ -111,6 +130,8 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "install_id": "install_1",
                 "machine_id": "gaggimate:AA_BB",
                 "timestamp": 100,
+                "profile_id": "profile_1",
+                "profile_label": "Profile One",
                 "source": "webui",
             },
             "AA_BB",

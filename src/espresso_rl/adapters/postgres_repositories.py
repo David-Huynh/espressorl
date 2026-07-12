@@ -119,6 +119,7 @@ class PostgresStore:
             "optimization_weight": "DOUBLE PRECISION NOT NULL DEFAULT 1.0",
             "grind_observed": "BOOLEAN NOT NULL DEFAULT TRUE",
             "dose_observed": "BOOLEAN NOT NULL DEFAULT TRUE",
+            "dose_target_g": "DOUBLE PRECISION",
             "target_yield_observed": "BOOLEAN NOT NULL DEFAULT TRUE",
             "grind_followed": "BOOLEAN",
             "dose_followed": "BOOLEAN",

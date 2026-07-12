@@ -377,6 +377,7 @@ def shot_payload() -> dict[str, Any]:
         "taste_goal": balanced_taste_goal(),
         "profile_resampled": profile,
         "dose_in_g": 18.0,
+        "dose_target_g": 18.0,
         "beverage_out_g": 38.0,
         "target_yield_g": 38.0,
         "target_ratio": 2.111,

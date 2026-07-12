@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -416,6 +417,7 @@ class ShotRecord:
     target_yield_g: float
     grind_observed: bool = True
     dose_observed: bool = True
+    dose_target_g: float | None = None
     target_yield_observed: bool = True
     relative_grind_steps_from_reference: float | None = None
     relative_grind_um_from_reference: float | None = None
@@ -525,6 +527,12 @@ class ShotRecord:
             raise ValueError("microns_per_step must be positive")
         if self.dose_in_g <= 0:
             raise ValueError("dose_in_g must be positive")
+        if self.dose_target_g is not None:
+            self.dose_target_g = float(self.dose_target_g)
+            if not math.isfinite(self.dose_target_g) or self.dose_target_g <= 0:
+                raise ValueError("dose_target_g must be finite and positive")
+        elif self.dose_observed:
+            self.dose_target_g = self.dose_in_g
         if self.target_yield_g <= 0:
             raise ValueError("target_yield_g must be positive")
         if self.relative_grind_um_from_reference is None and self.relative_grind_steps_from_reference is not None:
@@ -540,7 +548,8 @@ class ShotRecord:
         if self.beverage_out_g is not None and self.brew_ratio is None and self.dose_observed:
             self.brew_ratio = self.beverage_out_g / self.dose_in_g
         if self.target_ratio is None:
-            self.target_ratio = self.target_yield_g / self.dose_in_g
+            ratio_dose = self.dose_target_g or self.dose_in_g
+            self.target_ratio = self.target_yield_g / ratio_dose
         if self.shot_type != ShotType.ESPRESSO or self.exclude_from_local_optimization:
             self.optimization_weight = 0.0
             self.recommendation_attribution_weight = 0.0
@@ -584,7 +593,7 @@ class ShotRecord:
 
     @property
     def action_dose_g(self) -> float:
-        return self.recommended_dose_g or self.dose_in_g
+        return self.recommended_dose_g or self.dose_target_g or self.dose_in_g
 
     @action_dose_g.setter
     def action_dose_g(self, value: float) -> None:
@@ -593,10 +602,12 @@ class ShotRecord:
     def to_recipe(self) -> Recipe:
         if self.relative_grind_steps_from_reference is None:
             raise ValueError("shot has no relative_grind_steps_from_reference")
+        if self.dose_target_g is None:
+            raise ValueError("shot has no known dose target")
         return Recipe(
             relative_grind_steps_from_reference=self.relative_grind_steps_from_reference,
             microns_per_step=self.microns_per_step,
-            dose_g=self.dose_in_g,
+            dose_g=self.dose_target_g,
             target_yield_g=self.target_yield_g,
             target_ratio=self.target_ratio,
             grinder_step_direction=self.grinder_step_direction,

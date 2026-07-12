@@ -22,6 +22,10 @@ README.txt
 - anchor-shot recipe, realized outcome, quality metadata, and trajectories
 - source trust weights
 
+Recipe records retain `dose_target_g` independently from `dose_in_g` and the
+`action_observed.dose` flag, so an offline learner can distinguish the commanded
+recipe from a physically measured dose.
+
 The label is exactly `new_better`, `anchor_better`, or `tie`. The exporter
 rejects numeric ratings, scalar rewards, reversed joins, mixed contexts,
 mixed taste goals, future timestamps, duplicate comparison identities, and

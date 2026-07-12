@@ -125,6 +125,7 @@ class ShotProfileEvent:
     schema_version: int = 1
     grind_observed: bool = True
     dose_observed: bool = True
+    dose_target_g: float | None = None
     target_yield_observed: bool = True
     temperature: list[float] | None = None
     target_temperature: list[float] | None = None
@@ -193,6 +194,16 @@ class ShotProfileEvent:
                 raise ValueError("valve_open must contain only booleans")
         object.__setattr__(self, "microns_per_step", _number(self.microns_per_step, "microns_per_step"))
         object.__setattr__(self, "dose_in_g", _number(self.dose_in_g, "dose_in_g"))
+        if self.dose_target_g is not None:
+            object.__setattr__(
+                self,
+                "dose_target_g",
+                _number(self.dose_target_g, "dose_target_g"),
+            )
+        elif self.dose_observed:
+            # A measured dose is a valid recipe realization when no separate
+            # commanded target was supplied by the machine adapter.
+            object.__setattr__(self, "dose_target_g", self.dose_in_g)
         object.__setattr__(self, "target_yield_g", _number(self.target_yield_g, "target_yield_g"))
         for field_name in ("grind_observed", "dose_observed", "target_yield_observed"):
             if not isinstance(getattr(self, field_name), bool):
@@ -338,6 +349,8 @@ class ShotProfileEvent:
             raise ValueError("microns_per_step must be positive")
         if self.dose_in_g <= 0:
             raise ValueError("dose_in_g must be positive")
+        if self.dose_target_g is not None and self.dose_target_g <= 0:
+            raise ValueError("dose_target_g must be positive when present")
         if self.target_yield_g <= 0:
             raise ValueError("target_yield_g must be positive")
         if self.beverage_out_g is not None and self.beverage_out_g <= 0:

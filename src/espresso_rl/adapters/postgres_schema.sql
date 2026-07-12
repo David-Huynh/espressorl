@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS shots (
     dose_in_g DOUBLE PRECISION NOT NULL,
     grind_observed BOOLEAN NOT NULL DEFAULT TRUE,
     dose_observed BOOLEAN NOT NULL DEFAULT TRUE,
+    dose_target_g DOUBLE PRECISION,
     beverage_out_g DOUBLE PRECISION,
     brew_ratio DOUBLE PRECISION,
     target_yield_g DOUBLE PRECISION NOT NULL,
@@ -94,6 +95,9 @@ ALTER TABLE shots
 ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS taste_goal_fingerprint TEXT NOT NULL
     DEFAULT 'aba2fe71b86b279da2f84ba25b616fbcdd127274d5f5fa393c8e0576777744a8';
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS dose_target_g DOUBLE PRECISION;
 
 ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS relative_grind_steps_from_reference DOUBLE PRECISION;
