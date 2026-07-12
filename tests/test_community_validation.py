@@ -172,6 +172,7 @@ class CommunityValidationTests(unittest.TestCase):
                 "recommendation_id": "rec_1",
                 "install_id": "verified_install",
                 "machine_id": "machine_1",
+                "taste_goal": balanced_taste_goal(),
                 "next_dose_g": 18.0,
                 "target_yield_g": 38.0,
                 "target_ratio": 2.111,
@@ -373,6 +374,7 @@ def shot_payload() -> dict[str, Any]:
         "machine_id": "machine_1",
         "machine_adapter": "gaggimate",
         "bean_context_id": "bean_1",
+        "taste_goal": balanced_taste_goal(),
         "profile_resampled": profile,
         "dose_in_g": 18.0,
         "beverage_out_g": 38.0,
@@ -404,9 +406,14 @@ def comparison_payload(**overrides: Any) -> dict[str, Any]:
         "bean_context_id": "bean_1",
         "grinder_context_id": "grinder_1",
         "profile_id": "profile_1",
+        "taste_goal": balanced_taste_goal(),
     }
     payload.update(overrides)
     return payload
+
+
+def balanced_taste_goal() -> dict[str, Any]:
+    return {"schema_version": 1, "mode": "balanced", "targets": {}}
 
 
 class FakeWarehouse:

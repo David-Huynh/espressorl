@@ -16,6 +16,7 @@ from .models import (
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
 from .cpbo import ComparisonMode, PreferenceLabel
+from .taste_goal import TasteGoal
 
 VALID_CORRECTION_TAGS = {
     "changed_manually",
@@ -135,6 +136,7 @@ class ShotProfileEvent:
     bean_context_id: str | None = None
     bean_context_name: str | None = None
     grinder_context_id: str | None = None
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
     grinder_adjustment_mode: GrinderAdjustmentMode = GrinderAdjustmentMode.STEPPED
@@ -238,6 +240,8 @@ class ShotProfileEvent:
         object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
         object.__setattr__(self, "bean_context_name", _optional_string(self.bean_context_name, "bean_context_name"))
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
+        if not isinstance(self.taste_goal, TasteGoal):
+            object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
         if self.optimization_weight is not None:
             object.__setattr__(self, "optimization_weight", _number(self.optimization_weight, "optimization_weight"))
         if self.community_upload_enabled is not None and not isinstance(self.community_upload_enabled, bool):
@@ -353,6 +357,7 @@ class PreferenceFeedbackEvent:
     install_id: str
     machine_id: str
     timestamp: int
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
     comparison_mode: ComparisonMode | None = None
     source: str = "unknown"
     schema_version: int = 1
@@ -379,6 +384,8 @@ class PreferenceFeedbackEvent:
         if not isinstance(self.source, str) or not self.source.strip() or len(self.source) > 80:
             raise ValueError("preference feedback source is invalid")
         object.__setattr__(self, "label", PreferenceLabel(self.label))
+        if not isinstance(self.taste_goal, TasteGoal):
+            object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
         if self.comparison_mode is not None:
             object.__setattr__(self, "comparison_mode", ComparisonMode(self.comparison_mode))
 
@@ -538,6 +545,7 @@ class MachineStateEvent:
     bean_context_id: str | None = None
     bean_context_name: str | None = None
     grinder_context_id: str | None = None
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED
     grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER
     grinder_adjustment_mode: GrinderAdjustmentMode = GrinderAdjustmentMode.STEPPED
@@ -563,6 +571,8 @@ class MachineStateEvent:
         object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
         object.__setattr__(self, "bean_context_name", _optional_string(self.bean_context_name, "bean_context_name"))
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
+        if not isinstance(self.taste_goal, TasteGoal):
+            object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
         object.__setattr__(
             self,
             "grinder_calibration_mode",
@@ -634,6 +644,9 @@ class OptimizerSettingsEvent:
     schema_version: int = 1
     bean_context_id: str | None = None
     grinder_context_id: str | None = None
+    profile_id: str | None = None
+    profile_label: str | None = None
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
     source: str = "unknown"
 
     event_type: str = field(default="optimizer_settings", init=False)
@@ -644,6 +657,10 @@ class OptimizerSettingsEvent:
         object.__setattr__(self, "optimizer_mode", normalize_optimizer_mode(self.optimizer_mode))
         object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
+        object.__setattr__(self, "profile_id", _optional_string(self.profile_id, "profile_id"))
+        object.__setattr__(self, "profile_label", _optional_string(self.profile_label, "profile_label", 160))
+        if not isinstance(self.taste_goal, TasteGoal):
+            object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
         object.__setattr__(self, "source", _optional_string(self.source, "source", 80) or "unknown")
 
 

@@ -24,6 +24,7 @@ def payload(**overrides) -> str:
         "shot_id": "shot_1",
         "install_id": "install_1",
         "machine_id": "machine_1",
+        "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
         "timestamp": 1,
         "dose_in_g": 18.0,
         "target_yield_g": 36.0,

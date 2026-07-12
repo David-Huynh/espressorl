@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .models import Recipe, Recommendation, RecommendationStatus, StaleCheck
+from .taste_goal import TasteGoal
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ def check_recommendation_staleness(
     bean_context_id: str | None,
     grinder_context_id: str | None = None,
     current_recipe: Recipe | None = None,
+    taste_goal: TasteGoal | None = None,
     policy: StaleRecommendationPolicy = StaleRecommendationPolicy(),
 ) -> StaleCheck:
     if recommendation.status in {
@@ -33,6 +35,8 @@ def check_recommendation_staleness(
         return StaleCheck(True, "bean_context_changed")
     if recommendation.grinder_context_id != grinder_context_id:
         return StaleCheck(True, "grinder_context_changed")
+    if taste_goal is not None and recommendation.taste_goal.fingerprint != taste_goal.fingerprint:
+        return StaleCheck(True, "taste_goal_changed")
     if current_recipe is not None and _large_manual_change(recommendation, current_recipe, policy):
         return StaleCheck(True, "manual_recipe_changed")
     return StaleCheck(False)

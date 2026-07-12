@@ -64,9 +64,12 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "anchor_shot_id": "shot_anchor",
                 "label": "new_better",
                 "comparison_mode": "best_incumbent",
+                "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
                 "install_id": "install_1",
                 "machine_id": "gaggimate:AA_BB",
                 "timestamp": 100,
+                "profile_id": "profile_1",
+                "profile_label": "Profile One",
                 "source": "webui",
             },
             "AA_BB",
@@ -113,6 +116,8 @@ class GaggimateAdapterTests(unittest.TestCase):
             "AA_BB",
         )
         self.assertEqual(event.optimizer_mode, "cpbo")
+        self.assertEqual(event.profile_id, "profile_1")
+        self.assertEqual(event.profile_label, "Profile One")
         with self.assertRaises(ValueError):
             self.client.translate_optimizer_settings_payload(
                 {

@@ -124,6 +124,8 @@ class CPBORuntimeBridge:
             raise ValueError("preference machine_id does not own the CPBO run")
         if event.comparison_mode is not None and event.comparison_mode != run.comparison_mode:
             raise ValueError("preference comparison_mode does not match the optimization run")
+        if event.taste_goal.fingerprint != run.context.taste_goal.fingerprint:
+            raise ValueError("preference taste goal does not match the optimization run")
         self._optimizer.record_preference(
             event.optimization_run_id,
             event.new_shot_id,
@@ -159,6 +161,7 @@ class CPBORuntimeBridge:
                     grinder_context_id=run.context.grinder_context_id,
                     profile_id=run.context.profile_id,
                     raw_profile_hash=run.context.raw_profile_hash,
+                    taste_goal=run.context.taste_goal,
                 )
             )
         suggestion = self._optimizer.suggest_next(event.optimization_run_id)
@@ -205,6 +208,7 @@ def strict_context_from_shot(shot: ShotRecord) -> OptimizationRunContext:
         raw_profile_hash=shot.raw_profile_hash,
         basket_id=f"basket_ml:{shot.basket_size_ml:.6g}",
         user_id=shot.user_id or None,
+        taste_goal=shot.taste_goal,
     )
 
 

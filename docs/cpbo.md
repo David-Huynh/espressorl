@@ -60,8 +60,30 @@ converted back to physical units and quantized before identity, deduplication,
 or display.
 
 Run context includes install, machine, bean, grinder, profile ID, raw profile
-hash, basket, water, and user identifiers when available. Missing identifiers
-are not fabricated. Materially different contexts are not mixed.
+hash, basket, water, user identifiers, and the selected taste goal when
+available. Missing identifiers are not fabricated. Materially different
+contexts are not mixed.
+
+### Taste goal context
+
+A taste goal is either `balanced` or a versioned `custom` set of categorical
+targets. Custom targets use `low`, `medium`, or `high` for the shared flavor
+vocabulary (for example `sweet`, `nutty_cocoa`, `fruity`, `bitter`, or
+`astringent_harsh`). Balanced means that no explicit attribute target is set;
+it is not a numeric target or an inferred reward.
+
+The goal is part of the run fingerprint. The same bean, grinder, and profile
+can therefore maintain separate resumable CPBO runs for different goals. A
+comparison, its two physical shots, and the generated recommendation all carry
+the immutable goal snapshot. Feedback from one goal cannot enter another
+goal's preference likelihood.
+
+CPBO does not append goal values to recipe `x`, assign target weights, or
+convert them into pseudo-observations. The user evaluates which shot is closer
+to the selected goal, and CPBO learns only from the resulting oriented
+comparison inside that goal-scoped run. The goal snapshot is retained so a
+future offline conditional model can learn relationships between requested
+flavor profiles, trajectories, and preferences.
 
 ## Preference Likelihood
 
@@ -153,7 +175,8 @@ Pairwise comparisons are canonical supervision that can be reused by future
 offline model-based RL or preference-learning methods. Community persistence is
 therefore algorithm-neutral: physical recipes and trajectories are shot
 records, while `new_better`, `anchor_better`, and `tie` are oriented rows in
-`community_comparisons`.
+`community_comparisons`. Both operands and the comparison must have the same
+versioned taste-goal snapshot.
 
 An offline dynamics model can train self-supervised on physical trajectories,
 actions, and context. A separate preference or terminal-utility model can join
@@ -200,11 +223,17 @@ Recommendation storage also adds:
 - comparison_anchor_shot_id
 - comparison_mode
 - preference_feedback_required
+- taste_goal_json
+- taste_goal_fingerprint
 
 Pre-release numeric BO records and scalar feedback columns are removed during
 schema migration. CPBO data are separate physical shots and oriented
 comparisons, not synthetic scalar observations. Reset All deletes CPBO rows
 for that install and machine through the repository port.
+
+Pre-goal local records migrate explicitly to the balanced goal. Active legacy
+CPBO run lookup keys are rewritten lazily after successful context validation;
+historical recipe and shot values are not mutated.
 
 Community persistence is separate from local optimizer checkpoints:
 
@@ -255,7 +284,8 @@ are strictly allowlisted; unknown configuration keys fail startup.
 2. CPBO emits one quantized candidate and its anchor.
 3. The candidate is pulled and stored as a distinct physical shot.
 4. Invalid shots clear the candidate without creating a comparison.
-5. A valid shot asks for exactly one three-outcome preference.
+5. A valid shot asks which result is closer to the run's snapshotted taste goal
+   using exactly one three-outcome preference.
 6. The oriented comparison updates the GP and, in best mode, trust-region state.
 7. CPBO emits the next candidate.
 

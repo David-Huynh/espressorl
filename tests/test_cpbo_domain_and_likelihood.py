@@ -16,6 +16,7 @@ from espresso_rl.domain.cpbo import (
     RecipeSpace,
 )
 from espresso_rl.domain.models import GrinderStepDirection
+from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.optimizers.cpbo_jnd import jnd_probabilities
 from espresso_rl.optimizers.cpbo_config import (
     cpbo_config_from_dict,
@@ -87,6 +88,42 @@ class RecipeSpaceTests(unittest.TestCase):
         )
         self.assertNotEqual(base.fingerprint, other_profile.fingerprint)
         self.assertNotEqual(base.fingerprint, other_water.fingerprint)
+
+    def test_context_fingerprint_partitions_taste_goal_without_changing_recipe_space(self) -> None:
+        balanced = OptimizationRunContext("install", "machine", "bean", "grinder", "profile")
+        sweet = OptimizationRunContext(
+            "install",
+            "machine",
+            "bean",
+            "grinder",
+            "profile",
+            taste_goal=TasteGoal.custom({"sweet": "high", "bitter": "low"}),
+        )
+        self.assertNotEqual(balanced.fingerprint, sweet.fingerprint)
+        self.assertEqual(
+            sweet.taste_goal.to_dict(),
+            {
+                "schema_version": 1,
+                "mode": "custom",
+                "targets": {"sweet": "high", "bitter": "low"},
+            },
+        )
+
+    def test_taste_goal_schema_is_strict_and_canonical(self) -> None:
+        first = TasteGoal.custom({"bitter": "low", "sweet": "high"})
+        second = TasteGoal.custom({"sweet": "high", "bitter": "low"})
+        self.assertEqual(first, second)
+        self.assertEqual(first.fingerprint, second.fingerprint)
+        self.assertEqual(first.summary, "sweet high, bitter low")
+        for invalid in (
+            {"schema_version": 1, "mode": "balanced", "targets": {"sweet": "high"}},
+            {"schema_version": 1, "mode": "custom", "targets": {}},
+            {"schema_version": 1, "mode": "custom", "targets": {"unknown": "high"}},
+            {"schema_version": 1, "mode": "custom", "targets": {"sweet": "maximum"}},
+            {"schema_version": 1, "mode": "balanced", "targets": {}, "extra": True},
+        ):
+            with self.assertRaises(ValueError):
+                TasteGoal.from_dict(invalid)
 
     def test_repeated_recipe_shots_are_distinct_physical_records(self) -> None:
         first = PreferenceShot(

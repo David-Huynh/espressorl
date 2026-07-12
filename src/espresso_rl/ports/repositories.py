@@ -47,6 +47,7 @@ class RecommendationRepository(Protocol):
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> Recommendation | None:
         ...
 
@@ -58,6 +59,7 @@ class RecommendationRepository(Protocol):
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> Recommendation | None:
         ...
 
@@ -71,6 +73,7 @@ class RecommendationRepository(Protocol):
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> None:
         ...
 

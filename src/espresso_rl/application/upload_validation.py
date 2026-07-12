@@ -8,6 +8,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from espresso_rl.domain.taste_goal import TasteGoal
+
 SHA256_HEX_LENGTH = 64
 SUPPORTED_SCHEMA_VERSION = 1
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,160}$")
@@ -26,6 +28,7 @@ SHOT_RECORD_FIELDS = frozenset(
         "machine_adapter",
         "bean_context_id",
         "grinder_context_id",
+        "taste_goal",
         "profile_resampled",
         "raw_profile_available",
         "raw_profile_hash",
@@ -105,6 +108,7 @@ RECOMMENDATION_RECORD_FIELDS = frozenset(
         "grinder_context_id",
         "profile_id",
         "raw_profile_hash",
+        "taste_goal",
         "grind_delta_steps_from_current",
         "grind_delta_um_from_current",
         "projected_relative_step_from_reference",
@@ -161,6 +165,7 @@ COMPARISON_RECORD_FIELDS = frozenset(
         "grinder_context_id",
         "profile_id",
         "raw_profile_hash",
+        "taste_goal",
     }
 )
 
@@ -314,6 +319,7 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_identifier(payload, "machine_adapter", errors)
     _optional_identifier(payload, "bean_context_id", errors)
     _optional_string(payload, "grinder_context_id", 120, errors)
+    _require_taste_goal(payload, errors)
     _optional_bool(payload, "raw_profile_available", errors)
     _optional_hash(payload, "raw_profile_hash", errors)
     _require_number_range(payload, "timestamp", 0, 9_007_199_254_740_991, errors)
@@ -414,6 +420,7 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
     _optional_string(payload, "grinder_context_id", 120, errors)
     _optional_string(payload, "profile_id", 120, errors)
     _optional_hash(payload, "raw_profile_hash", errors)
+    _require_taste_goal(payload, errors)
     _optional_enum(
         payload,
         "grinder_calibration_mode",
@@ -501,6 +508,7 @@ def _validate_comparison_record(payload: dict[str, Any], errors: list[str]) -> N
     _optional_string(payload, "grinder_context_id", 120, errors)
     _optional_string(payload, "profile_id", 120, errors)
     _optional_hash(payload, "raw_profile_hash", errors)
+    _require_taste_goal(payload, errors)
     _require_number_range(payload, "created_at", 0, 9_007_199_254_740_991, errors)
     _optional_enum(payload, "label", {"new_better", "anchor_better", "tie"}, errors)
     if payload.get("label") is None:
@@ -510,6 +518,16 @@ def _validate_comparison_record(payload: dict[str, Any], errors: list[str]) -> N
         errors.append("comparison_mode is required")
     if payload.get("new_shot_id") == payload.get("anchor_shot_id"):
         errors.append("comparison requires distinct physical shots")
+
+
+def _require_taste_goal(payload: dict[str, Any], errors: list[str]) -> None:
+    if "taste_goal" not in payload:
+        errors.append("taste_goal is required")
+        return
+    try:
+        TasteGoal.from_dict(payload.get("taste_goal"))
+    except ValueError as exc:
+        errors.append(str(exc))
 
 
 def _validate_profile_resampled(profile: Any, errors: list[str]) -> None:

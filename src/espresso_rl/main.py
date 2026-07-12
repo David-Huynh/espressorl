@@ -73,6 +73,7 @@ from espresso_rl.domain.models import (
     UploadQueueStatus,
 )
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_CPBO
+from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.optimizers.cpbo import ConsecutivePreferentialBayesianOptimizer
 from espresso_rl.optimizers.cpbo_trace import TRACE_FEATURE_NAMES, extract_trace_features
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
@@ -171,10 +172,11 @@ def run_public(config: Config) -> None:
     )
 
     status_context_lock = threading.Lock()
-    status_context: dict[str, str | None] = {
+    status_context: dict[str, object | None] = {
         "machine_id": config.machine_id,
         "bean_context_id": config.bean_context_id,
         "grinder_context_id": config.grinder_context_id,
+        "taste_goal": TasteGoal.balanced(),
     }
     mqtt_client: GaggimateMQTTClient
 
@@ -190,11 +192,17 @@ def run_public(config: Config) -> None:
         last_recommendation_id: str | None = None,
         last_recommendation_at: int | None = None,
         mode: str | None = None,
+        taste_goal: TasteGoal | None = None,
     ) -> None:
         with status_context_lock:
             status_context["machine_id"] = machine_id
             status_context["bean_context_id"] = bean_context_id
             status_context["grinder_context_id"] = grinder_context_id
+            if taste_goal is not None:
+                status_context["taste_goal"] = taste_goal
+            active_taste_goal = status_context["taste_goal"]
+        if not isinstance(active_taste_goal, TasteGoal):
+            active_taste_goal = TasteGoal.balanced()
         mqtt_client.publish_status(
             machine_id,
             build_status_payload(
@@ -213,6 +221,7 @@ def run_public(config: Config) -> None:
                 last_recommendation_id=last_recommendation_id,
                 last_recommendation_at=last_recommendation_at,
                 mode=mode,
+                taste_goal=active_taste_goal,
             ),
         )
 
@@ -274,6 +283,7 @@ def run_public(config: Config) -> None:
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.updated_at,
             mode=recommendation.mode.value,
+            taste_goal=recommendation.taste_goal,
         )
 
     def on_correction(event: ShotCorrectionEvent) -> None:
@@ -293,6 +303,7 @@ def run_public(config: Config) -> None:
             profile_label=shot.profile_label,
             last_shot_id=shot.shot_id,
             last_shot_at=shot.timestamp,
+            taste_goal=shot.taste_goal,
         )
 
     def on_upload_maintenance(event: UploadQueueMaintenanceEvent) -> None:
@@ -317,6 +328,7 @@ def run_public(config: Config) -> None:
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.updated_at,
             mode=recommendation.mode.value,
+            taste_goal=recommendation.taste_goal,
         )
 
     def on_apply(event: RecommendationApplyEvent) -> None:
@@ -329,6 +341,7 @@ def run_public(config: Config) -> None:
             last_recommendation_id=recommendation.recommendation_id,
             last_recommendation_at=recommendation.updated_at,
             mode=recommendation.mode.value,
+            taste_goal=recommendation.taste_goal,
         )
 
     def on_optimizer_settings(event: OptimizerSettingsEvent) -> None:
@@ -341,7 +354,14 @@ def run_public(config: Config) -> None:
             return
         if event.optimizer_mode != OPTIMIZER_MODE_CPBO:
             raise ValueError("only CPBO is available")
-        publish_status(event.machine_id, event.bean_context_id, event.grinder_context_id)
+        publish_status(
+            event.machine_id,
+            event.bean_context_id,
+            event.grinder_context_id,
+            profile_id=event.profile_id,
+            profile_label=event.profile_label,
+            taste_goal=event.taste_goal,
+        )
 
     def on_local_reset(event: LocalResetEvent) -> None:
         if event.install_id != config.install_id or not _same_machine_id(event.machine_id, config.machine_id):
@@ -352,7 +372,7 @@ def run_public(config: Config) -> None:
         if not event.dry_run:
             logger.warning("CPBO reset counts=%s", cpbo_runtime.reset_owner(event.install_id, event.machine_id))
             mqtt_client.clear_recommendation(event.machine_id)
-        publish_status(event.machine_id, None, None)
+        publish_status(event.machine_id, None, None, taste_goal=TasteGoal.balanced())
 
     def on_machine_state(event: MachineStateEvent) -> None:
         runtime_coordinator.handle_machine_state(event)
@@ -441,6 +461,7 @@ def maybe_publish_startup_recommendation(
 ) -> None:
     if config.machine_id == "gaggimate:local":
         return
+    startup_taste_goal = TasteGoal.balanced()
     current = None
     if config.bean_context_id:
         current = service.get_current_recommendation(
@@ -448,6 +469,7 @@ def maybe_publish_startup_recommendation(
             machine_id=config.machine_id,
             bean_context_id=config.bean_context_id,
             grinder_context_id=config.grinder_context_id,
+            taste_goal_fingerprint=startup_taste_goal.fingerprint,
         )
     if current is not None:
         mqtt_client.publish_recommendation(current)
@@ -467,6 +489,7 @@ def maybe_publish_startup_recommendation(
             last_recommendation_id=current.recommendation_id if current else None,
             last_recommendation_at=current.updated_at if current else None,
             mode=current.mode.value if current else None,
+            taste_goal=startup_taste_goal,
         ),
     )
 
@@ -488,9 +511,11 @@ def build_status_payload(
     last_recommendation_id: str | None = None,
     last_recommendation_at: int | None = None,
     mode: str | None = None,
+    taste_goal: TasteGoal | None = None,
     **_ignored: object,
 ) -> dict:
     now = config.now()
+    active_taste_goal = taste_goal or TasteGoal.balanced()
     all_recent = (
         shot_repo.list_recent(
             install_id=config.install_id,
@@ -502,13 +527,18 @@ def build_status_payload(
         if shot_repo is not None
         else []
     )
+    goal_recent = [
+        shot
+        for shot in all_recent
+        if shot.taste_goal.fingerprint == active_taste_goal.fingerprint
+    ]
     optimizer_profile_id = profile_id or next(
-        (shot.profile_id for shot in reversed(all_recent) if shot.profile_id),
+        (shot.profile_id for shot in reversed(goal_recent) if shot.profile_id),
         None,
     )
     recent = [
         shot
-        for shot in all_recent
+        for shot in goal_recent
         if optimizer_profile_id is None or _profile_ids_match(shot.profile_id, optimizer_profile_id)
     ]
     last_shot_record = (
@@ -536,6 +566,7 @@ def build_status_payload(
         bean_context_id=bean_context_id,
         grinder_context_id=grinder_context_id,
         profile_id=optimizer_profile_id,
+        taste_goal_fingerprint=active_taste_goal.fingerprint,
     )
     if current is not None:
         last_recommendation_id = last_recommendation_id or current.recommendation_id
@@ -579,6 +610,8 @@ def build_status_payload(
         "install_id": config.install_id,
         "bean_context_id": bean_context_id,
         "grinder_context_id": grinder_context_id,
+        "taste_goal": active_taste_goal.to_dict(),
+        "taste_goal_summary": active_taste_goal.summary,
         "optimizer_profile_id": optimizer_profile_id,
         "optimizer_profile_label": optimizer_profile_label,
         **runtime_health,
@@ -737,6 +770,7 @@ def recent_shot_summaries(shots: list, rejected_record_ids: set[str], limit: int
             "timestamp": shot.timestamp,
             "bean_context_id": shot.bean_context_id,
             "grinder_context_id": shot.grinder_context_id,
+            "taste_goal": shot.taste_goal.to_dict(),
             "shot_type": shot.shot_type.value,
             "shot_time_s": shot.shot_time_s,
             "beverage_out_g": shot.beverage_out_g,

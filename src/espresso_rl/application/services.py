@@ -174,6 +174,7 @@ class EspressoRLService:
             bean_context_id=event.bean_context_id,
             bean_context_name=event.bean_context_name,
             grinder_context_id=event.grinder_context_id,
+            taste_goal=event.taste_goal,
             grinder_calibration_mode=event.grinder_calibration_mode,
             grinder_step_direction=event.grinder_step_direction,
             grinder_adjustment_mode=event.grinder_adjustment_mode,
@@ -400,6 +401,7 @@ class EspressoRLService:
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> Recommendation | None:
         return self._recommendations.get_current(
             install_id=install_id,
@@ -409,6 +411,7 @@ class EspressoRLService:
             grinder_context_id=grinder_context_id,
             profile_id=profile_id,
             raw_profile_hash=raw_profile_hash if profile_id is None else None,
+            taste_goal_fingerprint=taste_goal_fingerprint,
         )
 
     def handle_machine_state(self, event: MachineStateEvent) -> Recommendation | None:
@@ -432,6 +435,7 @@ class EspressoRLService:
             grinder_context_id=event.grinder_context_id,
             profile_id=event.profile_id,
             raw_profile_hash=event.raw_profile_hash if event.profile_id is None else None,
+            taste_goal_fingerprint=event.taste_goal.fingerprint,
         )
         if current is None:
             return None
@@ -440,6 +444,7 @@ class EspressoRLService:
             now=now,
             bean_context_id=event.bean_context_id,
             grinder_context_id=event.grinder_context_id,
+            taste_goal=event.taste_goal,
         )
         if stale.stale:
             self._expire_recommendation(current, now)
@@ -472,6 +477,7 @@ class EspressoRLService:
                 if recommendation.profile_id is None
                 else None
             ),
+            taste_goal_fingerprint=recommendation.taste_goal.fingerprint,
         )
         self._store_recommendation(recommendation, now)
 
@@ -518,6 +524,7 @@ class EspressoRLService:
                     now=now,
                     bean_context_id=event.bean_context_id,
                     grinder_context_id=event.grinder_context_id,
+                    taste_goal=event.taste_goal,
                 ).stale
             ):
                 return recommendation
@@ -529,6 +536,7 @@ class EspressoRLService:
             grinder_context_id=event.grinder_context_id,
             profile_id=event.profile_id,
             raw_profile_hash=raw_profile_hash if event.profile_id is None else None,
+            taste_goal_fingerprint=event.taste_goal.fingerprint,
         )
         if recommendation is None or not _recommendation_matches_profile_scope(recommendation, profile_scope):
             return None
@@ -537,6 +545,7 @@ class EspressoRLService:
             now=now,
             bean_context_id=event.bean_context_id,
             grinder_context_id=event.grinder_context_id,
+            taste_goal=event.taste_goal,
         ).stale:
             return None
         return recommendation

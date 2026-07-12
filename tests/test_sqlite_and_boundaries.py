@@ -24,6 +24,7 @@ from espresso_rl.domain.models import (
     UploadQueueStatus,
 )
 from espresso_rl.main import upload_queue_for_service
+from espresso_rl.domain.taste_goal import TasteGoal
 
 
 class SQLiteAndBoundaryTests(unittest.TestCase):
@@ -39,6 +40,19 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                 stored_recommendation = recommendations.get("rec_1")
                 self.assertEqual(stored_shot.relative_grind_steps_from_reference, 2.0)  # type: ignore[union-attr]
                 self.assertEqual(stored_recommendation.mode, RecommendationMode.CPBO_BEST_INCUMBENT)  # type: ignore[union-attr]
+                self.assertEqual(stored_shot.taste_goal, _taste_goal())  # type: ignore[union-attr]
+                self.assertEqual(stored_recommendation.taste_goal, _taste_goal())  # type: ignore[union-attr]
+                self.assertIsNone(
+                    recommendations.get_current(
+                        "install_1",
+                        "machine_1",
+                        "bean_1",
+                        150,
+                        grinder_context_id="grinder_1",
+                        profile_id="profile_1",
+                        taste_goal_fingerprint=TasteGoal.balanced().fingerprint,
+                    )
+                )
                 columns = {
                     row["name"]
                     for row in store.conn.execute("PRAGMA table_info(shots)").fetchall()
@@ -138,6 +152,15 @@ class SQLiteAndBoundaryTests(unittest.TestCase):
                     f"{source} imports infrastructure: {imports}",
                 )
 
+    def test_cpbo_math_does_not_consume_taste_goal_as_a_model_feature(self) -> None:
+        optimizer_dir = Path(__file__).parents[1] / "src" / "espresso_rl" / "optimizers"
+        references = {
+            source.name
+            for source in optimizer_dir.glob("cpbo*.py")
+            if "taste_goal" in source.read_text(encoding="utf-8")
+        }
+        self.assertEqual(references, set())
+
 
 def _shot() -> ShotRecord:
     return ShotRecord(
@@ -149,6 +172,7 @@ def _shot() -> ShotRecord:
         bean_context_id="bean_1",
         grinder_context_id="grinder_1",
         profile_id="profile_1",
+        taste_goal=_taste_goal(),
         profile=np.zeros((5, 100), dtype=np.float32),
         raw_profile_available=True,
         raw_profile_hash="a" * 64,
@@ -174,6 +198,7 @@ def _recommendation() -> Recommendation:
         bean_context_id="bean_1",
         grinder_context_id="grinder_1",
         profile_id="profile_1",
+        taste_goal=_taste_goal(),
         grind_delta_steps_from_current=1.0,
         grind_delta_um_from_current=12.5,
         projected_relative_step_from_reference=3.0,
@@ -199,6 +224,10 @@ def _upload() -> UploadQueueItem:
         created_at=1,
         updated_at=1,
     )
+
+
+def _taste_goal() -> TasteGoal:
+    return TasteGoal.custom({"sweet": "high", "bitter": "low"})
 
 
 if __name__ == "__main__":

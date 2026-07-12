@@ -216,6 +216,7 @@ class GaggimateEndToEndTests(unittest.TestCase):
                         "anchor_shot_id": "shot_1",
                         "label": "new_better",
                         "comparison_mode": "best_incumbent",
+                        "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
                         "install_id": "install_1",
                         "machine_id": "gaggimate:AA_BB",
                         "timestamp": clock(),

@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from espresso_rl.domain.taste_goal import TasteGoal
+
 
 PROFILE_SHAPE = (5, 100)
 PROFILE_DTYPE = np.float32
@@ -215,6 +217,7 @@ class Recommendation:
     current_absolute_step: float | None = None
     absolute_reference_step: float | None = None
     projected_absolute_step: float | None = None
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
 
     def __post_init__(self) -> None:
         self.mode = RecommendationMode(self.mode)
@@ -223,6 +226,8 @@ class Recommendation:
         self.grinder_calibration_mode = GrinderCalibrationMode(self.grinder_calibration_mode)
         self.grinder_step_direction = GrinderStepDirection(self.grinder_step_direction)
         self.grinder_adjustment_mode = GrinderAdjustmentMode(self.grinder_adjustment_mode)
+        if not isinstance(self.taste_goal, TasteGoal):
+            self.taste_goal = TasteGoal.from_dict(self.taste_goal)
         self.confidence = max(0.0, min(1.0, float(self.confidence)))
         if self.next_dose_g <= 0:
             raise ValueError("next_dose_g must be positive")
@@ -421,6 +426,7 @@ class ShotRecord:
     bean_context_id: str | None = None
     bean_context_name: str | None = None
     grinder_context_id: str | None = None
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
     recommendation_id: str | None = None
     raw_profile_available: bool = True
     raw_profile_hash: str | None = None
@@ -507,6 +513,8 @@ class ShotRecord:
         self.grinder_calibration_mode = GrinderCalibrationMode(self.grinder_calibration_mode)
         self.grinder_step_direction = GrinderStepDirection(self.grinder_step_direction)
         self.grinder_adjustment_mode = GrinderAdjustmentMode(self.grinder_adjustment_mode)
+        if not isinstance(self.taste_goal, TasteGoal):
+            self.taste_goal = TasteGoal.from_dict(self.taste_goal)
         self.optimization_weight = float(self.optimization_weight)
         if not 0.0 <= self.optimization_weight <= 1.0:
             raise ValueError("optimization_weight must be between 0 and 1")

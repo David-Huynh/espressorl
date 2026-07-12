@@ -16,6 +16,7 @@ README.txt
 `preference_examples.jsonl` is canonical UTF-8 JSON Lines. Each row contains:
 
 - comparison identity, orientation, label, and comparison mode
+- the exact versioned taste goal shared by the comparison and both shots
 - shared machine, bean, grinder, profile, basket, water, and user context
 - new-shot recipe, realized outcome, quality metadata, and trajectories
 - anchor-shot recipe, realized outcome, quality metadata, and trajectories
@@ -23,7 +24,12 @@ README.txt
 
 The label is exactly `new_better`, `anchor_better`, or `tie`. The exporter
 rejects numeric ratings, scalar rewards, reversed joins, mixed contexts,
-future timestamps, duplicate comparison identities, and non-finite values.
+mixed taste goals, future timestamps, duplicate comparison identities, and
+non-finite values.
+
+Taste goals remain categorical data. Offline preference or model-based RL
+learners may condition on them, but exporters do not derive scalar target
+weights or rewards from the goal attributes.
 
 ## Export
 

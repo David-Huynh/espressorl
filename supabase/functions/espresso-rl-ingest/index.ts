@@ -10,12 +10,18 @@ const SUPPORTED_SCHEMA_VERSION = 1;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9_.:@-]{1,160}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
 const UNSAFE_TEXT = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f<>]/;
+const tasteGoalAttributes = new Set([
+  'fruity', 'citrus', 'floral', 'sweet', 'nutty_cocoa', 'roasted', 'spice', 'fermented',
+  'sour', 'green_vegetative', 'bitter', 'astringent_harsh', 'papery_stale', 'salty',
+]);
+const tasteGoalLevels = new Set(['low', 'medium', 'high']);
 
 type JsonRecord = Record<string, unknown>;
 
 const allowedShotFields = new Set([
   'event_type', 'schema_version', 'shot_id', 'timestamp', 'install_id', 'machine_id',
   'machine_adapter', 'bean_context_id', 'grinder_context_id', 'profile_resampled',
+  'taste_goal',
   'raw_profile_available', 'raw_profile_hash', 'grinder_calibration_mode',
   'grinder_adjustment_mode', 'microns_per_step', 'step_direction', 'reference_label',
   'relative_grind_steps_from_reference',
@@ -42,6 +48,7 @@ const allowedRecommendationFields = new Set([
   'event_type', 'schema_version', 'recommendation_id', 'created_at', 'updated_at',
   'expires_at', 'install_id', 'machine_id', 'bean_context_id', 'grinder_context_id',
   'profile_id', 'raw_profile_hash',
+  'taste_goal',
   'grind_delta_steps_from_current', 'grind_delta_um_from_current',
   'projected_relative_step_from_reference', 'projected_relative_grind_um_from_reference',
   'grinder_calibration_mode', 'grinder_adjustment_mode', 'microns_per_step',
@@ -60,6 +67,7 @@ const allowedComparisonFields = new Set([
   'new_shot_id', 'anchor_shot_id', 'label', 'comparison_mode', 'created_at',
   'install_id', 'machine_id', 'machine_adapter', 'recommendation_id',
   'bean_context_id', 'grinder_context_id', 'profile_id', 'raw_profile_hash',
+  'taste_goal',
 ]);
 
 serve(async request => {
@@ -279,6 +287,7 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalIdentifier(payload, 'machine_adapter', errors);
   optionalIdentifier(payload, 'bean_context_id', errors);
   optionalString(payload, 'grinder_context_id', 120, errors);
+  requireTasteGoal(payload, errors);
   requireNumberRange(payload, 'timestamp', 0, Number.MAX_SAFE_INTEGER, errors);
   requireNumberRange(payload, 'dose_in_g', 5, 30, errors);
   optionalNumberRange(payload, 'beverage_out_g', 0, 120, errors);
@@ -365,6 +374,7 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   optionalString(payload, 'grinder_context_id', 120, errors);
   optionalString(payload, 'profile_id', 120, errors);
   optionalSha256(payload, 'raw_profile_hash', errors);
+  requireTasteGoal(payload, errors);
   optionalNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalNumberRange(payload, 'updated_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalNumberRange(payload, 'expires_at', 0, Number.MAX_SAFE_INTEGER, errors);
@@ -432,6 +442,7 @@ function validateComparisonRecord(payload: JsonRecord, errors: string[]) {
   optionalString(payload, 'grinder_context_id', 120, errors);
   optionalString(payload, 'profile_id', 120, errors);
   optionalSha256(payload, 'raw_profile_hash', errors);
+  requireTasteGoal(payload, errors);
   requireNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
   optionalEnum(payload, 'label', ['new_better', 'anchor_better', 'tie'], errors);
   if (payload.label === undefined || payload.label === null) errors.push('label is required');
@@ -441,6 +452,43 @@ function validateComparisonRecord(payload: JsonRecord, errors: string[]) {
   }
   if (payload.new_shot_id === payload.anchor_shot_id) {
     errors.push('comparison requires distinct physical shots');
+  }
+}
+
+function requireTasteGoal(payload: JsonRecord, errors: string[]) {
+  const value = payload.taste_goal;
+  if (!value || Array.isArray(value) || typeof value !== 'object') {
+    errors.push('taste_goal must be an object');
+    return;
+  }
+  const goal = value as JsonRecord;
+  const allowed = new Set(['schema_version', 'mode', 'targets']);
+  const unknown = Object.keys(goal).filter(key => !allowed.has(key));
+  const missing = [...allowed].filter(key => !(key in goal));
+  if (unknown.length > 0 || missing.length > 0) {
+    errors.push('taste_goal fields are invalid');
+    return;
+  }
+  if (goal.schema_version !== 1) {
+    errors.push('taste_goal schema_version is unsupported');
+  }
+  if (goal.mode !== 'balanced' && goal.mode !== 'custom') {
+    errors.push('taste_goal mode is invalid');
+  }
+  if (!goal.targets || Array.isArray(goal.targets) || typeof goal.targets !== 'object') {
+    errors.push('taste_goal targets must be an object');
+    return;
+  }
+  const targets = goal.targets as JsonRecord;
+  const targetEntries = Object.entries(targets);
+  if (targetEntries.some(([attribute, level]) => !tasteGoalAttributes.has(attribute) || !tasteGoalLevels.has(String(level)))) {
+    errors.push('taste_goal targets contain invalid values');
+  }
+  if (goal.mode === 'balanced' && targetEntries.length > 0) {
+    errors.push('balanced taste_goal cannot contain targets');
+  }
+  if (goal.mode === 'custom' && targetEntries.length === 0) {
+    errors.push('custom taste_goal requires at least one target');
   }
 }
 

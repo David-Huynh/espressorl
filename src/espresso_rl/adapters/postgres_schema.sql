@@ -7,6 +7,8 @@ CREATE TABLE IF NOT EXISTS shots (
     bean_context_id TEXT,
     bean_context_name TEXT,
     grinder_context_id TEXT,
+    taste_goal_json TEXT NOT NULL DEFAULT '{"schema_version":1,"mode":"balanced","targets":{}}',
+    taste_goal_fingerprint TEXT NOT NULL DEFAULT 'aba2fe71b86b279da2f84ba25b616fbcdd127274d5f5fa393c8e0576777744a8',
     profile_resampled_blob BYTEA NOT NULL,
     raw_profile_available BOOLEAN NOT NULL,
     raw_profile_hash TEXT,
@@ -86,6 +88,14 @@ ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS grinder_context_id TEXT;
 
 ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS taste_goal_json TEXT NOT NULL
+    DEFAULT '{"schema_version":1,"mode":"balanced","targets":{}}';
+
+ALTER TABLE shots
+    ADD COLUMN IF NOT EXISTS taste_goal_fingerprint TEXT NOT NULL
+    DEFAULT 'aba2fe71b86b279da2f84ba25b616fbcdd127274d5f5fa393c8e0576777744a8';
+
+ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS relative_grind_steps_from_reference DOUBLE PRECISION;
 
 ALTER TABLE shots
@@ -136,6 +146,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     grinder_context_id TEXT,
     profile_id TEXT,
     raw_profile_hash TEXT,
+    taste_goal_json TEXT NOT NULL DEFAULT '{"schema_version":1,"mode":"balanced","targets":{}}',
+    taste_goal_fingerprint TEXT NOT NULL DEFAULT 'aba2fe71b86b279da2f84ba25b616fbcdd127274d5f5fa393c8e0576777744a8',
     grind_delta_steps_from_current DOUBLE PRECISION NOT NULL,
     grind_delta_um_from_current DOUBLE PRECISION NOT NULL,
     projected_relative_step_from_reference DOUBLE PRECISION NOT NULL,
@@ -185,6 +197,14 @@ ALTER TABLE recommendations
     ADD COLUMN IF NOT EXISTS raw_profile_hash TEXT;
 
 ALTER TABLE recommendations
+    ADD COLUMN IF NOT EXISTS taste_goal_json TEXT NOT NULL
+    DEFAULT '{"schema_version":1,"mode":"balanced","targets":{}}';
+
+ALTER TABLE recommendations
+    ADD COLUMN IF NOT EXISTS taste_goal_fingerprint TEXT NOT NULL
+    DEFAULT 'aba2fe71b86b279da2f84ba25b616fbcdd127274d5f5fa393c8e0576777744a8';
+
+ALTER TABLE recommendations
     ADD COLUMN IF NOT EXISTS grind_delta_steps_from_current DOUBLE PRECISION NOT NULL DEFAULT 0.0;
 
 ALTER TABLE recommendations
@@ -202,6 +222,12 @@ ALTER TABLE recommendations
 
 CREATE INDEX IF NOT EXISTS idx_recommendations_context_grinder_time
     ON recommendations (install_id, machine_id, bean_context_id, grinder_context_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_recommendations_context_goal_time
+    ON recommendations (
+        install_id, machine_id, bean_context_id, grinder_context_id,
+        taste_goal_fingerprint, created_at DESC
+    );
 
 CREATE TABLE IF NOT EXISTS upload_queue (
     upload_id TEXT PRIMARY KEY,

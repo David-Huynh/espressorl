@@ -306,6 +306,7 @@ class ConsecutivePreferenceOptimizationService:
             label=label,
             comparison_mode=run.comparison_mode,
             created_at=now,
+            taste_goal=run.context.taste_goal,
         )
         incumbent_shot_id = state.incumbent_shot_id
         trust_region_state = state.trust_region_state
@@ -445,6 +446,7 @@ class ConsecutivePreferenceOptimizationService:
             comparison_anchor_shot_id=suggestion.anchor_shot_id,
             comparison_mode=suggestion.comparison_mode.value,
             preference_feedback_required=True,
+            taste_goal=self._require_run(suggestion.optimization_run_id).context.taste_goal,
             grinder_step_direction=current_recipe.grinder_step_direction,
             grinder_adjustment_mode=current_recipe.grinder_adjustment_mode,
         )

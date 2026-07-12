@@ -35,6 +35,7 @@ from espresso_rl.domain.cpbo import (
     RecipePoint,
     Suggestion,
 )
+from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.adapters.cpbo_serialization import (
     comparison_from_json,
     comparison_to_json,
@@ -79,6 +80,8 @@ class SQLiteStore:
                 bean_context_id TEXT,
                 bean_context_name TEXT,
                 grinder_context_id TEXT,
+                taste_goal_json TEXT NOT NULL DEFAULT '{"schema_version":1,"mode":"balanced","targets":{}}',
+                taste_goal_fingerprint TEXT NOT NULL DEFAULT 'aba2fe71b86b279da2f84ba25b616fbcdd127274d5f5fa393c8e0576777744a8',
                 profile_resampled_blob BLOB NOT NULL,
                 raw_profile_available INTEGER NOT NULL,
                 raw_profile_hash TEXT,
@@ -165,6 +168,8 @@ class SQLiteStore:
                 grinder_context_id TEXT,
                 profile_id TEXT,
                 raw_profile_hash TEXT,
+                taste_goal_json TEXT NOT NULL DEFAULT '{"schema_version":1,"mode":"balanced","targets":{}}',
+                taste_goal_fingerprint TEXT NOT NULL DEFAULT 'aba2fe71b86b279da2f84ba25b616fbcdd127274d5f5fa393c8e0576777744a8',
                 grind_delta_steps_from_current REAL NOT NULL,
                 grind_delta_um_from_current REAL NOT NULL,
                 projected_relative_step_from_reference REAL NOT NULL,
@@ -242,6 +247,16 @@ class SQLiteStore:
         self._ensure_column("recommendations", "grinder_context_id", "TEXT")
         self._ensure_column("recommendations", "profile_id", "TEXT")
         self._ensure_column("recommendations", "raw_profile_hash", "TEXT")
+        self._ensure_column(
+            "recommendations",
+            "taste_goal_json",
+            "TEXT NOT NULL DEFAULT '{\"schema_version\":1,\"mode\":\"balanced\",\"targets\":{}}'",
+        )
+        self._ensure_column(
+            "recommendations",
+            "taste_goal_fingerprint",
+            "TEXT NOT NULL DEFAULT 'aba2fe71b86b279da2f84ba25b616fbcdd127274d5f5fa393c8e0576777744a8'",
+        )
         self._ensure_column("recommendations", "grinder_calibration_mode", "TEXT NOT NULL DEFAULT 'relative_calibrated'")
         self._ensure_column("recommendations", "grinder_step_direction", "TEXT NOT NULL DEFAULT 'higher_is_finer'")
         self._ensure_column("recommendations", "grinder_adjustment_mode", "TEXT NOT NULL DEFAULT 'stepped'")
@@ -259,6 +274,16 @@ class SQLiteStore:
         )
         self._ensure_column("shots", "grinder_context_id", "TEXT")
         self._ensure_column("shots", "bean_context_name", "TEXT")
+        self._ensure_column(
+            "shots",
+            "taste_goal_json",
+            "TEXT NOT NULL DEFAULT '{\"schema_version\":1,\"mode\":\"balanced\",\"targets\":{}}'",
+        )
+        self._ensure_column(
+            "shots",
+            "taste_goal_fingerprint",
+            "TEXT NOT NULL DEFAULT 'aba2fe71b86b279da2f84ba25b616fbcdd127274d5f5fa393c8e0576777744a8'",
+        )
         self._ensure_column("shots", "grinder_calibration_mode", "TEXT NOT NULL DEFAULT 'relative_calibrated'")
         self._ensure_column("shots", "grinder_step_direction", "TEXT NOT NULL DEFAULT 'higher_is_finer'")
         self._ensure_column("shots", "grinder_adjustment_mode", "TEXT NOT NULL DEFAULT 'stepped'")
@@ -315,6 +340,15 @@ class SQLiteStore:
             """
             CREATE INDEX IF NOT EXISTS idx_recommendations_context_grinder_time
             ON recommendations (install_id, machine_id, bean_context_id, grinder_context_id, created_at DESC)
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recommendations_context_goal_time
+            ON recommendations (
+                install_id, machine_id, bean_context_id, grinder_context_id,
+                taste_goal_fingerprint, created_at DESC
+            )
             """
         )
         self.conn.execute(
@@ -425,17 +459,52 @@ def _profile_scope_clause(
     return "1=1"
 
 
+def _optional_value_clause(
+    column: str,
+    value: str | None,
+    params: list[object],
+    placeholder: str,
+) -> str:
+    if value is None:
+        return "1=1"
+    params.append(value)
+    return f"{column}={placeholder}"
+
+
 class SQLitePreferentialOptimizationRepository:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
         self._lock = threading.RLock()
 
     def find_active_run(self, context: OptimizationRunContext) -> OptimizationRun | None:
-        row = self._store.conn.execute(
-            "SELECT payload_json FROM cpbo_runs WHERE context_fingerprint=? AND active=1",
-            (context.fingerprint,),
-        ).fetchone()
-        return run_from_json(row["payload_json"]) if row else None
+        with self._lock, self._store.conn:
+            row = self._store.conn.execute(
+                "SELECT payload_json FROM cpbo_runs WHERE context_fingerprint=? AND active=1",
+                (context.fingerprint,),
+            ).fetchone()
+            if row is not None:
+                return run_from_json(row["payload_json"])
+
+            # Pre-taste-goal runs deserialize as the balanced goal. Migrate the
+            # stored lookup key lazily so a firmware update does not discard an
+            # otherwise compatible balanced optimization run.
+            rows = self._store.conn.execute(
+                """
+                SELECT run_id, payload_json FROM cpbo_runs
+                WHERE install_id=? AND machine_id=? AND active=1
+                """,
+                (context.install_id, context.machine_id),
+            ).fetchall()
+            for candidate in rows:
+                run = run_from_json(candidate["payload_json"])
+                if run.context.fingerprint != context.fingerprint:
+                    continue
+                self._store.conn.execute(
+                    "UPDATE cpbo_runs SET context_fingerprint=?, payload_json=? WHERE run_id=?",
+                    (context.fingerprint, run_to_json(run), candidate["run_id"]),
+                )
+                return run
+        return None
 
     def get_run(self, run_id: str) -> OptimizationRun | None:
         row = self._store.conn.execute(
@@ -768,7 +837,8 @@ class SQLiteShotRepository:
             """
             INSERT OR REPLACE INTO shots (
                 shot_id, timestamp, install_id, machine_id, machine_adapter,
-                bean_context_id, bean_context_name, grinder_context_id, profile_resampled_blob, raw_profile_available,
+                bean_context_id, bean_context_name, grinder_context_id, taste_goal_json, taste_goal_fingerprint,
+                profile_resampled_blob, raw_profile_available,
                 raw_profile_hash, relative_grind_steps_from_reference, relative_grind_um_from_reference, microns_per_step,
                 dose_in_g, grind_observed, dose_observed,
                 beverage_out_g, brew_ratio, target_yield_g, target_yield_observed,
@@ -798,7 +868,8 @@ class SQLiteShotRepository:
                 created_at, updated_at
             ) VALUES (
                 :shot_id, :timestamp, :install_id, :machine_id, :machine_adapter,
-                :bean_context_id, :bean_context_name, :grinder_context_id, :profile_resampled_blob, :raw_profile_available,
+                :bean_context_id, :bean_context_name, :grinder_context_id, :taste_goal_json, :taste_goal_fingerprint,
+                :profile_resampled_blob, :raw_profile_available,
                 :raw_profile_hash, :relative_grind_steps_from_reference, :relative_grind_um_from_reference, :microns_per_step,
                 :dose_in_g, :grind_observed, :dose_observed,
                 :beverage_out_g, :brew_ratio, :target_yield_g, :target_yield_observed,
@@ -1162,7 +1233,7 @@ class SQLiteRecommendationRepository:
             INSERT OR REPLACE INTO recommendations (
                 recommendation_id, created_at, updated_at, expires_at,
                 install_id, machine_id, bean_context_id, grinder_context_id,
-                profile_id, raw_profile_hash,
+                profile_id, raw_profile_hash, taste_goal_json, taste_goal_fingerprint,
                 grind_delta_steps_from_current, grind_delta_um_from_current, projected_relative_step_from_reference, projected_relative_grind_um_from_reference, next_dose_g,
                 target_yield_g, target_ratio, mode, confidence, reason, status,
                 shown_count, accepted_at, ignored_at, edited_at, used_at,
@@ -1176,7 +1247,7 @@ class SQLiteRecommendationRepository:
             ) VALUES (
                 :recommendation_id, :created_at, :updated_at, :expires_at,
                 :install_id, :machine_id, :bean_context_id, :grinder_context_id,
-                :profile_id, :raw_profile_hash,
+                :profile_id, :raw_profile_hash, :taste_goal_json, :taste_goal_fingerprint,
                 :grind_delta_steps_from_current, :grind_delta_um_from_current, :projected_relative_step_from_reference, :projected_relative_grind_um_from_reference, :next_dose_g,
                 :target_yield_g, :target_ratio, :mode, :confidence, :reason, :status,
                 :shown_count, :accepted_at, :ignored_at, :edited_at, :used_at,
@@ -1208,6 +1279,7 @@ class SQLiteRecommendationRepository:
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> Recommendation | None:
         params: list[object] = [install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
@@ -1218,11 +1290,14 @@ class SQLiteRecommendationRepository:
             profile_id=profile_id,
             raw_profile_hash=raw_profile_hash,
         )
+        goal_clause = _optional_value_clause(
+            "taste_goal_fingerprint", taste_goal_fingerprint, params, "?"
+        )
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
             WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
-              AND {profile_clause}
+              AND {profile_clause} AND {goal_clause}
             ORDER BY created_at DESC
             LIMIT 1
             """,
@@ -1239,6 +1314,7 @@ class SQLiteRecommendationRepository:
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> Recommendation | None:
         params: list[object] = [install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
@@ -1249,12 +1325,15 @@ class SQLiteRecommendationRepository:
             profile_id=profile_id,
             raw_profile_hash=raw_profile_hash,
         )
+        goal_clause = _optional_value_clause(
+            "taste_goal_fingerprint", taste_goal_fingerprint, params, "?"
+        )
         params.append(now)
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
             WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
-              AND {profile_clause}
+              AND {profile_clause} AND {goal_clause}
               AND status IN ('pending', 'shown', 'accepted', 'edited')
               AND (expires_at IS NULL OR expires_at > ?)
             ORDER BY created_at DESC
@@ -1274,6 +1353,7 @@ class SQLiteRecommendationRepository:
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> None:
         params: list = [now, now, install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params, "?")
@@ -1284,6 +1364,9 @@ class SQLiteRecommendationRepository:
             profile_id=profile_id,
             raw_profile_hash=raw_profile_hash,
         )
+        goal_clause = _optional_value_clause(
+            "taste_goal_fingerprint", taste_goal_fingerprint, params, "?"
+        )
         except_clause = ""
         if except_recommendation_id is not None:
             except_clause = "AND recommendation_id != ?"
@@ -1293,7 +1376,7 @@ class SQLiteRecommendationRepository:
             UPDATE recommendations
             SET status='superseded', superseded_at=?, updated_at=?
             WHERE install_id=? AND machine_id=? AND {bean_clause} AND {grinder_clause}
-              AND {profile_clause}
+              AND {profile_clause} AND {goal_clause}
               AND status IN ('pending', 'shown')
               {except_clause}
             """,
@@ -1580,6 +1663,8 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "bean_context_id": shot.bean_context_id,
         "bean_context_name": shot.bean_context_name,
         "grinder_context_id": shot.grinder_context_id,
+        "taste_goal_json": _taste_goal_to_json(shot.taste_goal),
+        "taste_goal_fingerprint": shot.taste_goal.fingerprint,
         "profile_resampled_blob": shot.profile.astype(PROFILE_DTYPE).tobytes(),
         "raw_profile_available": bool(shot.raw_profile_available),
         "raw_profile_hash": shot.raw_profile_hash,
@@ -1664,6 +1749,7 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         bean_context_id=row["bean_context_id"],
         bean_context_name=row["bean_context_name"],
         grinder_context_id=row["grinder_context_id"],
+        taste_goal=_taste_goal_from_json(row["taste_goal_json"]),
         profile=profile.copy(),
         raw_profile_available=bool(row["raw_profile_available"]),
         raw_profile_hash=row["raw_profile_hash"],
@@ -1776,6 +1862,17 @@ def _fixed_cadence_sequence_from_json(value: str | None) -> FixedCadenceShotSequ
     return FixedCadenceShotSequence.from_dict(parsed)
 
 
+def _taste_goal_to_json(value: TasteGoal) -> str:
+    return json.dumps(value.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _taste_goal_from_json(value: str | None) -> TasteGoal:
+    if value is None:
+        return TasteGoal.balanced()
+    parsed = json.loads(value)
+    return TasteGoal.from_dict(parsed)
+
+
 def _optional_bool_to_int(value: bool | None) -> int | None:
     if value is None:
         return None
@@ -1800,6 +1897,8 @@ def _recommendation_to_row(recommendation: Recommendation) -> dict:
         "grinder_context_id": recommendation.grinder_context_id,
         "profile_id": recommendation.profile_id,
         "raw_profile_hash": recommendation.raw_profile_hash,
+        "taste_goal_json": _taste_goal_to_json(recommendation.taste_goal),
+        "taste_goal_fingerprint": recommendation.taste_goal.fingerprint,
         "grind_delta_steps_from_current": recommendation.grind_delta_steps_from_current,
         "grind_delta_um_from_current": recommendation.grind_delta_um_from_current,
         "projected_relative_step_from_reference": recommendation.projected_relative_step_from_reference,
@@ -1849,6 +1948,7 @@ def _row_to_recommendation(row: sqlite3.Row) -> Recommendation:
         grinder_context_id=row["grinder_context_id"],
         profile_id=row["profile_id"],
         raw_profile_hash=row["raw_profile_hash"],
+        taste_goal=_taste_goal_from_json(row["taste_goal_json"]),
         grind_delta_steps_from_current=row["grind_delta_steps_from_current"],
         grind_delta_um_from_current=row["grind_delta_um_from_current"],
         projected_relative_step_from_reference=row["projected_relative_step_from_reference"],

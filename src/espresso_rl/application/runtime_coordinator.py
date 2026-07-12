@@ -73,6 +73,7 @@ class AutoTuningRuntimeCoordinator:
             last_recommendation_id=(recommendation.recommendation_id if recommendation else None),
             last_recommendation_at=(recommendation.created_at if recommendation else None),
             mode=recommendation.mode.value if recommendation else None,
+            taste_goal=event.taste_goal,
         )
         return result
 
@@ -96,6 +97,7 @@ class AutoTuningRuntimeCoordinator:
             last_recommendation_id=(recommendation.recommendation_id if recommendation else None),
             last_recommendation_at=(recommendation.updated_at if recommendation else None),
             mode=recommendation.mode.value if recommendation else None,
+            taste_goal=event.taste_goal,
         )
         return recommendation
 

@@ -281,17 +281,50 @@ def _profile_scope_clause(
     return "TRUE"
 
 
+def _optional_value_clause(
+    column: str,
+    value: str | None,
+    params: list[object],
+) -> str:
+    if value is None:
+        return "TRUE"
+    params.append(value)
+    return f"{column}=%s"
+
+
 class PostgresPreferentialOptimizationRepository:
     def __init__(self, store: PostgresStore) -> None:
         self._store = store
         self._lock = threading.RLock()
 
     def find_active_run(self, context: OptimizationRunContext) -> OptimizationRun | None:
-        row = self._store.conn.execute(
-            "SELECT payload_json FROM cpbo_runs WHERE context_fingerprint=%s AND active=TRUE",
-            (context.fingerprint,),
-        ).fetchone()
-        return run_from_json(row["payload_json"]) if row else None
+        with self._lock, self._store.conn.transaction():
+            row = self._store.conn.execute(
+                "SELECT payload_json FROM cpbo_runs WHERE context_fingerprint=%s AND active=TRUE",
+                (context.fingerprint,),
+            ).fetchone()
+            if row is not None:
+                return run_from_json(row["payload_json"])
+
+            # Pre-taste-goal runs deserialize as the balanced goal. Migrate the
+            # stored lookup key lazily so compatible local progress is retained.
+            rows = self._store.conn.execute(
+                """
+                SELECT run_id, payload_json FROM cpbo_runs
+                WHERE install_id=%s AND machine_id=%s AND active=TRUE
+                """,
+                (context.install_id, context.machine_id),
+            ).fetchall()
+            for candidate in rows:
+                run = run_from_json(candidate["payload_json"])
+                if run.context.fingerprint != context.fingerprint:
+                    continue
+                self._store.conn.execute(
+                    "UPDATE cpbo_runs SET context_fingerprint=%s, payload_json=%s WHERE run_id=%s",
+                    (context.fingerprint, run_to_json(run), candidate["run_id"]),
+                )
+                return run
+        return None
 
     def get_run(self, run_id: str) -> OptimizationRun | None:
         row = self._store.conn.execute(
@@ -980,6 +1013,7 @@ class PostgresRecommendationRepository:
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> Recommendation | None:
         params: list[object] = [install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
@@ -989,11 +1023,14 @@ class PostgresRecommendationRepository:
             profile_id=profile_id,
             raw_profile_hash=raw_profile_hash,
         )
+        goal_clause = _optional_value_clause(
+            "taste_goal_fingerprint", taste_goal_fingerprint, params
+        )
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
             WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
-              AND {profile_clause}
+              AND {profile_clause} AND {goal_clause}
             ORDER BY created_at DESC
             LIMIT 1
             """,
@@ -1010,6 +1047,7 @@ class PostgresRecommendationRepository:
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> Recommendation | None:
         params: list[object] = [install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
@@ -1019,12 +1057,15 @@ class PostgresRecommendationRepository:
             profile_id=profile_id,
             raw_profile_hash=raw_profile_hash,
         )
+        goal_clause = _optional_value_clause(
+            "taste_goal_fingerprint", taste_goal_fingerprint, params
+        )
         params.append(now)
         row = self._store.conn.execute(
             f"""
             SELECT * FROM recommendations
             WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
-              AND {profile_clause}
+              AND {profile_clause} AND {goal_clause}
               AND status IN ('pending', 'shown', 'accepted', 'edited')
               AND (expires_at IS NULL OR expires_at > %s)
             ORDER BY created_at DESC
@@ -1044,6 +1085,7 @@ class PostgresRecommendationRepository:
         grinder_context_id: str | None = None,
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
+        taste_goal_fingerprint: str | None = None,
     ) -> None:
         params: list[Any] = [now, now, install_id, machine_id]
         bean_clause = _nullable_clause("bean_context_id", bean_context_id, params)
@@ -1052,6 +1094,9 @@ class PostgresRecommendationRepository:
             params,
             profile_id=profile_id,
             raw_profile_hash=raw_profile_hash,
+        )
+        goal_clause = _optional_value_clause(
+            "taste_goal_fingerprint", taste_goal_fingerprint, params
         )
         except_clause = ""
         if except_recommendation_id is not None:
@@ -1062,7 +1107,7 @@ class PostgresRecommendationRepository:
             UPDATE recommendations
             SET status='superseded', superseded_at=%s, updated_at=%s
             WHERE install_id=%s AND machine_id=%s AND {bean_clause} AND {grinder_clause}
-              AND {profile_clause}
+              AND {profile_clause} AND {goal_clause}
               AND status IN ('pending', 'shown')
               {except_clause}
             """,

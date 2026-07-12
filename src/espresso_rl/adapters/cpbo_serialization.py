@@ -19,6 +19,7 @@ from espresso_rl.domain.cpbo import (
     TrustRegionDiagnostics,
     TrustRegionState,
 )
+from espresso_rl.domain.taste_goal import TasteGoal
 
 
 MAX_CPBO_JSON_BYTES = 8 * 1024 * 1024
@@ -200,15 +201,14 @@ def comparison_to_json(comparison: PreferenceComparison) -> str:
             "label": comparison.label.value,
             "comparison_mode": comparison.comparison_mode.value,
             "created_at": comparison.created_at,
+            "taste_goal": comparison.taste_goal.to_dict(),
         }
     )
 
 
 def comparison_from_json(value: Any) -> PreferenceComparison:
     row = decode_cpbo_json(value)
-    _require_keys(
-        row,
-        {
+    expected = {
             "comparison_id",
             "optimization_run_id",
             "new_shot_id",
@@ -216,9 +216,11 @@ def comparison_from_json(value: Any) -> PreferenceComparison:
             "label",
             "comparison_mode",
             "created_at",
-        },
-        "preference comparison",
-    )
+            "taste_goal",
+        }
+    legacy_expected = expected - {"taste_goal"}
+    if frozenset(row) not in {frozenset(expected), frozenset(legacy_expected)}:
+        _require_keys(row, expected, "preference comparison")
     return PreferenceComparison(
         comparison_id=str(row["comparison_id"]),
         optimization_run_id=str(row["optimization_run_id"]),
@@ -227,6 +229,7 @@ def comparison_from_json(value: Any) -> PreferenceComparison:
         label=PreferenceLabel(row["label"]),
         comparison_mode=ComparisonMode(row["comparison_mode"]),
         created_at=int(row["created_at"]),
+        taste_goal=TasteGoal.from_dict(row.get("taste_goal")),
     )
 
 

@@ -26,6 +26,7 @@ def shot_payload(shot_id: str, timestamp: int, **overrides) -> dict:
         "profile_id": "profile_1",
         "profile_label": "Profile One",
         "profile_type": "pro",
+        "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
         "action_observed": {"grind": True, "dose": True, "target_yield": True},
         "grinder_calibration_mode": "relative_calibrated",
         "grinder_adjustment_mode": "stepped",
@@ -74,6 +75,7 @@ def comparison_payload(**overrides) -> dict:
         "grinder_context_id": "grinder_1",
         "profile_id": "profile_1",
         "raw_profile_hash": None,
+        "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
     }
     payload.update(overrides)
     return payload
@@ -108,6 +110,24 @@ class OfflineDatasetDomainTests(unittest.TestCase):
             OfflinePreferenceExample.from_joined_payloads(
                 comparison_payload=comparison_payload(),
                 new_shot_payload=shot_payload("shot_new", 20, bean_context_id="bean_other"),
+                anchor_shot_payload=shot_payload("shot_anchor", 10),
+                comparison_trust_weight=0.2,
+                new_shot_trust_weight=0.2,
+                anchor_shot_trust_weight=0.2,
+            )
+
+        with self.assertRaisesRegex(ValueError, "taste_goal"):
+            OfflinePreferenceExample.from_joined_payloads(
+                comparison_payload=comparison_payload(),
+                new_shot_payload=shot_payload(
+                    "shot_new",
+                    20,
+                    taste_goal={
+                        "schema_version": 1,
+                        "mode": "custom",
+                        "targets": {"sweet": "high"},
+                    },
+                ),
                 anchor_shot_payload=shot_payload("shot_anchor", 10),
                 comparison_trust_weight=0.2,
                 new_shot_trust_weight=0.2,

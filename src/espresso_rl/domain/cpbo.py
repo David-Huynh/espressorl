@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Any, Mapping, Sequence
 
 from espresso_rl.domain.models import GrinderStepDirection
+from espresso_rl.domain.taste_goal import TasteGoal
 
 
 CPBO_MODEL_VERSION = "cpbo_jnd_mes_v1"
@@ -235,6 +236,7 @@ class OptimizationRunContext:
     user_id: str | None = None
     temperature_profile_id: str | None = None
     pressure_profile_id: str | None = None
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
 
     def __post_init__(self) -> None:
         if not self.install_id.strip() or not self.machine_id.strip():
@@ -255,13 +257,15 @@ class OptimizationRunContext:
             value = getattr(self, field_name)
             if value is not None and len(value) > 256:
                 raise ValueError(f"{field_name} is too long")
+        if not isinstance(self.taste_goal, TasteGoal):
+            object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
 
     @property
     def fingerprint(self) -> str:
         payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def to_dict(self) -> dict[str, str | None]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "install_id": self.install_id,
             "machine_id": self.machine_id,
@@ -274,13 +278,20 @@ class OptimizationRunContext:
             "user_id": self.user_id,
             "temperature_profile_id": self.temperature_profile_id,
             "pressure_profile_id": self.pressure_profile_id,
+            "taste_goal": self.taste_goal.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "OptimizationRunContext":
         if not isinstance(value, Mapping):
             raise ValueError("optimization run context must be an object")
-        return cls(**{key: value.get(key) for key in cls.__dataclass_fields__})
+        fields = {
+            key: value.get(key)
+            for key in cls.__dataclass_fields__
+            if key != "taste_goal"
+        }
+        fields["taste_goal"] = TasteGoal.from_dict(value.get("taste_goal"))
+        return cls(**fields)
 
 
 @dataclass(frozen=True)
@@ -410,6 +421,7 @@ class PreferenceComparison:
     label: PreferenceLabel
     comparison_mode: ComparisonMode
     created_at: int
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
 
     def __post_init__(self) -> None:
         if not all(
@@ -426,6 +438,8 @@ class PreferenceComparison:
             raise ValueError("comparison requires two distinct physical shots")
         object.__setattr__(self, "label", PreferenceLabel(self.label))
         object.__setattr__(self, "comparison_mode", ComparisonMode(self.comparison_mode))
+        if not isinstance(self.taste_goal, TasteGoal):
+            object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
         if self.created_at < 0:
             raise ValueError("comparison created_at must be nonnegative")
 

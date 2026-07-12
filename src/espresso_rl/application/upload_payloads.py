@@ -46,6 +46,7 @@ def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
         "machine_adapter": shot.machine_adapter,
         "bean_context_id": shot.bean_context_id,
         "grinder_context_id": shot.grinder_context_id,
+        "taste_goal": shot.taste_goal.to_dict(),
         "profile_resampled": shot.profile.round(4).tolist(),
         "raw_profile_available": shot.raw_profile_available,
         "raw_profile_hash": shot.raw_profile_hash,
@@ -130,6 +131,7 @@ def recommendation_upload_payload(recommendation: Recommendation) -> dict[str, A
         "grinder_context_id": recommendation.grinder_context_id,
         "profile_id": recommendation.profile_id,
         "raw_profile_hash": recommendation.raw_profile_hash,
+        "taste_goal": recommendation.taste_goal.to_dict(),
         "grind_delta_steps_from_current": recommendation.grind_delta_steps_from_current,
         "grind_delta_um_from_current": recommendation.grind_delta_um_from_current,
         "projected_relative_step_from_reference": recommendation.projected_relative_step_from_reference,
@@ -195,6 +197,7 @@ def comparison_upload_payload(comparison: PairwiseShotComparison) -> dict[str, A
         "grinder_context_id": comparison.grinder_context_id,
         "profile_id": comparison.profile_id,
         "raw_profile_hash": comparison.raw_profile_hash,
+        "taste_goal": comparison.taste_goal.to_dict(),
     }
 
 

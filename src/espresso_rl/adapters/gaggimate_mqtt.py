@@ -22,6 +22,7 @@ from espresso_rl.domain.events import (
 )
 from espresso_rl.domain.models import Recommendation
 from espresso_rl.domain.models import new_id
+from espresso_rl.domain.taste_goal import TasteGoal
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ _PREFERENCE_FIELDS = frozenset(
         "machine_id",
         "timestamp",
         "source",
+        "taste_goal",
     }
 )
 
@@ -104,6 +106,8 @@ class GaggimateMQTTClient:
             "comparison_anchor_shot_id": recommendation.comparison_anchor_shot_id,
             "comparison_mode": recommendation.comparison_mode,
             "preference_feedback_required": recommendation.preference_feedback_required,
+            "taste_goal": recommendation.taste_goal.to_dict(),
+            "taste_goal_summary": recommendation.taste_goal.summary,
             "install_id": recommendation.install_id,
             "machine_id": recommendation.machine_id,
             "bean_context_id": recommendation.bean_context_id,
@@ -297,6 +301,7 @@ class GaggimateMQTTClient:
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
             bean_context_name=_optional_string(payload.get("bean_context_name")),
             grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
+            taste_goal=TasteGoal.from_dict(payload.get("taste_goal")),
             grinder_calibration_mode=payload.get("grinder_calibration_mode", "relative_calibrated"),
             grinder_step_direction=payload.get("step_direction", "higher_is_finer"),
             grinder_adjustment_mode=payload.get("grinder_adjustment_mode", "stepped"),
@@ -371,6 +376,7 @@ class GaggimateMQTTClient:
             machine_id=machine_id,
             timestamp=_strict_non_negative_int(payload.get("timestamp"), "timestamp"),
             source=_required_bounded_string(payload.get("source"), "source", maximum=80),
+            taste_goal=TasteGoal.from_dict(payload.get("taste_goal")),
             schema_version=schema_version,
         )
 
@@ -402,6 +408,7 @@ class GaggimateMQTTClient:
             limit=int(payload.get("limit", 25)),
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
             grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
+            taste_goal=TasteGoal.from_dict(payload.get("taste_goal")),
             local_record_id=_optional_string(payload.get("local_record_id")),
             source=payload.get("source", "gaggimate_mqtt"),
         )
@@ -470,6 +477,9 @@ class GaggimateMQTTClient:
             optimizer_mode=str(payload.get("optimizer_mode") or payload.get("mode") or self._config.optimizer_mode),
             bean_context_id=_optional_string(payload.get("bean_context_id")),
             grinder_context_id=_optional_string(payload.get("grinder_context_id")),
+            profile_id=_optional_string(payload.get("profile_id")),
+            profile_label=_optional_string(payload.get("profile_label")),
+            taste_goal=TasteGoal.from_dict(payload.get("taste_goal")),
             source=payload.get("source", "gaggimate_mqtt"),
         )
 

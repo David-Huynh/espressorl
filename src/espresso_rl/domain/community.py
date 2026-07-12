@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+from espresso_rl.domain.taste_goal import TasteGoal
 
 SAFE_COMMUNITY_REJECTION_CATEGORIES = frozenset(
     {
@@ -77,6 +79,7 @@ class CommunityValidatedShot:
             raise ValueError("validated shot_id does not match payload")
         if not 0.0 <= float(self.trust_weight) <= 1.0:
             raise ValueError("trust_weight must be between 0 and 1")
+        TasteGoal.from_dict(self.payload_json.get("taste_goal"))
 
 
 @dataclass(frozen=True)
@@ -95,6 +98,7 @@ class CommunityRecommendationRecord:
             raise ValueError("recommendation_id is required")
         if self.payload_json.get("event_type") != "recommendation_record":
             raise ValueError("recommendation payload must be a recommendation_record")
+        TasteGoal.from_dict(self.payload_json.get("taste_goal"))
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,7 @@ class PairwiseShotComparison:
     grinder_context_id: str | None = None
     profile_id: str | None = None
     raw_profile_hash: str | None = None
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
 
     def __post_init__(self) -> None:
         required = (
@@ -136,6 +141,8 @@ class PairwiseShotComparison:
             raise ValueError("comparison mode is invalid")
         if self.created_at < 0:
             raise ValueError("comparison created_at must be nonnegative")
+        if not isinstance(self.taste_goal, TasteGoal):
+            object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
 
 
 @dataclass(frozen=True)
@@ -177,6 +184,7 @@ class CommunityComparisonRecord:
             raise ValueError("comparison created_at must be a nonnegative integer")
         if not 0.0 <= float(self.trust_weight) <= 1.0:
             raise ValueError("trust_weight must be between 0 and 1")
+        TasteGoal.from_dict(self.payload_json.get("taste_goal"))
 
 
 @dataclass(frozen=True)

@@ -30,6 +30,7 @@ from espresso_rl.domain.cpbo import (
 )
 from espresso_rl.domain.events import PreferenceFeedbackEvent
 from espresso_rl.domain.models import GrinderStepDirection, Recipe, SafetyBounds, ShotRecord
+from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.optimizers.cpbo_config import TrustRegionConfig
 from espresso_rl.optimizers.cpbo_trust_region import update_trust_region
 
@@ -188,8 +189,35 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         self.assertEqual(uploaded_comparisons[0].new_shot_id, "candidate")
         self.assertEqual(uploaded_comparisons[0].anchor_shot_id, "baseline")
         self.assertEqual(uploaded_comparisons[0].label, "anchor_better")
+        self.assertEqual(uploaded_comparisons[0].taste_goal, TasteGoal.balanced())
         self.assertEqual(next_recommendation.comparison_anchor_shot_id, "baseline")
         self.assertEqual(next_recommendation.projected_relative_step_from_reference, 7.0)
+
+    def test_preference_cannot_cross_taste_goal_contexts(self) -> None:
+        goal = TasteGoal.custom({"sweet": "high", "bitter": "low"})
+        bridge = self.bridge([6.0, 7.0])
+        baseline = _shot("baseline", grind=5.0, taste_goal=goal)
+        self.shots.rows[baseline.shot_id] = baseline
+        first = bridge.handle_shot(baseline).recommendation
+        candidate = _shot("candidate", grind=6.0, taste_goal=goal)
+        self.shots.rows[candidate.shot_id] = candidate
+        bridge.handle_shot(candidate)
+
+        with self.assertRaisesRegex(ValueError, "taste goal"):
+            bridge.handle_preference(
+                PreferenceFeedbackEvent(
+                    optimization_run_id=first.optimization_run_id,
+                    new_shot_id="candidate",
+                    anchor_shot_id="baseline",
+                    label=PreferenceLabel.NEW_BETTER,
+                    comparison_mode=ComparisonMode.BEST_INCUMBENT,
+                    install_id="install",
+                    machine_id="gaggimate:AA_BB",
+                    timestamp=200,
+                    taste_goal=TasteGoal.balanced(),
+                )
+            )
+        self.assertEqual(self.repository.list_comparisons(first.optimization_run_id), [])
 
     def test_unknown_recipe_control_is_not_fabricated(self) -> None:
         bridge = self.bridge([6.0])
@@ -263,6 +291,7 @@ def _shot(
     grind: float | None,
     shot_end_state: str = "finished",
     raw_profile_hash: str | None = None,
+    taste_goal: TasteGoal | None = None,
 ) -> ShotRecord:
     return ShotRecord(
         shot_id=shot_id,
@@ -282,6 +311,7 @@ def _shot(
         shot_time_s=30.0,
         bean_context_id="bean",
         grinder_context_id="grinder",
+        taste_goal=taste_goal or TasteGoal.balanced(),
         profile_id="profile",
         raw_profile_hash=raw_profile_hash,
         grinder_step_direction=GrinderStepDirection.HIGHER_IS_FINER,

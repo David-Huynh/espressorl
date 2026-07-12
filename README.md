@@ -19,7 +19,7 @@ are not part of the optimizer or community-data contracts.
 ## Purpose
 
 EspressoRL keeps recipe experiments isolated by bean, grinder, profile,
-basket, machine, and user context. It distinguishes recipe settings from
+basket, machine, user, and taste-goal context. It distinguishes recipe settings from
 physical shots, retains repeated shots at the same recipe, and never records a
 machine failure as a taste tie.
 
@@ -89,6 +89,12 @@ quantized recipe and identifies its comparison anchor. After the candidate is
 pulled, the user supplies one of the three preference outcomes and CPBO emits
 the next candidate. `best_incumbent` and `global_previous` comparison modes are
 configured under `cpbo.comparison_mode`.
+
+Taste goals are selected on Gaggimate as balanced or categorical custom
+targets. Changing the goal creates or resumes a separate run for the same
+bean/grinder/profile context. CPBO still consumes only pairwise preferences;
+the goal is retained as context for comparison integrity and future offline
+conditional models.
 
 Apply acknowledgement records only what the adapter accepted. Actual next-shot
 data determine whether grind, dose, and output were followed.

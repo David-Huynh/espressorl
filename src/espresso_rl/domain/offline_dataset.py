@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import copy
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from espresso_rl.domain.community import (
     COMMUNITY_COMPARISON_LABELS,
     COMMUNITY_COMPARISON_MODES,
 )
+from espresso_rl.domain.taste_goal import TasteGoal
 
 
 OFFLINE_DATASET_FORMAT = "espresso_rl_offline_preference_dataset_v1"
@@ -104,6 +105,7 @@ class OfflinePreferenceExample:
     new_shot_trust_weight: float
     anchor_shot_trust_weight: float
     recommendation_id: str | None = None
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
 
     def __post_init__(self) -> None:
         _required_id(self.comparison_id, "comparison_id")
@@ -125,6 +127,14 @@ class OfflinePreferenceExample:
 
         new_shot = _validated_shot(copy.deepcopy(self.new_shot), "new_shot")
         anchor_shot = _validated_shot(copy.deepcopy(self.anchor_shot), "anchor_shot")
+        goal = self.taste_goal
+        if not isinstance(goal, TasteGoal):
+            goal = TasteGoal.from_dict(goal)
+            object.__setattr__(self, "taste_goal", goal)
+        for field_name, shot in (("new_shot", new_shot), ("anchor_shot", anchor_shot)):
+            shot_goal = TasteGoal.from_dict(shot.get("taste_goal"))
+            if shot_goal.fingerprint != goal.fingerprint:
+                raise ValueError(f"offline {field_name} taste_goal does not match comparison")
         if new_shot["shot_id"] == anchor_shot["shot_id"]:
             raise ValueError("offline comparison requires two distinct physical shots")
         if new_shot["timestamp"] > self.created_at or anchor_shot["timestamp"] > self.created_at:
@@ -153,6 +163,7 @@ class OfflinePreferenceExample:
                 "comparison_mode": self.comparison_mode,
                 "created_at": self.created_at,
                 "recommendation_id": self.recommendation_id,
+                "taste_goal": self.taste_goal.to_dict(),
             },
             "new_shot": _export_shot(self.new_shot),
             "anchor_shot": _export_shot(self.anchor_shot),
@@ -189,6 +200,7 @@ class OfflinePreferenceExample:
             if expected != new_shot.get(field_name) or expected != anchor_shot.get(field_name):
                 raise ValueError(f"offline comparison {field_name} does not match both physical shots")
         _require_profile_scope(comparison, new_shot, anchor_shot)
+        taste_goal = TasteGoal.from_dict(comparison.get("taste_goal"))
         return cls(
             comparison_id=str(comparison.get("comparison_id", "")),
             optimization_run_id=str(comparison.get("optimization_run_id", "")),
@@ -201,6 +213,7 @@ class OfflinePreferenceExample:
             new_shot_trust_weight=new_shot_trust_weight,
             anchor_shot_trust_weight=anchor_shot_trust_weight,
             recommendation_id=_optional_id(comparison.get("recommendation_id")),
+            taste_goal=taste_goal,
         )
 
 
@@ -218,6 +231,7 @@ def _validated_shot(shot: dict[str, Any], field_name: str) -> dict[str, Any]:
         raise ValueError(
             f"offline {field_name} contains scalar feedback fields: {', '.join(sorted(forbidden))}"
         )
+    TasteGoal.from_dict(shot.get("taste_goal"))
     _assert_plain_json(shot, field_name)
     return shot
 
@@ -255,10 +269,12 @@ def _require_profile_scope(
 
 
 def _export_shot(shot: Mapping[str, Any]) -> dict[str, Any]:
+    taste_goal = TasteGoal.from_dict(shot.get("taste_goal"))
     return {
         "shot_id": shot["shot_id"],
         "timestamp": shot["timestamp"],
         "context": _selected(shot, _CONTEXT_FIELDS),
+        "taste_goal": taste_goal.to_dict(),
         "recipe": _selected(shot, _RECIPE_FIELDS),
         "realized_outcome": _selected(shot, _REALIZED_FIELDS),
         "trajectory": _selected(shot, _TRAJECTORY_FIELDS),

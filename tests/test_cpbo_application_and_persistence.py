@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -27,6 +29,7 @@ from espresso_rl.domain.cpbo import (
     TrustRegionDiagnostics,
 )
 from espresso_rl.domain.models import GrinderStepDirection, Recipe
+from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.optimizers.cpbo_config import TrustRegionConfig
 from espresso_rl.optimizers.cpbo_trust_region import update_trust_region
 
@@ -257,6 +260,19 @@ class CPBOApplicationTests(unittest.TestCase):
         )
         self.assertNotEqual(first_run, second_request.optimization_run_id)
 
+        sweet_context = replace(
+            run_context(),
+            taste_goal=TasteGoal.custom({"sweet": "high", "bitter": "low"}),
+        )
+        sweet_request = service.initialize(
+            sweet_context,
+            baseline_recipe(),
+            comparison_mode=ComparisonMode.BEST_INCUMBENT,
+        )
+        self.assertNotEqual(first_run, sweet_request.optimization_run_id)
+        self.assertEqual(service.active_run(sweet_context).run_id, sweet_request.optimization_run_id)
+        self.assertEqual(service.active_run(run_context()).run_id, first_run)
+
     def test_initialize_resumes_with_a_new_suggestion_not_the_incumbent(self) -> None:
         service, engine, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
 
@@ -273,6 +289,37 @@ class CPBOApplicationTests(unittest.TestCase):
         self.assertEqual(
             self.repository.get_state(run_id).pending_recipe_id,
             resumed.recipe.recipe_id,
+        )
+
+    def test_legacy_unscoped_run_is_migrated_to_balanced_goal(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        row = self.store.conn.execute(
+            "SELECT payload_json FROM cpbo_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        legacy_context = payload["context"]
+        legacy_context.pop("taste_goal")
+        legacy_fingerprint = hashlib.sha256(
+            json.dumps(legacy_context, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self.store.conn.execute(
+            "UPDATE cpbo_runs SET context_fingerprint=?, payload_json=? WHERE run_id=?",
+            (legacy_fingerprint, json.dumps(payload, sort_keys=True, separators=(",", ":")), run_id),
+        )
+        self.store.conn.commit()
+
+        migrated = service.active_run(run_context())
+
+        self.assertEqual(migrated.run_id, run_id)
+        stored = self.store.conn.execute(
+            "SELECT context_fingerprint, payload_json FROM cpbo_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        self.assertEqual(stored["context_fingerprint"], run_context().fingerprint)
+        self.assertEqual(
+            json.loads(stored["payload_json"])["context"]["taste_goal"]["mode"],
+            "balanced",
         )
 
     def test_initialize_does_not_request_an_already_pulled_candidate_again(self) -> None:
