@@ -383,7 +383,7 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   requireNumberRange(payload, 'next_dose_g', 5, 30, errors);
   requireNumberRange(payload, 'target_yield_g', 5, 100, errors);
   requireNumberRange(payload, 'target_ratio', 1.2, 3.5, errors);
-  optionalEnum(payload, 'mode', ['zero_observe', 'zero_immediate_bo', 'warm_started_bo', 'local_bo', 'cpbo_global_previous', 'cpbo_best_incumbent', 'dreamer_candidate', 'dreamer_active', 'bo_fallback'], errors);
+  optionalEnum(payload, 'mode', ['cpbo_global_previous', 'cpbo_best_incumbent'], errors);
   optionalNumberRange(payload, 'confidence', 0, 1, errors);
   optionalString(payload, 'reason', 500, errors);
   optionalEnum(payload, 'status', ['pending', 'shown', 'accepted', 'edited', 'ignored', 'expired', 'used', 'superseded'], errors);

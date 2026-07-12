@@ -11,7 +11,7 @@ import numpy as np
 
 from espresso_rl.domain.events import ShotProfileEvent
 from espresso_rl.domain.grind import GrindNormalizer
-from espresso_rl.domain.profile import CHANNEL_NAMES, profile_mse, resample_profile
+from espresso_rl.domain.profile import CHANNEL_NAMES, resample_profile
 
 CHANNEL_KEYS = list(CHANNEL_NAMES)
 N_CHANNELS = len(CHANNEL_KEYS)
@@ -46,6 +46,3 @@ class ProfileResampler:
             grind_observed=False,
         )
         return resample_profile(event, self.n_points)
-
-    def compute_profile_mse(self, profile: np.ndarray) -> float:
-        return profile_mse(profile)

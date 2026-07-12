@@ -32,17 +32,9 @@ CREATE TABLE IF NOT EXISTS shots (
     recommendation_decision TEXT NOT NULL,
     recommendation_followed TEXT NOT NULL,
     recommendation_attribution_weight DOUBLE PRECISION NOT NULL,
-    human_rating INTEGER,
-    taste_tags_json TEXT NOT NULL,
-    feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE,
-    profile_score DOUBLE PRECISION,
-    profile_mse DOUBLE PRECISION,
-    reward DOUBLE PRECISION,
-    reward_confidence DOUBLE PRECISION NOT NULL,
     shot_type TEXT NOT NULL DEFAULT 'espresso',
     exclude_from_local_optimization BOOLEAN NOT NULL DEFAULT FALSE,
     optimization_weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
-    rating_prompt_allowed BOOLEAN NOT NULL DEFAULT TRUE,
     grind_followed BOOLEAN,
     dose_followed BOOLEAN,
     yield_followed BOOLEAN,
@@ -125,13 +117,6 @@ ALTER TABLE shots
 
 CREATE INDEX IF NOT EXISTS idx_shots_context_grinder_time
     ON shots (install_id, machine_id, bean_context_id, grinder_context_id, timestamp DESC);
-
-ALTER TABLE shots
-    ADD COLUMN IF NOT EXISTS feedback_recorded BOOLEAN NOT NULL DEFAULT FALSE;
-
-UPDATE shots
-SET feedback_recorded = TRUE
-WHERE feedback_recorded = FALSE AND human_rating IS NOT NULL;
 
 ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS recommended_grind_delta_steps_from_current DOUBLE PRECISION;
@@ -238,48 +223,6 @@ CREATE INDEX IF NOT EXISTS idx_upload_queue_ready
 
 CREATE INDEX IF NOT EXISTS idx_upload_queue_record
     ON upload_queue (local_record_type, local_record_id);
-
-CREATE TABLE IF NOT EXISTS dreamer_shadow_evaluations (
-    evaluation_id TEXT PRIMARY KEY,
-    install_id TEXT NOT NULL,
-    machine_id TEXT NOT NULL,
-    bean_context_id TEXT NOT NULL,
-    grinder_context_id TEXT NOT NULL,
-    inference_contract_id TEXT NOT NULL DEFAULT 'dreamer_v3_legacy_shadow_v1',
-    source_timestamp BIGINT NOT NULL,
-    status TEXT NOT NULL,
-    payload_json JSONB NOT NULL,
-    created_at BIGINT NOT NULL,
-    updated_at BIGINT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context_contract
-    ON dreamer_shadow_evaluations (
-        install_id, machine_id, bean_context_id, grinder_context_id,
-        inference_contract_id, source_timestamp DESC
-    );
-
-CREATE TABLE IF NOT EXISTS dreamer_shadow_quality_reports (
-    report_id TEXT PRIMARY KEY,
-    install_id TEXT NOT NULL,
-    machine_id TEXT NOT NULL,
-    bean_context_id TEXT NOT NULL,
-    grinder_context_id TEXT NOT NULL,
-    checkpoint_artifact_sha256 TEXT NOT NULL,
-    checkpoint_inference_probe_sha256 TEXT NOT NULL,
-    inference_contract_id TEXT NOT NULL DEFAULT 'dreamer_v3_legacy_shadow_v1',
-    overall_status TEXT NOT NULL,
-    payload_json JSONB NOT NULL,
-    generated_at BIGINT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context_contract
-    ON dreamer_shadow_quality_reports (
-        install_id, machine_id, bean_context_id, grinder_context_id,
-        inference_contract_id, checkpoint_artifact_sha256,
-        checkpoint_inference_probe_sha256,
-        generated_at DESC
-    );
 
 -- Admin/training warehouse tables. These are populated by an admin collector
 -- from the community-fed Supabase raw queue. Public clients must not write here.

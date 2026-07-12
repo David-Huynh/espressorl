@@ -3,10 +3,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from espresso_rl.application.services import EspressoRLService, FeedbackResult, IngestResult
-from espresso_rl.domain.events import MachineStateEvent, ShotFeedbackEvent, ShotProfileEvent
+from espresso_rl.application.services import EspressoRLService, IngestResult
+from espresso_rl.domain.events import MachineStateEvent, ShotProfileEvent
 from espresso_rl.domain.models import Recommendation, ShotRecord
-from espresso_rl.domain.optimization import OPTIMIZER_MODE_CPBO
 from espresso_rl.ports.runtime import AutoTuningRuntimePublisher
 
 logger = logging.getLogger(__name__)
@@ -71,50 +70,6 @@ class AutoTuningRuntimeCoordinator:
             profile_label=event.profile_label,
             last_shot_id=result.shot.shot_id,
             last_shot_at=result.shot.timestamp,
-            last_recommendation_id=(recommendation.recommendation_id if recommendation else None),
-            last_recommendation_at=(recommendation.created_at if recommendation else None),
-            mode=recommendation.mode.value if recommendation else None,
-        )
-        return result
-
-    def handle_feedback(self, event: ShotFeedbackEvent) -> FeedbackResult:
-        result = self._service.record_feedback(event)
-        shot = result.shot
-        recommendation = result.recommendation
-        if (
-            recommendation is None
-            and result.optimizer_handoff_mode == OPTIMIZER_MODE_CPBO
-            and self._post_shot_recommendation is not None
-        ):
-            recommendation = self._post_shot_recommendation(shot)
-        logger.info(
-            "Feedback for shot %s stored rating=%s reward=%.3f confidence=%.3f",
-            shot.shot_id,
-            shot.human_rating,
-            shot.reward or 0.0,
-            shot.reward_confidence,
-        )
-        if recommendation is not None:
-            logger.info(
-                "Feedback for shot %s produced next rec %s mode=%s grind=%+d dose=%.1f yield=%.1f",
-                shot.shot_id,
-                recommendation.recommendation_id,
-                recommendation.mode.value,
-                recommendation.grind_delta_steps_from_current,
-                recommendation.next_dose_g,
-                recommendation.target_yield_g,
-            )
-            self._publisher.publish_recommendation(recommendation)
-
-        self._observe(shot, recommendation)
-        self._publisher.publish_status(
-            shot.machine_id,
-            shot.bean_context_id,
-            shot.grinder_context_id,
-            profile_id=shot.profile_id,
-            profile_label=shot.profile_label,
-            last_shot_id=shot.shot_id,
-            last_shot_at=shot.timestamp,
             last_recommendation_id=(recommendation.recommendation_id if recommendation else None),
             last_recommendation_at=(recommendation.created_at if recommendation else None),
             mode=recommendation.mode.value if recommendation else None,

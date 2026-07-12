@@ -151,7 +151,7 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
     def test_baseline_candidate_and_preference_advance_without_numeric_rating(self) -> None:
         uploaded_comparisons = []
         bridge = self.bridge([6.0, 7.0], uploaded_comparisons.append)
-        baseline = _shot("baseline", grind=5.0, rating=1)
+        baseline = _shot("baseline", grind=5.0)
         self.shots.rows[baseline.shot_id] = baseline
 
         baseline_outcome = bridge.handle_shot(baseline)
@@ -163,7 +163,7 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         self.assertEqual(first.projected_relative_step_from_reference, 6.0)
         self.assertTrue(validate_upload_payload(recommendation_upload_payload(first)).ok)
 
-        candidate = _shot("candidate", grind=6.0, rating=5)
+        candidate = _shot("candidate", grind=6.0)
         self.shots.rows[candidate.shot_id] = candidate
         candidate_outcome = bridge.handle_shot(candidate)
         self.assertTrue(candidate_outcome.awaiting_preference)
@@ -261,7 +261,6 @@ def _shot(
     shot_id: str,
     *,
     grind: float | None,
-    rating: int | None = None,
     shot_end_state: str = "finished",
     raw_profile_hash: str | None = None,
 ) -> ShotRecord:
@@ -286,9 +285,6 @@ def _shot(
         profile_id="profile",
         raw_profile_hash=raw_profile_hash,
         grinder_step_direction=GrinderStepDirection.HIGHER_IS_FINER,
-        human_rating=rating,
-        feedback_recorded=rating is not None,
-        reward=(0.0 if rating is not None else None),
         shot_end_state=shot_end_state,
     )
 

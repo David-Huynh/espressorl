@@ -43,7 +43,7 @@ class LocalDataManagementTests(unittest.TestCase):
                 self.assertTrue(recent["espresso_1"]["included_in_optimizer"])
                 self.assertFalse(recent["flush_1"]["included_in_optimizer"])
                 self.assertTrue(recent["flush_1"]["rejected_upload"])
-                self.assertEqual(status["contexts"][0]["optimizer_shot_count"], 1)
+                self.assertEqual(status["contexts"][0]["eligible_shot_count"], 1)
 
     def test_purge_useless_shots_keeps_optimizer_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,48 +98,6 @@ class LocalDataManagementTests(unittest.TestCase):
                 recommendations.upsert(_recommendation("rec_1"))
                 queue.enqueue(_upload("shot_upload", "espresso_1", local_record_type="shot"))
                 queue.enqueue(_upload("rec_upload", "rec_1", local_record_type="recommendation"))
-                store.conn.execute(
-                    """
-                    INSERT INTO dreamer_shadow_evaluations (
-                        evaluation_id, install_id, machine_id, bean_context_id, grinder_context_id,
-                        source_timestamp, status, payload_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        "eval_1",
-                        "install_1",
-                        "machine_1",
-                        "bean_1",
-                        "",
-                        10,
-                        "ok",
-                        "{}",
-                        10,
-                        10,
-                    ),
-                )
-                store.conn.execute(
-                    """
-                    INSERT INTO dreamer_shadow_quality_reports (
-                        report_id, install_id, machine_id, bean_context_id, grinder_context_id,
-                        checkpoint_artifact_sha256, checkpoint_inference_probe_sha256,
-                        overall_status, payload_json, generated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        "report_1",
-                        "install_1",
-                        "machine_1",
-                        "bean_1",
-                        "",
-                        "a" * 64,
-                        "b" * 64,
-                        "insufficient_data",
-                        "{}",
-                        10,
-                    ),
-                )
-                store.conn.commit()
                 service = LocalDataService(local, install_id="install_1", machine_id="machine_1", clock=lambda: 20)
 
                 dry_run = service.reset_all(dry_run=True).to_dict()
@@ -148,20 +106,10 @@ class LocalDataManagementTests(unittest.TestCase):
                 self.assertEqual(dry_run["counts"]["shots"], 1)
                 self.assertEqual(dry_run["counts"]["recommendations"], 1)
                 self.assertEqual(dry_run["counts"]["upload_queue"], 2)
-                self.assertEqual(dry_run["counts"]["dreamer_shadow_evaluations"], 1)
-                self.assertEqual(dry_run["counts"]["dreamer_shadow_quality_reports"], 1)
                 self.assertEqual(result["counts"], dry_run["counts"])
                 self.assertIsNone(shots.get("espresso_1"))
                 self.assertIsNone(recommendations.get("rec_1"))
                 self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM upload_queue").fetchone()["count"], 0)
-                self.assertEqual(
-                    store.conn.execute("SELECT COUNT(*) AS count FROM dreamer_shadow_evaluations").fetchone()["count"],
-                    0,
-                )
-                self.assertEqual(
-                    store.conn.execute("SELECT COUNT(*) AS count FROM dreamer_shadow_quality_reports").fetchone()["count"],
-                    0,
-                )
 
 
 def _shot(
@@ -185,9 +133,6 @@ def _shot(
         shot_type=shot_type,
         exclude_from_local_optimization=exclude,
         optimization_weight=optimization_weight,
-        feedback_recorded=True,
-        reward=0.5,
-        reward_confidence=0.5,
         created_at=10,
         updated_at=10,
     )
@@ -209,7 +154,7 @@ def _recommendation(recommendation_id: str) -> Recommendation:
         next_dose_g=18,
         target_yield_g=36,
         target_ratio=2,
-        mode=RecommendationMode.LOCAL_BO,
+        mode=RecommendationMode.CPBO_BEST_INCUMBENT,
         confidence=0.5,
         reason="test",
         status=RecommendationStatus.PENDING,

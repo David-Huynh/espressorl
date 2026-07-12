@@ -87,6 +87,26 @@ class AdminPipelineTests(unittest.TestCase):
         self.assertFalse(result.purge.source_enabled)  # type: ignore[union-attr]
         self.assertIn("Supabase source purge is disabled", result.warnings[0])
 
+    def test_source_purge_uses_short_mirrored_retention_without_touching_warehouse(self) -> None:
+        warehouse = FakeWarehouse(purge_eligible={"validated": 8})
+        mirror = PurgingMirror(source_purged=5)
+        service = AdminPipelineService(
+            warehouse=warehouse,
+            mirror=mirror,
+            validator=FakeValidator(),
+            source_mirrored_retention_days=1,
+            source_rejected_retention_days=30,
+            source_failed_retention_days=90,
+            clock=FakeClock(),
+        )
+
+        result = service.purge_source_once(requested_by="admin_collector")
+
+        self.assertEqual(result.purge.source_purged, 5)  # type: ignore[union-attr]
+        self.assertEqual(mirror.retention, (1, 30, 90))
+        self.assertFalse(warehouse.purged)
+        self.assertEqual(warehouse.admin_actions[-1].action_type, "purge_source_once")
+
     def test_status_uses_safe_rejection_categories_only(self) -> None:
         warehouse = FakeWarehouse(
             rejections=[
@@ -208,11 +228,23 @@ class FakeMirror:
 class PurgingMirror:
     def __init__(self, source_purged: int) -> None:
         self.source_purged = source_purged
+        self.retention: tuple[int, int, int] | None = None
 
     def mirror_once(self, limit: int = 100) -> CommunityMirrorResult:
         return CommunityMirrorResult(claimed=0, mirrored=0, failed=0)
 
-    def purge_retained_queue(self) -> CommunityQueuePurgeResult:
+    def purge_retained_queue(
+        self,
+        *,
+        mirrored_retention_days: int = 14,
+        rejected_retention_days: int = 30,
+        failed_retention_days: int = 90,
+    ) -> CommunityQueuePurgeResult:
+        self.retention = (
+            mirrored_retention_days,
+            rejected_retention_days,
+            failed_retention_days,
+        )
         return CommunityQueuePurgeResult(purged=self.source_purged, source_purged=self.source_purged)
 
 

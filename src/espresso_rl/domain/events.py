@@ -13,13 +13,9 @@ from .models import (
     RecommendationDecision,
     Recipe,
     ShotType,
-    VALID_TASTE_TAGS,
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
 from .cpbo import ComparisonMode, PreferenceLabel
-from .dreamer_taste import normalize_dreamer_taste_objective
-from .prior_rules import PriorRule, PriorSelectionMode, parse_prior_rules
-from .taste import normalize_taste_tags
 
 VALID_CORRECTION_TAGS = {
     "changed_manually",
@@ -152,7 +148,6 @@ class ShotProfileEvent:
     local_optimization_enabled: bool = True
     community_upload_enabled: bool | None = None
     optimization_weight: float | None = None
-    rating_prompt_allowed: bool = True
     weight_source: str | None = None
     flow_source: str | None = None
     flow_units: str | None = None
@@ -347,38 +342,6 @@ class ShotProfileEvent:
             raise ValueError("shot_time_s must be positive when present")
         if self.optimization_weight is not None and not 0.0 <= self.optimization_weight <= 1.0:
             raise ValueError("optimization_weight must be between 0 and 1")
-
-
-@dataclass(frozen=True)
-class ShotFeedbackEvent:
-    shot_id: str
-    install_id: str
-    machine_id: str
-    timestamp: int
-    recommendation_id: str | None = None
-    rating: int | None = None
-    taste_tags: list[str] = field(default_factory=list)
-    user_note: str | None = None
-    skipped: bool = False
-    source: str = "unknown"
-    schema_version: int = 1
-
-    event_type: str = field(default="shot_feedback", init=False)
-
-    def __post_init__(self) -> None:
-        if self.schema_version != 1:
-            raise ValueError("unsupported feedback schema_version")
-        if self.rating is not None and not 1 <= self.rating <= 5:
-            raise ValueError("rating must be 1..5 or null")
-        if self.skipped and (self.rating is not None or self.taste_tags):
-            raise ValueError("skipped feedback cannot include a rating or taste tags")
-        if not self.skipped and self.rating is None:
-            raise ValueError("rating is required unless feedback is skipped")
-        normalized_tags = normalize_taste_tags(self.taste_tags)
-        object.__setattr__(self, "taste_tags", normalized_tags)
-        invalid_tags = set(self.taste_tags) - VALID_TASTE_TAGS
-        if invalid_tags:
-            raise ValueError(f"invalid taste tags: {sorted(invalid_tags)}")
 
 
 @dataclass(frozen=True)
@@ -671,11 +634,6 @@ class OptimizerSettingsEvent:
     schema_version: int = 1
     bean_context_id: str | None = None
     grinder_context_id: str | None = None
-    prior_mode: PriorSelectionMode = PriorSelectionMode.COMMUNITY_ONLY
-    prior_rules: tuple[PriorRule, ...] = ()
-    model_artifact_path: str | None = None
-    model_artifact_sha256: str | None = None
-    taste_objective: dict[str, str] = field(default_factory=lambda: {"mode": "auto"})
     source: str = "unknown"
 
     event_type: str = field(default="optimizer_settings", init=False)
@@ -686,33 +644,7 @@ class OptimizerSettingsEvent:
         object.__setattr__(self, "optimizer_mode", normalize_optimizer_mode(self.optimizer_mode))
         object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
-        object.__setattr__(self, "prior_mode", PriorSelectionMode(self.prior_mode))
-        object.__setattr__(self, "prior_rules", parse_prior_rules(self.prior_rules))
-        object.__setattr__(
-            self,
-            "model_artifact_path",
-            _safe_artifact_path(self.model_artifact_path),
-        )
-        object.__setattr__(
-            self,
-            "model_artifact_sha256",
-            _optional_sha256(self.model_artifact_sha256, "model_artifact_sha256"),
-        )
-        object.__setattr__(
-            self,
-            "taste_objective",
-            normalize_dreamer_taste_objective(self.taste_objective),
-        )
         object.__setattr__(self, "source", _optional_string(self.source, "source", 80) or "unknown")
-
-
-def _safe_artifact_path(value: Any) -> str | None:
-    parsed = _optional_string(value, "model_artifact_path", 240)
-    if parsed is None:
-        return None
-    if any(ord(ch) < 32 for ch in parsed):
-        raise ValueError("model_artifact_path must be a safe short string")
-    return parsed
 
 
 def _optional_sha256(value: Any, field_name: str) -> str | None:

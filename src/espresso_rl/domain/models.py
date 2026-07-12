@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 
-from espresso_rl.domain.taste import VALID_TASTE_TAGS, normalize_taste_tags
 
 PROFILE_SHAPE = (5, 100)
 PROFILE_DTYPE = np.float32
@@ -38,15 +37,8 @@ def _optional_pump_target_mode_vector(value: np.ndarray | list[int] | None) -> n
 
 
 class RecommendationMode(str, Enum):
-    ZERO_OBSERVE = "zero_observe"
-    ZERO_IMMEDIATE_BO = "zero_immediate_bo"
-    WARM_STARTED_BO = "warm_started_bo"
-    LOCAL_BO = "local_bo"
     CPBO_GLOBAL_PREVIOUS = "cpbo_global_previous"
     CPBO_BEST_INCUMBENT = "cpbo_best_incumbent"
-    DREAMER_CANDIDATE = "dreamer_candidate"
-    DREAMER_ACTIVE = "dreamer_active"
-    BO_FALLBACK = "bo_fallback"
 
 
 class RecommendationStatus(str, Enum):
@@ -262,12 +254,6 @@ class Recommendation:
 
 
 @dataclass
-class RewardResult:
-    reward: float
-    confidence: float
-
-
-@dataclass
 class FollowThroughResult:
     state: FollowThroughState
     attribution_weight: float
@@ -447,17 +433,9 @@ class ShotRecord:
     recommendation_decision: RecommendationDecision = RecommendationDecision.UNKNOWN
     recommendation_followed: FollowThroughState = FollowThroughState.UNKNOWN
     recommendation_attribution_weight: float = 0.0
-    human_rating: int | None = None
-    taste_tags: list[str] = field(default_factory=list)
-    feedback_recorded: bool = False
-    profile_score: float | None = None
-    profile_mse: float | None = None
-    reward: float | None = None
-    reward_confidence: float = 0.0
     shot_type: ShotType = ShotType.ESPRESSO
     exclude_from_local_optimization: bool = False
     optimization_weight: float = 1.0
-    rating_prompt_allowed: bool = True
     grind_followed: bool | None = None
     dose_followed: bool | None = None
     yield_followed: bool | None = None
@@ -501,17 +479,8 @@ class ShotRecord:
     created_at: int = field(default_factory=now_ts)
     updated_at: int = field(default_factory=now_ts)
 
-    # Compatibility fields for the existing Dreamer modules. They are not used
-    # by the active application service, but keeping them here avoids making the
-    # future Dreamer cleanup part of this boundary refactor.
-    machine_pressure_bar: float = 9.0
     basket_size_ml: float = 18.0
-    bean_roast_level: str | None = None
-    bean_days_off_roast: int | None = None
-    bean_origin: str | None = None
-    bean_process: str | None = None
     user_id: str = ""
-    grinder_model: str = ""
 
     def __post_init__(self) -> None:
         self.profile = np.asarray(self.profile, dtype=PROFILE_DTYPE)
@@ -564,12 +533,6 @@ class ShotRecord:
             self.brew_ratio = self.beverage_out_g / self.dose_in_g
         if self.target_ratio is None:
             self.target_ratio = self.target_yield_g / self.dose_in_g
-        self.taste_tags = normalize_taste_tags(self.taste_tags)
-        invalid_tags = set(self.taste_tags) - VALID_TASTE_TAGS
-        if invalid_tags:
-            raise ValueError(f"invalid taste tags: {sorted(invalid_tags)}")
-        if self.human_rating is not None and not 1 <= self.human_rating <= 5:
-            raise ValueError("human_rating must be 1..5")
         if self.shot_type != ShotType.ESPRESSO or self.exclude_from_local_optimization:
             self.optimization_weight = 0.0
             self.recommendation_attribution_weight = 0.0
@@ -655,13 +618,3 @@ class ShotRecord:
     @property
     def grinder_direction_sign(self) -> int:
         return 1 if self.grinder_step_direction == GrinderStepDirection.HIGHER_IS_FINER else -1
-
-    def as_optimizer_payload(self) -> dict[str, Any]:
-        return {
-            "shot_id": self.shot_id,
-            "reward": self.reward,
-            "reward_confidence": self.reward_confidence,
-            "human_rating": self.human_rating,
-            "taste_tags": list(self.taste_tags),
-            "follow_through": self.recommendation_followed.value,
-        }

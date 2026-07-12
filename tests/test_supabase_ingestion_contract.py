@@ -20,8 +20,8 @@ GRINDER_CATALOG_MIGRATION = (
 GRINDER_CATALOG_SEED_MIGRATION = (
     ROOT / "supabase" / "migrations" / "202606270001_espressorl_grinder_catalog_seed.sql"
 )
-PRIOR_RULE_CATALOG_MIGRATION = (
-    ROOT / "supabase" / "migrations" / "202606290001_espressorl_prior_rule_catalog.sql"
+PRIOR_RULE_CLEANUP_MIGRATION = (
+    ROOT / "supabase" / "migrations" / "202607110002_remove_scalar_prior_catalog.sql"
 )
 PRIOR_RULE_SEARCH_FUNCTION = (
     ROOT / "supabase" / "functions" / "espresso-rl-prior-rule-search" / "index.ts"
@@ -54,30 +54,13 @@ class SupabaseIngestionContractTests(unittest.TestCase):
         self.assertIn("espressorl_consume_rate_limit", source)
         self.assertIn("'Access-Control-Allow-Origin': '*'", source)
 
-    def test_prior_rule_catalog_is_read_only_bounded_and_rate_limited(self) -> None:
+    def test_scalar_bo_prior_catalog_and_search_endpoint_are_removed(self) -> None:
         config = CONFIG.read_text()
-        source = PRIOR_RULE_SEARCH_FUNCTION.read_text()
-        sql = PRIOR_RULE_CATALOG_MIGRATION.read_text()
+        sql = PRIOR_RULE_CLEANUP_MIGRATION.read_text()
 
-        self.assertIn("[functions.espresso-rl-prior-rule-search]", config)
-        self.assertIn("request.method !== 'GET'", source)
-        self.assertIn("MAX_QUERY_LENGTH = 80", source)
-        self.assertIn("MAX_LIMIT = 10", source)
-        self.assertIn("espressorl_consume_rate_limit", source)
-        self.assertIn("espressorl_prior_rule_catalog", source)
-        self.assertIn("Math.min(0.35", source)
-        self.assertIn("CREATE TABLE IF NOT EXISTS public.espressorl_prior_rule_catalog", sql)
-        self.assertIn("jsonb_array_length(rules_json) BETWEEN 1 AND 16", sql)
-        self.assertIn("confidence >= 0.0 AND confidence <= 0.35", sql)
-        self.assertIn("ENABLE ROW LEVEL SECURITY", sql)
-        self.assertIn("REVOKE ALL ON public.espressorl_prior_rule_catalog FROM anon, authenticated", sql)
-        self.assertIn("taste-ratio-classic-v1", sql)
-        self.assertIn("taste-grind-classic-v1", sql)
-        self.assertIn("thirty-second-grind-v1", sql)
-        self.assertIn('"ratio_direction":"decrease"', sql)
-        self.assertIn('"grind_direction":"finer"', sql)
-        self.assertNotIn("target_ratio_delta", sql)
-        self.assertNotIn("grind_delta_steps", sql)
+        self.assertNotIn("[functions.espresso-rl-prior-rule-search]", config)
+        self.assertFalse(PRIOR_RULE_SEARCH_FUNCTION.exists())
+        self.assertIn("DROP TABLE IF EXISTS public.espressorl_prior_rule_catalog", sql)
 
     def test_raw_queue_migration_blocks_public_table_access(self) -> None:
         sql = MIGRATION.read_text()

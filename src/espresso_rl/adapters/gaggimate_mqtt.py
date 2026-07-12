@@ -17,18 +17,8 @@ from espresso_rl.domain.events import (
     RecommendationApplyEvent,
     RecommendationDecisionEvent,
     ShotCorrectionEvent,
-    ShotFeedbackEvent,
     ShotProfileEvent,
     UploadQueueMaintenanceEvent,
-)
-from espresso_rl.domain.dreamer_control import (
-    DREAMER_LIVE_ACK_SCOPE_ESP32_RECEIVED,
-    DreamerLiveControlAcknowledgement,
-    DreamerLiveControlPublication,
-)
-from espresso_rl.domain.dreamer_telemetry import (
-    DreamerLiveTelemetry,
-    DreamerLiveTelemetryCapabilities,
 )
 from espresso_rl.domain.models import Recommendation
 from espresso_rl.domain.models import new_id
@@ -36,7 +26,6 @@ from espresso_rl.domain.models import new_id
 logger = logging.getLogger(__name__)
 
 SHOT_TOPIC = "gaggimate/+/shot/profile"
-FEEDBACK_TOPIC = "gaggimate/+/rl/rating"
 PREFERENCE_TOPIC = "gaggimate/+/rl/preference"
 CORRECTION_TOPIC = "gaggimate/+/rl/shot/correction"
 UPLOAD_REQUEUE_TOPIC = "gaggimate/+/rl/upload/requeue"
@@ -45,8 +34,6 @@ APPLY_TOPIC = "gaggimate/+/rl/recommendation/apply"
 MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
 OPTIMIZER_SETTINGS_TOPIC = "gaggimate/+/rl/settings"
 LOCAL_RESET_TOPIC = "gaggimate/+/rl/local/reset"
-DREAMER_ACK_TOPIC = "gaggimate/+/rl/dreamer/ack"
-DREAMER_TELEMETRY_TOPIC = "gaggimate/+/rl/dreamer/telemetry"
 _SHOT_FINISH_SETTLE_SAMPLES = 2
 _SHOT_FINISH_SETTLE_MAX_DELTA_G = 1.0
 _PREFERENCE_FIELDS = frozenset(
@@ -65,69 +52,6 @@ _PREFERENCE_FIELDS = frozenset(
     }
 )
 
-_DREAMER_ACK_FIELDS = frozenset(
-    {
-        "event_type",
-        "schema_version",
-        "machine_id",
-        "publication_id",
-        "sequence",
-        "step_index",
-        "ack_scope",
-        "accepted",
-        "status",
-        "reason",
-        "source",
-        "timestamp",
-    }
-)
-_DREAMER_TELEMETRY_FIELDS = frozenset(
-    {
-        "event_type",
-        "schema_version",
-        "machine_id",
-        "shot_id",
-        "profile_id",
-        "step_index",
-        "elapsed_ms",
-        "sample_interval_ms",
-        "observation",
-        "target",
-        "capabilities",
-        "source",
-    }
-)
-_DREAMER_TELEMETRY_OBSERVATION_FIELDS = frozenset(
-    {
-        "pressure_bar",
-        "pump_flow_ml_s",
-        "beverage_flow_g_s",
-        "weight_g",
-        "temperature_c",
-    }
-)
-_DREAMER_TELEMETRY_TARGET_FIELDS = frozenset(
-    {
-        "pressure_bar",
-        "pump_flow_ml_s",
-        "temperature_c",
-        "pump_target_mode",
-        "valve_open",
-        "yield_g",
-    }
-)
-_DREAMER_TELEMETRY_CAPABILITY_FIELDS = frozenset(
-    {
-        "pressure_control_allowed",
-        "flow_control_allowed",
-        "pump_mode_control_allowed",
-        "valve_control_allowed",
-        "temperature_control_allowed",
-        "stop_control_allowed",
-    }
-)
-
-
 class GaggimateMQTTClient:
     """Gaggimate MQTT adapter. Machine-specific topics stay out of core."""
 
@@ -135,7 +59,6 @@ class GaggimateMQTTClient:
         self,
         config: Config,
         on_shot: Callable[[ShotProfileEvent], None],
-        on_feedback: Callable[[ShotFeedbackEvent], None],
         on_correction: Callable[[ShotCorrectionEvent], None],
         on_upload_maintenance: Callable[[UploadQueueMaintenanceEvent], None],
         on_decision: Callable[[RecommendationDecisionEvent], None],
@@ -144,12 +67,9 @@ class GaggimateMQTTClient:
         on_preference: Callable[[PreferenceFeedbackEvent], None] | None = None,
         on_optimizer_settings: Callable[[OptimizerSettingsEvent], None] | None = None,
         on_local_reset: Callable[[LocalResetEvent], None] | None = None,
-        on_dreamer_live_ack: Callable[[DreamerLiveControlAcknowledgement], None] | None = None,
-        on_dreamer_live_telemetry: Callable[[DreamerLiveTelemetry], None] | None = None,
     ) -> None:
         self._config = config
         self._on_shot = on_shot
-        self._on_feedback = on_feedback
         self._on_correction = on_correction
         self._on_upload_maintenance = on_upload_maintenance
         self._on_decision = on_decision
@@ -158,8 +78,6 @@ class GaggimateMQTTClient:
         self._on_preference = on_preference or (lambda event: None)
         self._on_optimizer_settings = on_optimizer_settings or (lambda event: None)
         self._on_local_reset = on_local_reset or (lambda event: None)
-        self._on_dreamer_live_ack = on_dreamer_live_ack or (lambda event: None)
-        self._on_dreamer_live_telemetry = on_dreamer_live_telemetry or (lambda event: None)
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.mqtt_user:
             self._client.username_pw_set(config.mqtt_user, config.mqtt_password)
@@ -215,50 +133,6 @@ class GaggimateMQTTClient:
         self._client.publish(topic, json.dumps(payload), qos=1, retain=True)
         logger.info("Published recommendation %s to %s", recommendation.recommendation_id, topic)
 
-    def publish_dreamer_live_control(self, publication: DreamerLiveControlPublication) -> None:
-        machine_topic_id = _machine_topic_id(publication.machine_id)
-        event_type = (
-            "dreamer_live_fail_safe"
-            if publication.fail_safe_required
-            else "dreamer_live_target_update"
-        )
-        topic_suffix = "fail_safe" if publication.fail_safe_required else "live_target"
-        topic = f"gaggimate/{machine_topic_id}/rl/dreamer/{topic_suffix}"
-        target_update = publication.action if not publication.fail_safe_required else None
-        if target_update is not None:
-            target_update = dict(target_update)
-            pump_target_mode = target_update.pop("pump_target_mode", None)
-            if pump_target_mode == 1:
-                target_update.pop("flow_target_ml_s", None)
-            elif pump_target_mode == 2:
-                target_update.pop("pressure_target_bar", None)
-        payload = {
-            "event_type": event_type,
-            "schema_version": 1,
-            "publication_id": publication.publication_id,
-            "machine_id": publication.machine_id,
-            "profile_id": publication.profile_id,
-            "sequence": publication.sequence,
-            "step_index": publication.step_index,
-            "issued_at_ms": publication.issued_at_ms,
-            "status": publication.decision.status,
-            "reason": publication.decision.reason,
-            "fail_safe_required": publication.fail_safe_required,
-            "ack_required": True,
-            "ack_scope": "esp32_received",
-            "target_update": target_update,
-            "clamped_fields": list(publication.decision.clamped_fields),
-        }
-        if publication.fail_safe_required:
-            payload["fallback_required"] = True
-        self._client.publish(topic, json.dumps(payload), qos=1, retain=False)
-        logger.info(
-            "Published Dreamer live control %s status=%s to %s",
-            publication.publication_id,
-            publication.decision.status,
-            topic,
-        )
-
     def clear_recommendation(self, machine_id: str) -> None:
         for machine_topic_id in _machine_topic_id_variants(machine_id):
             topic = f"gaggimate/{machine_topic_id}/rl/recommendation"
@@ -287,7 +161,6 @@ class GaggimateMQTTClient:
     ) -> None:
         if reason_code == 0:
             client.subscribe(SHOT_TOPIC)
-            client.subscribe(FEEDBACK_TOPIC)
             client.subscribe(PREFERENCE_TOPIC)
             client.subscribe(CORRECTION_TOPIC)
             client.subscribe(UPLOAD_REQUEUE_TOPIC)
@@ -296,12 +169,9 @@ class GaggimateMQTTClient:
             client.subscribe(MACHINE_STATE_TOPIC)
             client.subscribe(OPTIMIZER_SETTINGS_TOPIC)
             client.subscribe(LOCAL_RESET_TOPIC)
-            client.subscribe(DREAMER_ACK_TOPIC)
-            client.subscribe(DREAMER_TELEMETRY_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
-                FEEDBACK_TOPIC,
                 PREFERENCE_TOPIC,
                 CORRECTION_TOPIC,
                 UPLOAD_REQUEUE_TOPIC,
@@ -310,8 +180,6 @@ class GaggimateMQTTClient:
                 MACHINE_STATE_TOPIC,
                 OPTIMIZER_SETTINGS_TOPIC,
                 LOCAL_RESET_TOPIC,
-                DREAMER_ACK_TOPIC,
-                DREAMER_TELEMETRY_TOPIC,
             )
         else:
             logger.error("MQTT connection refused: %s", reason_code)
@@ -332,8 +200,6 @@ class GaggimateMQTTClient:
             payload = json.loads(payload_text)
             if msg.topic.endswith("/shot/profile"):
                 self._on_shot(self.translate_shot_payload(payload, mac))
-            elif msg.topic.endswith("/rl/rating"):
-                self._on_feedback(self.translate_feedback_payload(payload, mac))
             elif msg.topic.endswith("/rl/preference"):
                 self._on_preference(self.translate_preference_payload(payload, mac))
             elif msg.topic.endswith("/rl/shot/correction"):
@@ -350,119 +216,8 @@ class GaggimateMQTTClient:
                 self._on_optimizer_settings(self.translate_optimizer_settings_payload(payload, mac))
             elif msg.topic.endswith("/rl/local/reset"):
                 self._on_local_reset(self.translate_local_reset_payload(payload, mac))
-            elif msg.topic.endswith("/rl/dreamer/ack"):
-                self._on_dreamer_live_ack(self.translate_dreamer_live_ack_payload(payload, mac))
-            elif msg.topic.endswith("/rl/dreamer/telemetry"):
-                self._on_dreamer_live_telemetry(self.translate_dreamer_live_telemetry_payload(payload, mac))
         except Exception:
             logger.exception("Error handling message on %s", msg.topic)
-
-    def translate_dreamer_live_ack_payload(
-        self,
-        payload: dict[str, Any],
-        mac: str,
-    ) -> DreamerLiveControlAcknowledgement:
-        if not isinstance(payload, dict):
-            raise ValueError("Dreamer live acknowledgement payload must be an object")
-        unknown = sorted(str(key) for key in payload if key not in _DREAMER_ACK_FIELDS)
-        if unknown:
-            raise ValueError(f"Dreamer live acknowledgement contains unsupported fields: {', '.join(unknown[:5])}")
-        if payload.get("event_type") != "dreamer_live_ack":
-            raise ValueError("Dreamer live acknowledgement event_type is invalid")
-        if _strict_non_negative_int(payload.get("schema_version"), "schema_version") != 1:
-            raise ValueError("Dreamer live acknowledgement schema_version is unsupported")
-
-        topic_machine_id = f"gaggimate:{mac}"
-        payload_machine_id = _required_bounded_string(payload.get("machine_id"), "machine_id", maximum=160)
-        if not _same_gaggimate_machine_id(topic_machine_id, payload_machine_id):
-            raise ValueError("Dreamer live acknowledgement machine_id does not match topic")
-
-        sequence = _strict_non_negative_int(payload.get("sequence"), "sequence")
-        step_index = _strict_non_negative_int(payload.get("step_index"), "step_index")
-        publication_id = _required_bounded_string(payload.get("publication_id"), "publication_id", maximum=200)
-        if publication_id != f"{payload_machine_id}:{sequence}":
-            raise ValueError("Dreamer live acknowledgement publication_id is invalid")
-        if payload.get("ack_scope") != DREAMER_LIVE_ACK_SCOPE_ESP32_RECEIVED:
-            raise ValueError("Dreamer live acknowledgement ack_scope is unsupported")
-        if not isinstance(payload.get("accepted"), bool):
-            raise ValueError("Dreamer live acknowledgement accepted must be boolean")
-        status = _required_bounded_string(payload.get("status"), "status", maximum=40)
-        reason = _optional_bounded_string(payload.get("reason"), "reason", maximum=120)
-        if payload.get("source") != "gaggimate_mqtt":
-            raise ValueError("Dreamer live acknowledgement source is invalid")
-        reported_at = (
-            _strict_non_negative_int(payload.get("timestamp"), "timestamp")
-            if payload.get("timestamp") is not None
-            else None
-        )
-        return DreamerLiveControlAcknowledgement(
-            machine_id=payload_machine_id,
-            publication_id=publication_id,
-            sequence=sequence,
-            step_index=step_index,
-            accepted=payload["accepted"],
-            status=status,
-            reason=reason,
-            reported_at=reported_at,
-        )
-
-    def translate_dreamer_live_telemetry_payload(
-        self,
-        payload: dict[str, Any],
-        mac: str,
-    ) -> DreamerLiveTelemetry:
-        _require_exact_object_fields(payload, _DREAMER_TELEMETRY_FIELDS, "telemetry")
-        if payload.get("event_type") != "dreamer_live_telemetry":
-            raise ValueError("Dreamer live telemetry event_type is invalid")
-        schema_version = _strict_non_negative_int(payload.get("schema_version"), "schema_version")
-        topic_machine_id = f"gaggimate:{mac}"
-        machine_id = _required_bounded_string(payload.get("machine_id"), "machine_id", maximum=160)
-        if not _same_gaggimate_machine_id(topic_machine_id, machine_id):
-            raise ValueError("Dreamer live telemetry machine_id does not match topic")
-        if payload.get("source") != "gaggimate_mqtt":
-            raise ValueError("Dreamer live telemetry source is invalid")
-
-        observation = _require_exact_object_fields(
-            payload.get("observation"),
-            _DREAMER_TELEMETRY_OBSERVATION_FIELDS,
-            "telemetry observation",
-        )
-        target = _require_exact_object_fields(
-            payload.get("target"),
-            _DREAMER_TELEMETRY_TARGET_FIELDS,
-            "telemetry target",
-        )
-        capabilities = _require_exact_object_fields(
-            payload.get("capabilities"),
-            _DREAMER_TELEMETRY_CAPABILITY_FIELDS,
-            "telemetry capabilities",
-        )
-        if any(not isinstance(capabilities[field], bool) for field in _DREAMER_TELEMETRY_CAPABILITY_FIELDS):
-            raise ValueError("Dreamer live telemetry capabilities must be boolean")
-        if not isinstance(target["valve_open"], bool):
-            raise ValueError("Dreamer live telemetry target valve_open must be boolean")
-
-        return DreamerLiveTelemetry(
-            machine_id=machine_id,
-            shot_id=_required_bounded_string(payload.get("shot_id"), "shot_id", maximum=200),
-            profile_id=_required_bounded_string(payload.get("profile_id"), "profile_id", maximum=120),
-            schema_version=schema_version,
-            step_index=_strict_non_negative_int(payload.get("step_index"), "step_index"),
-            elapsed_ms=_strict_non_negative_int(payload.get("elapsed_ms"), "elapsed_ms"),
-            sample_interval_ms=_strict_non_negative_int(payload.get("sample_interval_ms"), "sample_interval_ms"),
-            pressure_bar=_strict_finite_number(observation["pressure_bar"], "observation.pressure_bar"),
-            pressure_target_bar=_strict_finite_number(target["pressure_bar"], "target.pressure_bar"),
-            pump_flow_ml_s=_strict_finite_number(observation["pump_flow_ml_s"], "observation.pump_flow_ml_s"),
-            pump_flow_target_ml_s=_strict_finite_number(target["pump_flow_ml_s"], "target.pump_flow_ml_s"),
-            beverage_flow_g_s=_strict_finite_number(observation["beverage_flow_g_s"], "observation.beverage_flow_g_s"),
-            weight_g=_strict_finite_number(observation["weight_g"], "observation.weight_g"),
-            temperature_c=_strict_finite_number(observation["temperature_c"], "observation.temperature_c"),
-            temperature_target_c=_strict_finite_number(target["temperature_c"], "target.temperature_c"),
-            pump_target_mode=_strict_non_negative_int(target["pump_target_mode"], "target.pump_target_mode"),
-            valve_open=target["valve_open"],
-            target_yield_g=_strict_finite_number(target["yield_g"], "target.yield_g"),
-            capabilities=DreamerLiveTelemetryCapabilities(**capabilities),
-        )
 
     def translate_shot_payload(self, payload: dict[str, Any], mac: str) -> ShotProfileEvent:
         install_id = str(payload.get("install_id") or self._config.install_id)
@@ -555,7 +310,6 @@ class GaggimateMQTTClient:
             local_optimization_enabled=bool(payload.get("local_optimization_enabled", True)),
             community_upload_enabled=_optional_bool(payload.get("community_upload_enabled")),
             optimization_weight=_optional_float(payload.get("optimization_weight")),
-            rating_prompt_allowed=bool(payload.get("rating_prompt_allowed", True)),
             weight_source=_optional_string(payload.get("weight_source")),
             flow_source=_optional_string(payload.get("flow_source")),
             flow_units=_optional_string(payload.get("flow_units")),
@@ -578,22 +332,6 @@ class GaggimateMQTTClient:
             profile_temperature_c=_optional_float(payload.get("profile_temperature_c")),
             final_phase_temperature_c=_optional_float(payload.get("final_phase_temperature_c")),
             shot_end_state=_optional_string(payload.get("shot_end_state")),
-        )
-
-    def translate_feedback_payload(self, payload: dict[str, Any], mac: str) -> ShotFeedbackEvent:
-        rating = payload.get("rating")
-        skipped = bool(payload.get("skipped", rating is None))
-        return ShotFeedbackEvent(
-            shot_id=str(payload.get("shot_id") or ""),
-            install_id=str(payload.get("install_id") or self._config.install_id),
-            machine_id=str(payload.get("machine_id") or f"gaggimate:{mac}"),
-            timestamp=int(payload.get("timestamp", self._config.now())),
-            recommendation_id=payload.get("recommendation_id"),
-            rating=None if rating is None else int(rating),
-            taste_tags=list(payload.get("taste_tags", [])),
-            user_note=payload.get("user_note"),
-            skipped=skipped,
-            source=payload.get("source", "gaggimate_mqtt"),
         )
 
     def translate_preference_payload(
@@ -732,11 +470,6 @@ class GaggimateMQTTClient:
             optimizer_mode=str(payload.get("optimizer_mode") or payload.get("mode") or self._config.optimizer_mode),
             bean_context_id=_optional_string(payload.get("bean_context_id")),
             grinder_context_id=_optional_string(payload.get("grinder_context_id")),
-            prior_mode=str(payload.get("prior_mode") or "community_only"),
-            prior_rules=tuple(payload.get("prior_rules") or ()),
-            model_artifact_path=_optional_string(payload.get("model_artifact_path")),
-            model_artifact_sha256=_optional_string(payload.get("model_artifact_sha256")),
-            taste_objective=payload.get("taste_objective") or {"mode": "auto"},
             source=payload.get("source", "gaggimate_mqtt"),
         )
 
@@ -921,32 +654,17 @@ def _optional_string(value: Any) -> str | None:
 
 def _required_bounded_string(value: Any, field_name: str, *, maximum: int) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"Dreamer live acknowledgement {field_name} must be a string")
+        raise ValueError(f"{field_name} must be a string")
     normalized = value.strip()
     if not normalized or len(normalized) > maximum:
-        raise ValueError(f"Dreamer live acknowledgement {field_name} is invalid")
+        raise ValueError(f"{field_name} is invalid")
     return normalized
-
-
-def _optional_bounded_string(value: Any, field_name: str, *, maximum: int) -> str | None:
-    if value is None:
-        return None
-    return _required_bounded_string(value, field_name, maximum=maximum)
 
 
 def _strict_non_negative_int(value: Any, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"Dreamer live acknowledgement {field_name} must be a non-negative integer")
+        raise ValueError(f"{field_name} must be a non-negative integer")
     return value
-
-
-def _strict_finite_number(value: Any, field_name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"Dreamer live telemetry {field_name} must be finite")
-    parsed = float(value)
-    if not math.isfinite(parsed):
-        raise ValueError(f"Dreamer live telemetry {field_name} must be finite")
-    return parsed
 
 
 def _require_exact_object_fields(

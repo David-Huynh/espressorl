@@ -22,8 +22,7 @@ dependencies = [
 
 [project.scripts]
 espresso-rl = "espresso_rl.main:main"
-espresso-rl-build-dreamer-artifacts = "espresso_rl.trainer_cli:main"
-espresso-rl-release-dreamer-model = "espresso_rl.release_cli:main"
+espresso-rl-export-offline-dataset = "espresso_rl.offline_export_cli:main"
 
 [build-system]
 requires = ["hatchling"]

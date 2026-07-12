@@ -201,9 +201,10 @@ Recommendation storage also adds:
 - comparison_mode
 - preference_feedback_required
 
-Existing numeric BO records remain readable. CPBO data are separate physical
-shots and oriented comparisons, not synthetic scalar observations. Reset All
-deletes CPBO rows for that install and machine through the repository port.
+Pre-release numeric BO records and scalar feedback columns are removed during
+schema migration. CPBO data are separate physical shots and oriented
+comparisons, not synthetic scalar observations. Reset All deletes CPBO rows
+for that install and machine through the repository port.
 
 Community persistence is separate from local optimizer checkpoints:
 

@@ -1,6 +1,6 @@
 -- Add algorithm-neutral pairwise comparison records to the signed raw queue.
 -- These records can supervise online preference optimizers and offline
--- preference/reward models without embedding an optimizer-specific schema.
+-- preference-supervised offline models without embedding an optimizer-specific schema.
 
 ALTER TABLE public.raw_upload_queue
     DROP CONSTRAINT IF EXISTS raw_upload_queue_local_record_type_check;

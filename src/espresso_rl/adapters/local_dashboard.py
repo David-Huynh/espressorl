@@ -323,7 +323,7 @@ _DASHBOARD_HTML = """
         .map(c => {
           const value = JSON.stringify({bean_context_id: c.bean_context_id, grinder_context_id: c.grinder_context_id || null});
           const label = `${c.bean_context_id} / ${c.grinder_context_id || 'No grinder'}`;
-          return `<option value="${escapeAttr(value)}">${escapeHtml(label)} (${c.optimizer_shot_count}/${c.shot_count} BO)</option>`;
+          return `<option value="${escapeAttr(value)}">${escapeHtml(label)} (${c.eligible_shot_count}/${c.shot_count} eligible)</option>`;
         })
         .join('');
       document.getElementById('contexts').innerHTML = contexts.map(c => `
@@ -332,8 +332,7 @@ _DASHBOARD_HTML = """
           <div class="muted">${escapeHtml(c.grinder_context_id || 'No grinder')}</div>
           <div class="muted">latest ${formatTime(c.latest_shot_at)}</div>
           <span class="pill">shots ${c.shot_count}</span>
-          <span class="pill ${c.optimizer_shot_count ? 'good' : 'warn'}">BO ${c.optimizer_shot_count}</span>
-          <span class="pill">rated ${c.rated_shot_count}</span>
+          <span class="pill ${c.eligible_shot_count ? 'good' : 'warn'}">eligible ${c.eligible_shot_count}</span>
           <span class="pill ${c.rejected_upload_count ? 'bad' : ''}">rejected uploads ${c.rejected_upload_count}</span>
         </div>`).join('');
       const rows = (data.recent_shots || []).map(s => `

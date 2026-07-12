@@ -80,30 +80,6 @@ class CommunityValidatedShot:
 
 
 @dataclass(frozen=True)
-class CommunityTrainingRow:
-    training_row_id: int
-    source_validation_id: int
-    install_id: str
-    payload_json: dict[str, Any]
-    trust_weight: float
-    payload_hash: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.training_row_id <= 0:
-            raise ValueError("training_row_id is required")
-        if self.source_validation_id <= 0:
-            raise ValueError("source_validation_id is required")
-        if not self.install_id:
-            raise ValueError("install_id is required")
-        if self.payload_json.get("event_type") != "shot_record":
-            raise ValueError("training row payload must be a shot_record")
-        if not 0.0 <= float(self.trust_weight) <= 1.0:
-            raise ValueError("trust_weight must be between 0 and 1")
-        if self.payload_hash is not None and len(self.payload_hash) != 64:
-            raise ValueError("payload_hash must be a sha256 hex digest")
-
-
-@dataclass(frozen=True)
 class CommunityRecommendationRecord:
     install_id: str
     upload_id: str

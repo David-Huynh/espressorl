@@ -25,9 +25,6 @@ from espresso_rl.domain.models import (
     UploadQueueItem,
     UploadQueueStatus,
 )
-from espresso_rl.domain.shadow_evaluation import DreamerShadowEvaluation, ShadowEvaluationStatus
-from espresso_rl.domain.shadow_contract import SHADOW_INFERENCE_CONTRACT_LEGACY_V1
-from espresso_rl.domain.shadow_quality import DreamerShadowQualityReport
 from espresso_rl.domain.cpbo import (
     OptimizationRun,
     OptimizationRunContext,
@@ -107,17 +104,9 @@ class SQLiteStore:
                 recommendation_decision TEXT NOT NULL,
                 recommendation_followed TEXT NOT NULL,
                 recommendation_attribution_weight REAL NOT NULL,
-                human_rating INTEGER,
-                taste_tags_json TEXT NOT NULL,
-                feedback_recorded INTEGER NOT NULL DEFAULT 0,
-                profile_score REAL,
-                profile_mse REAL,
-                reward REAL,
-                reward_confidence REAL NOT NULL,
                 shot_type TEXT NOT NULL DEFAULT 'espresso',
                 exclude_from_local_optimization INTEGER NOT NULL DEFAULT 0,
                 optimization_weight REAL NOT NULL DEFAULT 1.0,
-                rating_prompt_allowed INTEGER NOT NULL DEFAULT 1,
                 grind_followed INTEGER,
                 dose_followed INTEGER,
                 yield_followed INTEGER,
@@ -231,70 +220,19 @@ class SQLiteStore:
             )
             """
         )
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS dreamer_shadow_evaluations (
-                evaluation_id TEXT PRIMARY KEY,
-                install_id TEXT NOT NULL,
-                machine_id TEXT NOT NULL,
-                bean_context_id TEXT NOT NULL,
-                grinder_context_id TEXT NOT NULL,
-                inference_contract_id TEXT NOT NULL DEFAULT 'dreamer_v3_legacy_shadow_v1',
-                source_timestamp INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            )
-            """
-        )
-        self.conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_context_contract
-            ON dreamer_shadow_evaluations (
-                install_id, machine_id, bean_context_id, grinder_context_id,
-                inference_contract_id, source_timestamp DESC
-            )
-            """
-        )
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS dreamer_shadow_quality_reports (
-                report_id TEXT PRIMARY KEY,
-                install_id TEXT NOT NULL,
-                machine_id TEXT NOT NULL,
-                bean_context_id TEXT NOT NULL,
-                grinder_context_id TEXT NOT NULL,
-                checkpoint_artifact_sha256 TEXT NOT NULL,
-                checkpoint_inference_probe_sha256 TEXT NOT NULL,
-                inference_contract_id TEXT NOT NULL DEFAULT 'dreamer_v3_legacy_shadow_v1',
-                overall_status TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                generated_at INTEGER NOT NULL
-            )
-            """
-        )
-        self.conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_dreamer_shadow_quality_context_contract
-            ON dreamer_shadow_quality_reports (
-                install_id, machine_id, bean_context_id, grinder_context_id,
-                inference_contract_id, checkpoint_artifact_sha256,
-                checkpoint_inference_probe_sha256,
-                generated_at DESC
-            )
-            """
-        )
-        self._ensure_column(
-            "dreamer_shadow_evaluations",
-            "inference_contract_id",
-            f"TEXT NOT NULL DEFAULT '{SHADOW_INFERENCE_CONTRACT_LEGACY_V1}'",
-        )
-        self._ensure_column(
-            "dreamer_shadow_quality_reports",
-            "inference_contract_id",
-            f"TEXT NOT NULL DEFAULT '{SHADOW_INFERENCE_CONTRACT_LEGACY_V1}'",
-        )
+        self.conn.execute("DROP TABLE IF EXISTS dreamer_shadow_quality_reports")
+        self.conn.execute("DROP TABLE IF EXISTS dreamer_shadow_evaluations")
+        for legacy_scalar_column in (
+            "human_rating",
+            "taste_tags_json",
+            "feedback_recorded",
+            "profile_score",
+            "profile_mse",
+            "reward",
+            "reward_confidence",
+            "rating_prompt_allowed",
+        ):
+            self._drop_column_if_exists("shots", legacy_scalar_column)
         self._ensure_column("upload_queue", "payload_json", "TEXT NOT NULL DEFAULT '{}'")
         self._ensure_column("recommendations", "apply_status", "TEXT NOT NULL DEFAULT 'unknown'")
         self._ensure_column("recommendations", "apply_acknowledged_at", "INTEGER")
@@ -330,14 +268,9 @@ class SQLiteStore:
         self._ensure_column("shots", "shot_type", "TEXT NOT NULL DEFAULT 'espresso'")
         self._ensure_column("shots", "exclude_from_local_optimization", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("shots", "optimization_weight", "REAL NOT NULL DEFAULT 1.0")
-        self._ensure_column("shots", "rating_prompt_allowed", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("shots", "grind_observed", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("shots", "dose_observed", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("shots", "target_yield_observed", "INTEGER NOT NULL DEFAULT 1")
-        self._ensure_column("shots", "feedback_recorded", "INTEGER NOT NULL DEFAULT 0")
-        self.conn.execute(
-            "UPDATE shots SET feedback_recorded=1 WHERE feedback_recorded=0 AND human_rating IS NOT NULL"
-        )
         self._ensure_column("shots", "grind_followed", "INTEGER")
         self._ensure_column("shots", "dose_followed", "INTEGER")
         self._ensure_column("shots", "yield_followed", "INTEGER")
@@ -457,6 +390,11 @@ class SQLiteStore:
         existing = {row["name"] for row in rows}
         if column not in existing:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _drop_column_if_exists(self, table: str, column: str) -> None:
+        rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if column in {row["name"] for row in rows}:
+            self.conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
 
 
 def _nullable_clause(
@@ -839,11 +777,9 @@ class SQLiteShotRepository:
                 recommended_projected_relative_step_from_reference, recommended_dose_g,
                 recommended_target_yield_g, recommended_target_ratio,
                 recommendation_decision, recommendation_followed,
-                recommendation_attribution_weight, human_rating, taste_tags_json,
-                feedback_recorded,
-                profile_score, profile_mse, reward, reward_confidence,
+                recommendation_attribution_weight,
                 shot_type, exclude_from_local_optimization, optimization_weight,
-                rating_prompt_allowed, grind_followed, dose_followed,
+                grind_followed, dose_followed,
                 yield_followed, grind_recommendation_trust,
                 dose_recommendation_trust, yield_recommendation_trust,
                 weight_source, flow_source, flow_units, pump_flow_source,
@@ -871,11 +807,9 @@ class SQLiteShotRepository:
                 :recommended_projected_relative_step_from_reference, :recommended_dose_g,
                 :recommended_target_yield_g, :recommended_target_ratio,
                 :recommendation_decision, :recommendation_followed,
-                :recommendation_attribution_weight, :human_rating, :taste_tags_json,
-                :feedback_recorded,
-                :profile_score, :profile_mse, :reward, :reward_confidence,
+                :recommendation_attribution_weight,
                 :shot_type, :exclude_from_local_optimization, :optimization_weight,
-                :rating_prompt_allowed, :grind_followed, :dose_followed,
+                :grind_followed, :dose_followed,
                 :yield_followed, :grind_recommendation_trust,
                 :dose_recommendation_trust, :yield_recommendation_trust,
                 :weight_source, :flow_source, :flow_units, :pump_flow_source,
@@ -1186,31 +1120,11 @@ class SQLiteLocalDataRepository:
             shot_ids=shot_ids,
             recommendation_ids=recommendation_ids,
         )
-        shadow_count = int(
-            self._store.conn.execute(
-                """
-                SELECT COUNT(*) AS count FROM dreamer_shadow_evaluations
-                WHERE install_id=? AND machine_id=?
-                """,
-                (install_id, machine_id),
-            ).fetchone()["count"]
-        )
-        shadow_report_count = int(
-            self._store.conn.execute(
-                """
-                SELECT COUNT(*) AS count FROM dreamer_shadow_quality_reports
-                WHERE install_id=? AND machine_id=?
-                """,
-                (install_id, machine_id),
-            ).fetchone()["count"]
-        )
         if dry_run:
             return {
                 "shots": len(shot_ids),
                 "recommendations": len(recommendation_ids),
                 "upload_queue": upload_count,
-                "dreamer_shadow_evaluations": shadow_count,
-                "dreamer_shadow_quality_reports": shadow_report_count,
             }
         for shot_id in shot_ids:
             self._store.conn.execute(
@@ -1222,14 +1136,6 @@ class SQLiteLocalDataRepository:
                 "DELETE FROM upload_queue WHERE local_record_type='recommendation' AND local_record_id=?",
                 (recommendation_id,),
             )
-        self._store.conn.execute(
-            "DELETE FROM dreamer_shadow_quality_reports WHERE install_id=? AND machine_id=?",
-            (install_id, machine_id),
-        )
-        self._store.conn.execute(
-            "DELETE FROM dreamer_shadow_evaluations WHERE install_id=? AND machine_id=?",
-            (install_id, machine_id),
-        )
         self._store.conn.execute(
             "DELETE FROM recommendations WHERE install_id=? AND machine_id=?",
             (install_id, machine_id),
@@ -1243,8 +1149,6 @@ class SQLiteLocalDataRepository:
             "shots": len(shot_ids),
             "recommendations": len(recommendation_ids),
             "upload_queue": upload_count,
-            "dreamer_shadow_evaluations": shadow_count,
-            "dreamer_shadow_quality_reports": shadow_report_count,
         }
 
 
@@ -1396,195 +1300,6 @@ class SQLiteRecommendationRepository:
             tuple(params),
         )
         self._store.conn.commit()
-
-
-class SQLiteShadowEvaluationRepository:
-    def __init__(self, store: SQLiteStore) -> None:
-        self._store = store
-
-    def upsert(self, evaluation: DreamerShadowEvaluation) -> None:
-        payload_json = json.dumps(
-            evaluation.to_dict(),
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        self._store.conn.execute(
-            """
-            INSERT INTO dreamer_shadow_evaluations (
-                evaluation_id, install_id, machine_id, bean_context_id,
-                grinder_context_id, inference_contract_id, source_timestamp,
-                status, payload_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(evaluation_id) DO UPDATE SET
-                status=excluded.status,
-                payload_json=excluded.payload_json,
-                updated_at=excluded.updated_at
-            """,
-            (
-                evaluation.evaluation_id,
-                evaluation.install_id,
-                evaluation.machine_id,
-                evaluation.bean_context_id,
-                evaluation.grinder_context_id,
-                evaluation.inference_contract_id,
-                evaluation.source_timestamp,
-                evaluation.status.value,
-                payload_json,
-                evaluation.created_at,
-                evaluation.updated_at,
-            ),
-        )
-        self._store.conn.commit()
-
-    def get(self, evaluation_id: str) -> DreamerShadowEvaluation | None:
-        row = self._store.conn.execute(
-            "SELECT payload_json FROM dreamer_shadow_evaluations WHERE evaluation_id=?",
-            (evaluation_id,),
-        ).fetchone()
-        return _row_to_shadow_evaluation(row) if row else None
-
-    def get_pending(
-        self,
-        *,
-        install_id: str,
-        machine_id: str,
-        bean_context_id: str,
-        grinder_context_id: str,
-        inference_contract_id: str | None = None,
-    ) -> DreamerShadowEvaluation | None:
-        contract_clause = ""
-        params: list[object] = [
-            install_id,
-            machine_id,
-            bean_context_id,
-            grinder_context_id,
-            ShadowEvaluationStatus.PENDING_OUTCOME.value,
-        ]
-        if inference_contract_id is not None:
-            contract_clause = " AND inference_contract_id=?"
-            params.append(inference_contract_id)
-        row = self._store.conn.execute(
-            f"""
-            SELECT payload_json FROM dreamer_shadow_evaluations
-            WHERE install_id=? AND machine_id=? AND bean_context_id=? AND grinder_context_id=? AND status=?
-              {contract_clause}
-            ORDER BY source_timestamp DESC
-            LIMIT 1
-            """,
-            tuple(params),
-        ).fetchone()
-        return _row_to_shadow_evaluation(row) if row else None
-
-    def list_context(
-        self,
-        *,
-        install_id: str,
-        machine_id: str,
-        bean_context_id: str,
-        grinder_context_id: str,
-        inference_contract_id: str | None = None,
-        limit: int = 100,
-    ) -> list[DreamerShadowEvaluation]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
-            raise ValueError("shadow evaluation limit must be 1..10000")
-        contract_clause = ""
-        params: list[object] = [install_id, machine_id, bean_context_id, grinder_context_id]
-        if inference_contract_id is not None:
-            contract_clause = " AND inference_contract_id=?"
-            params.append(inference_contract_id)
-        params.append(limit)
-        rows = self._store.conn.execute(
-            f"""
-            SELECT payload_json FROM dreamer_shadow_evaluations
-            WHERE install_id=? AND machine_id=? AND bean_context_id=? AND grinder_context_id=?
-              {contract_clause}
-            ORDER BY source_timestamp DESC
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
-        return [_row_to_shadow_evaluation(row) for row in rows]
-
-
-class SQLiteShadowQualityReportRepository:
-    def __init__(self, store: SQLiteStore) -> None:
-        self._store = store
-
-    def upsert(self, report: DreamerShadowQualityReport) -> None:
-        payload_json = json.dumps(
-            report.to_dict(),
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        self._store.conn.execute(
-            """
-            INSERT INTO dreamer_shadow_quality_reports (
-                report_id, install_id, machine_id, bean_context_id,
-                grinder_context_id, checkpoint_artifact_sha256,
-                checkpoint_inference_probe_sha256, inference_contract_id,
-                overall_status, payload_json, generated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(report_id) DO UPDATE SET
-                overall_status=excluded.overall_status,
-                payload_json=excluded.payload_json,
-                generated_at=excluded.generated_at
-            """,
-            (
-                report.report_id,
-                report.install_id,
-                report.machine_id,
-                report.bean_context_id,
-                report.grinder_context_id,
-                report.checkpoint_artifact_sha256,
-                report.checkpoint_inference_probe_sha256,
-                report.inference_contract_id,
-                report.overall_status.value,
-                payload_json,
-                report.generated_at,
-            ),
-        )
-        self._store.conn.commit()
-
-    def get(self, report_id: str) -> DreamerShadowQualityReport | None:
-        row = self._store.conn.execute(
-            "SELECT payload_json FROM dreamer_shadow_quality_reports WHERE report_id=?",
-            (report_id,),
-        ).fetchone()
-        return _row_to_shadow_quality_report(row) if row else None
-
-    def get_latest(
-        self,
-        *,
-        install_id: str,
-        machine_id: str,
-        bean_context_id: str,
-        grinder_context_id: str,
-        checkpoint_artifact_sha256: str,
-        checkpoint_inference_probe_sha256: str,
-        inference_contract_id: str,
-    ) -> DreamerShadowQualityReport | None:
-        row = self._store.conn.execute(
-            """
-            SELECT payload_json FROM dreamer_shadow_quality_reports
-            WHERE install_id=? AND machine_id=? AND bean_context_id=? AND grinder_context_id=?
-              AND checkpoint_artifact_sha256=? AND checkpoint_inference_probe_sha256=?
-              AND inference_contract_id=?
-            ORDER BY generated_at DESC
-            LIMIT 1
-            """,
-            (
-                install_id,
-                machine_id,
-                bean_context_id,
-                grinder_context_id,
-                checkpoint_artifact_sha256,
-                checkpoint_inference_probe_sha256,
-                inference_contract_id,
-            ),
-        ).fetchone()
-        return _row_to_shadow_quality_report(row) if row else None
 
 
 class SQLiteUploadQueueRepository:
@@ -1890,17 +1605,9 @@ def _shot_to_row(shot: ShotRecord) -> dict:
         "recommendation_decision": shot.recommendation_decision.value,
         "recommendation_followed": shot.recommendation_followed.value,
         "recommendation_attribution_weight": shot.recommendation_attribution_weight,
-        "human_rating": shot.human_rating,
-        "taste_tags_json": json.dumps(shot.taste_tags),
-        "feedback_recorded": bool(shot.feedback_recorded),
-        "profile_score": shot.profile_score,
-        "profile_mse": shot.profile_mse,
-        "reward": shot.reward,
-        "reward_confidence": shot.reward_confidence,
         "shot_type": shot.shot_type.value,
         "exclude_from_local_optimization": bool(shot.exclude_from_local_optimization),
         "optimization_weight": shot.optimization_weight,
-        "rating_prompt_allowed": bool(shot.rating_prompt_allowed),
         "grind_followed": shot.grind_followed,
         "dose_followed": shot.dose_followed,
         "yield_followed": shot.yield_followed,
@@ -1982,17 +1689,9 @@ def _row_to_shot(row: sqlite3.Row) -> ShotRecord:
         recommendation_decision=RecommendationDecision(row["recommendation_decision"]),
         recommendation_followed=FollowThroughState(row["recommendation_followed"]),
         recommendation_attribution_weight=row["recommendation_attribution_weight"],
-        human_rating=row["human_rating"],
-        taste_tags=json.loads(row["taste_tags_json"]),
-        feedback_recorded=bool(row["feedback_recorded"]),
-        profile_score=row["profile_score"],
-        profile_mse=row["profile_mse"],
-        reward=row["reward"],
-        reward_confidence=row["reward_confidence"],
         shot_type=ShotType(row["shot_type"]),
         exclude_from_local_optimization=bool(row["exclude_from_local_optimization"]),
         optimization_weight=row["optimization_weight"],
-        rating_prompt_allowed=bool(row["rating_prompt_allowed"]),
         grind_followed=_optional_int_to_bool(row["grind_followed"]),
         dose_followed=_optional_int_to_bool(row["dose_followed"]),
         yield_followed=_optional_int_to_bool(row["yield_followed"]),
@@ -2279,31 +1978,3 @@ def _row_to_upload_item(row: sqlite3.Row) -> UploadQueueItem:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
-
-
-def _row_to_shadow_evaluation(row: sqlite3.Row | dict) -> DreamerShadowEvaluation:
-    payload = row["payload_json"]
-    if isinstance(payload, dict):
-        value = payload
-    elif isinstance(payload, str):
-        try:
-            value = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise ValueError("stored shadow evaluation payload is invalid JSON") from exc
-    else:
-        raise ValueError("stored shadow evaluation payload must be an object or JSON text")
-    return DreamerShadowEvaluation.from_dict(value)
-
-
-def _row_to_shadow_quality_report(row: sqlite3.Row | dict) -> DreamerShadowQualityReport:
-    payload = row["payload_json"]
-    if isinstance(payload, dict):
-        value = payload
-    elif isinstance(payload, str):
-        try:
-            value = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise ValueError("stored shadow quality report payload is invalid JSON") from exc
-    else:
-        raise ValueError("stored shadow quality report payload must be an object or JSON text")
-    return DreamerShadowQualityReport.from_dict(value)

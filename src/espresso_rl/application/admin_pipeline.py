@@ -12,6 +12,10 @@ from espresso_rl.application.community_mirror import (
     CommunityQueuePurgeResult,
 )
 from espresso_rl.application.community_validation import CommunityValidationResult, CommunityValidationService
+from espresso_rl.application.offline_dataset_export import (
+    OfflineDatasetExport,
+    OfflineDatasetExportService,
+)
 from espresso_rl.domain.community import AdminActionLogEntry
 from espresso_rl.ports.community import CommunityWarehouseRepository
 
@@ -54,15 +58,24 @@ class AdminPipelineService:
         warehouse: CommunityWarehouseRepository,
         mirror: CommunityMirrorService | None,
         validator: CommunityValidationService,
+        offline_dataset_exporter: OfflineDatasetExportService | None = None,
+        source_mirrored_retention_days: int = 1,
+        source_rejected_retention_days: int = 30,
+        source_failed_retention_days: int = 90,
         clock: Callable[[], int] | None = None,
     ) -> None:
         self._warehouse = warehouse
         self._mirror = mirror
         self._validator = validator
+        self._offline_dataset_exporter = offline_dataset_exporter
+        self._source_mirrored_retention_days = max(1, int(source_mirrored_retention_days))
+        self._source_rejected_retention_days = max(1, int(source_rejected_retention_days))
+        self._source_failed_retention_days = max(1, int(source_failed_retention_days))
         self._clock = clock or (lambda: int(time.time()))
         self._locks = {
             "mirror_once": threading.Lock(),
             "purge_queue_once": threading.Lock(),
+            "purge_source_once": threading.Lock(),
             "validate_once": threading.Lock(),
         }
 
@@ -145,6 +158,24 @@ class AdminPipelineService:
             run=lambda: self._purge_queue_once_unlocked(dry_run=dry_run),
         )
 
+    def purge_source_once(
+        self,
+        *,
+        dry_run: bool = False,
+        requested_by: str = "system",
+    ) -> AdminPipelineActionResult:
+        return self._run_locked_action(
+            "purge_source_once",
+            dry_run=dry_run,
+            requested_by=requested_by,
+            run=lambda: self._purge_source_once_unlocked(dry_run=dry_run),
+        )
+
+    def export_offline_dataset(self, *, limit: int | None = None) -> OfflineDatasetExport:
+        if self._offline_dataset_exporter is None:
+            raise RuntimeError("offline dataset export is not configured")
+        return self._offline_dataset_exporter.build(limit=limit)
+
     def _mirror_once_unlocked(self, *, limit: int, dry_run: bool) -> AdminPipelineActionResult:
         if self._mirror is None:
             return AdminPipelineActionResult(
@@ -204,6 +235,28 @@ class AdminPipelineService:
                 source_enabled=source_enabled,
             ),
             warnings=warnings,
+        )
+
+    def _purge_source_once_unlocked(self, *, dry_run: bool) -> AdminPipelineActionResult:
+        if self._mirror is None:
+            return AdminPipelineActionResult(
+                action="purge_source_once",
+                dry_run=dry_run,
+                warnings=["Supabase source purge is disabled because admin credentials are not configured"],
+            )
+        if dry_run:
+            return AdminPipelineActionResult(
+                action="purge_source_once",
+                dry_run=True,
+                warnings=["Supabase source purge has no non-mutating preview RPC"],
+            )
+        return AdminPipelineActionResult(
+            action="purge_source_once",
+            purge=self._mirror.purge_retained_queue(
+                mirrored_retention_days=self._source_mirrored_retention_days,
+                rejected_retention_days=self._source_rejected_retention_days,
+                failed_retention_days=self._source_failed_retention_days,
+            ),
         )
 
     def _run_locked_action(

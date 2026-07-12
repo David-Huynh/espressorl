@@ -438,15 +438,8 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
         payload,
         "mode",
         {
-            "zero_observe",
-            "zero_immediate_bo",
-            "warm_started_bo",
-            "local_bo",
             "cpbo_global_previous",
             "cpbo_best_incumbent",
-            "dreamer_candidate",
-            "dreamer_active",
-            "bo_fallback",
         },
         errors,
     )

@@ -9,8 +9,6 @@ from typing import Any
 from espresso_rl.adapters.sqlite_repositories import (
     _recommendation_to_row,
     _row_to_recommendation,
-    _row_to_shadow_evaluation,
-    _row_to_shadow_quality_report,
     _row_to_shot,
     _row_to_upload_item,
     _shot_to_row,
@@ -29,9 +27,7 @@ from espresso_rl.domain.community import (
     community_rejection_categories,
 )
 from espresso_rl.domain.models import Recommendation, ShotRecord, UploadQueueItem, UploadQueueStatus
-from espresso_rl.domain.shadow_evaluation import DreamerShadowEvaluation, ShadowEvaluationStatus
-from espresso_rl.domain.shadow_contract import SHADOW_INFERENCE_CONTRACT_LEGACY_V1
-from espresso_rl.domain.shadow_quality import DreamerShadowQualityReport
+from espresso_rl.domain.offline_dataset import OfflinePreferenceExample
 from espresso_rl.domain.cpbo import (
     OptimizationRun,
     OptimizationRunContext,
@@ -121,7 +117,6 @@ class PostgresStore:
             "shot_type": "TEXT NOT NULL DEFAULT 'espresso'",
             "exclude_from_local_optimization": "BOOLEAN NOT NULL DEFAULT FALSE",
             "optimization_weight": "DOUBLE PRECISION NOT NULL DEFAULT 1.0",
-            "rating_prompt_allowed": "BOOLEAN NOT NULL DEFAULT TRUE",
             "grind_observed": "BOOLEAN NOT NULL DEFAULT TRUE",
             "dose_observed": "BOOLEAN NOT NULL DEFAULT TRUE",
             "target_yield_observed": "BOOLEAN NOT NULL DEFAULT TRUE",
@@ -170,6 +165,19 @@ class PostgresStore:
             "recommended_projected_relative_step_from_reference": "DOUBLE PRECISION",
         }.items():
             self.conn.execute(f"ALTER TABLE shots ADD COLUMN IF NOT EXISTS {column} {definition}")
+        for legacy_scalar_column in (
+            "human_rating",
+            "taste_tags_json",
+            "feedback_recorded",
+            "profile_score",
+            "profile_mse",
+            "reward",
+            "reward_confidence",
+            "rating_prompt_allowed",
+        ):
+            self.conn.execute(
+                f"ALTER TABLE shots DROP COLUMN IF EXISTS {legacy_scalar_column}"
+            )
         if self._column_exists("shots", "grinder_step_size_um"):
             # Legacy name for microns_per_step. Keep it nullable/defaulted so old
             # databases do not reject current inserts that no longer write it.
@@ -215,14 +223,8 @@ class PostgresStore:
             "ALTER COLUMN grind_delta_steps_from_current TYPE DOUBLE PRECISION "
             "USING grind_delta_steps_from_current::DOUBLE PRECISION"
         )
-        self.conn.execute(
-            "ALTER TABLE dreamer_shadow_evaluations "
-            f"ADD COLUMN IF NOT EXISTS inference_contract_id TEXT NOT NULL DEFAULT '{SHADOW_INFERENCE_CONTRACT_LEGACY_V1}'"
-        )
-        self.conn.execute(
-            "ALTER TABLE dreamer_shadow_quality_reports "
-            f"ADD COLUMN IF NOT EXISTS inference_contract_id TEXT NOT NULL DEFAULT '{SHADOW_INFERENCE_CONTRACT_LEGACY_V1}'"
-        )
+        self.conn.execute("DROP TABLE IF EXISTS dreamer_shadow_quality_reports")
+        self.conn.execute("DROP TABLE IF EXISTS dreamer_shadow_evaluations")
         for column, definition in {
             "validated_at": "TIMESTAMPTZ",
             "rejected_at": "TIMESTAMPTZ",
@@ -923,30 +925,10 @@ class PostgresLocalDataRepository:
                 shot_ids=shot_ids,
                 recommendation_ids=recommendation_ids,
             )
-            shadow_count = int(
-                self._store.conn.execute(
-                    """
-                    SELECT COUNT(*) AS count FROM dreamer_shadow_evaluations
-                    WHERE install_id=%s AND machine_id=%s
-                    """,
-                    (install_id, machine_id),
-                ).fetchone()["count"]
-            )
-            shadow_report_count = int(
-                self._store.conn.execute(
-                    """
-                    SELECT COUNT(*) AS count FROM dreamer_shadow_quality_reports
-                    WHERE install_id=%s AND machine_id=%s
-                    """,
-                    (install_id, machine_id),
-                ).fetchone()["count"]
-            )
             counts = {
                 "shots": len(shot_ids),
                 "recommendations": len(recommendation_ids),
                 "upload_queue": upload_count,
-                "dreamer_shadow_evaluations": shadow_count,
-                "dreamer_shadow_quality_reports": shadow_report_count,
             }
             if dry_run:
                 return counts
@@ -960,14 +942,6 @@ class PostgresLocalDataRepository:
                     "DELETE FROM upload_queue WHERE local_record_type='recommendation' AND local_record_id = ANY(%s)",
                     (recommendation_ids,),
                 )
-            self._store.conn.execute(
-                "DELETE FROM dreamer_shadow_quality_reports WHERE install_id=%s AND machine_id=%s",
-                (install_id, machine_id),
-            )
-            self._store.conn.execute(
-                "DELETE FROM dreamer_shadow_evaluations WHERE install_id=%s AND machine_id=%s",
-                (install_id, machine_id),
-            )
             self._store.conn.execute(
                 "DELETE FROM recommendations WHERE install_id=%s AND machine_id=%s",
                 (install_id, machine_id),
@@ -1095,192 +1069,6 @@ class PostgresRecommendationRepository:
             tuple(params),
         )
         self._store.conn.commit()
-
-
-class PostgresShadowEvaluationRepository:
-    def __init__(self, store: PostgresStore) -> None:
-        self._store = store
-
-    def upsert(self, evaluation: DreamerShadowEvaluation) -> None:
-        try:
-            self._store.conn.execute(
-                """
-                INSERT INTO dreamer_shadow_evaluations (
-                    evaluation_id, install_id, machine_id, bean_context_id,
-                    grinder_context_id, inference_contract_id, source_timestamp,
-                    status, payload_json, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
-                ON CONFLICT (evaluation_id) DO UPDATE SET
-                    status=EXCLUDED.status,
-                    payload_json=EXCLUDED.payload_json,
-                    updated_at=EXCLUDED.updated_at
-                """,
-                (
-                    evaluation.evaluation_id,
-                    evaluation.install_id,
-                    evaluation.machine_id,
-                    evaluation.bean_context_id,
-                    evaluation.grinder_context_id,
-                    evaluation.inference_contract_id,
-                    evaluation.source_timestamp,
-                    evaluation.status.value,
-                    json.dumps(evaluation.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False),
-                    evaluation.created_at,
-                    evaluation.updated_at,
-                ),
-            )
-            self._store.conn.commit()
-        except Exception:
-            self._store.conn.rollback()
-            raise
-
-    def get(self, evaluation_id: str) -> DreamerShadowEvaluation | None:
-        row = self._store.conn.execute(
-            "SELECT payload_json FROM dreamer_shadow_evaluations WHERE evaluation_id=%s",
-            (evaluation_id,),
-        ).fetchone()
-        return _row_to_shadow_evaluation(row) if row else None
-
-    def get_pending(
-        self,
-        *,
-        install_id: str,
-        machine_id: str,
-        bean_context_id: str,
-        grinder_context_id: str,
-        inference_contract_id: str | None = None,
-    ) -> DreamerShadowEvaluation | None:
-        contract_clause = ""
-        params: list[object] = [
-            install_id,
-            machine_id,
-            bean_context_id,
-            grinder_context_id,
-            ShadowEvaluationStatus.PENDING_OUTCOME.value,
-        ]
-        if inference_contract_id is not None:
-            contract_clause = " AND inference_contract_id=%s"
-            params.append(inference_contract_id)
-        row = self._store.conn.execute(
-            f"""
-            SELECT payload_json FROM dreamer_shadow_evaluations
-            WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s
-              AND grinder_context_id=%s AND status=%s
-              {contract_clause}
-            ORDER BY source_timestamp DESC
-            LIMIT 1
-            """,
-            tuple(params),
-        ).fetchone()
-        return _row_to_shadow_evaluation(row) if row else None
-
-    def list_context(
-        self,
-        *,
-        install_id: str,
-        machine_id: str,
-        bean_context_id: str,
-        grinder_context_id: str,
-        inference_contract_id: str | None = None,
-        limit: int = 100,
-    ) -> list[DreamerShadowEvaluation]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
-            raise ValueError("shadow evaluation limit must be 1..10000")
-        contract_clause = ""
-        params: list[object] = [install_id, machine_id, bean_context_id, grinder_context_id]
-        if inference_contract_id is not None:
-            contract_clause = " AND inference_contract_id=%s"
-            params.append(inference_contract_id)
-        params.append(limit)
-        rows = self._store.conn.execute(
-            f"""
-            SELECT payload_json FROM dreamer_shadow_evaluations
-            WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND grinder_context_id=%s
-              {contract_clause}
-            ORDER BY source_timestamp DESC
-            LIMIT %s
-            """,
-            tuple(params),
-        ).fetchall()
-        return [_row_to_shadow_evaluation(row) for row in rows]
-
-
-class PostgresShadowQualityReportRepository:
-    def __init__(self, store: PostgresStore) -> None:
-        self._store = store
-
-    def upsert(self, report: DreamerShadowQualityReport) -> None:
-        try:
-            self._store.conn.execute(
-                """
-                INSERT INTO dreamer_shadow_quality_reports (
-                    report_id, install_id, machine_id, bean_context_id,
-                    grinder_context_id, checkpoint_artifact_sha256,
-                    checkpoint_inference_probe_sha256, inference_contract_id,
-                    overall_status, payload_json, generated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
-                ON CONFLICT (report_id) DO UPDATE SET
-                    overall_status=EXCLUDED.overall_status,
-                    payload_json=EXCLUDED.payload_json,
-                    generated_at=EXCLUDED.generated_at
-                """,
-                (
-                    report.report_id,
-                    report.install_id,
-                    report.machine_id,
-                    report.bean_context_id,
-                    report.grinder_context_id,
-                    report.checkpoint_artifact_sha256,
-                    report.checkpoint_inference_probe_sha256,
-                    report.inference_contract_id,
-                    report.overall_status.value,
-                    json.dumps(report.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False),
-                    report.generated_at,
-                ),
-            )
-            self._store.conn.commit()
-        except Exception:
-            self._store.conn.rollback()
-            raise
-
-    def get(self, report_id: str) -> DreamerShadowQualityReport | None:
-        row = self._store.conn.execute(
-            "SELECT payload_json FROM dreamer_shadow_quality_reports WHERE report_id=%s",
-            (report_id,),
-        ).fetchone()
-        return _row_to_shadow_quality_report(row) if row else None
-
-    def get_latest(
-        self,
-        *,
-        install_id: str,
-        machine_id: str,
-        bean_context_id: str,
-        grinder_context_id: str,
-        checkpoint_artifact_sha256: str,
-        checkpoint_inference_probe_sha256: str,
-        inference_contract_id: str,
-    ) -> DreamerShadowQualityReport | None:
-        row = self._store.conn.execute(
-            """
-            SELECT payload_json FROM dreamer_shadow_quality_reports
-            WHERE install_id=%s AND machine_id=%s AND bean_context_id=%s AND grinder_context_id=%s
-              AND checkpoint_artifact_sha256=%s AND checkpoint_inference_probe_sha256=%s
-              AND inference_contract_id=%s
-            ORDER BY generated_at DESC
-            LIMIT 1
-            """,
-            (
-                install_id,
-                machine_id,
-                bean_context_id,
-                grinder_context_id,
-                checkpoint_artifact_sha256,
-                checkpoint_inference_probe_sha256,
-                inference_contract_id,
-            ),
-        ).fetchone()
-        return _row_to_shadow_quality_report(row) if row else None
 
 
 class PostgresUploadQueueRepository:
@@ -1881,6 +1669,50 @@ class PostgresCommunityWarehouse:
 
     def comparison_count(self) -> int:
         return _count_table(self._store.conn, "community_comparisons")
+
+    def list_offline_preference_examples(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> list[OfflinePreferenceExample]:
+        if limit is not None and (isinstance(limit, bool) or not 1 <= int(limit) <= 10_000_000):
+            raise ValueError("offline dataset limit must be between 1 and 10000000")
+        query = """
+            SELECT
+                comparison.payload_json AS comparison_payload,
+                comparison.trust_weight AS comparison_trust_weight,
+                new_shot.payload_json AS new_shot_payload,
+                new_shot.trust_weight AS new_shot_trust_weight,
+                anchor_shot.payload_json AS anchor_shot_payload,
+                anchor_shot.trust_weight AS anchor_shot_trust_weight
+            FROM community_comparisons AS comparison
+            INNER JOIN community_validated_shots AS new_shot
+                ON new_shot.install_id = comparison.install_id
+               AND new_shot.shot_id = comparison.new_shot_id
+            INNER JOIN community_validated_shots AS anchor_shot
+                ON anchor_shot.install_id = comparison.install_id
+               AND anchor_shot.shot_id = comparison.anchor_shot_id
+            WHERE comparison.trust_weight > 0.0
+              AND new_shot.trust_weight > 0.0
+              AND anchor_shot.trust_weight > 0.0
+            ORDER BY comparison.created_at ASC, comparison.comparison_id ASC
+        """
+        parameters: tuple[Any, ...] = ()
+        if limit is not None:
+            query += " LIMIT %s"
+            parameters = (int(limit),)
+        rows = self._store.conn.execute(query, parameters).fetchall()
+        return [
+            OfflinePreferenceExample.from_joined_payloads(
+                comparison_payload=_json_object(row["comparison_payload"]),
+                new_shot_payload=_json_object(row["new_shot_payload"]),
+                anchor_shot_payload=_json_object(row["anchor_shot_payload"]),
+                comparison_trust_weight=float(row["comparison_trust_weight"]),
+                new_shot_trust_weight=float(row["new_shot_trust_weight"]),
+                anchor_shot_trust_weight=float(row["anchor_shot_trust_weight"]),
+            )
+            for row in rows
+        ]
 
     def abuse_event_count(self) -> int:
         return _count_table(self._store.conn, "abuse_events")

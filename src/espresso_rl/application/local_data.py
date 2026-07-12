@@ -12,8 +12,7 @@ class LocalContextSummary:
     bean_context_id: str | None
     grinder_context_id: str | None
     shot_count: int
-    optimizer_shot_count: int
-    rated_shot_count: int
+    eligible_shot_count: int
     rejected_upload_count: int
     latest_shot_at: int | None
 
@@ -143,7 +142,7 @@ class LocalDataService:
             dry_run=dry_run,
             counts=counts,
             warnings=[
-                "preserves shot history but removes this context from local BO evidence"
+                "preserves shot history but removes this context from local CPBO evidence"
             ],
         )
 
@@ -158,7 +157,7 @@ class LocalDataService:
             dry_run=dry_run,
             counts=counts,
             warnings=[
-                "deletes all local shots, recommendations, queued uploads, shadow evaluations, and quality reports for this machine"
+                "deletes all local shots, recommendations, preference runs, and queued uploads for this machine"
             ],
         )
 
@@ -174,8 +173,7 @@ def _context_summaries(shots: list[ShotRecord]) -> list[LocalContextSummary]:
                 bean_context_id=bean_context_id,
                 grinder_context_id=grinder_context_id,
                 shot_count=len(context_shots),
-                optimizer_shot_count=sum(1 for shot in context_shots if _included_in_optimizer(shot)),
-                rated_shot_count=sum(1 for shot in context_shots if _included_in_optimizer(shot) and shot.human_rating is not None),
+                eligible_shot_count=sum(1 for shot in context_shots if _included_in_optimizer(shot)),
                 rejected_upload_count=sum(1 for shot in context_shots if getattr(shot, "_rejected_upload", False)),
                 latest_shot_at=max((shot.timestamp for shot in context_shots), default=None),
             )
@@ -193,8 +191,6 @@ def _shot_summary(shot: ShotRecord) -> dict:
         "shot_time_s": shot.shot_time_s,
         "beverage_out_g": shot.beverage_out_g,
         "target_yield_g": shot.target_yield_g,
-        "human_rating": shot.human_rating,
-        "feedback_recorded": shot.feedback_recorded,
         "profile_label": shot.profile_label,
         "final_phase_name": shot.final_phase_name,
         "shot_end_state": shot.shot_end_state,
@@ -212,8 +208,6 @@ def _included_in_optimizer(shot: ShotRecord) -> bool:
         shot.shot_type == ShotType.ESPRESSO
         and not shot.exclude_from_local_optimization
         and shot.optimization_weight > 0.0
-        and shot.feedback_recorded
-        and shot.reward is not None
     )
 
 

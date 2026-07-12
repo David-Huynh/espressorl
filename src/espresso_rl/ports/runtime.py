@@ -2,15 +2,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from espresso_rl.domain.dreamer_control import DreamerLiveControlPublication
 from espresso_rl.domain.models import Recommendation
 
 
 class AutoTuningRuntimePublisher(Protocol):
     def publish_recommendation(self, recommendation: Recommendation) -> None:
-        ...
-
-    def publish_dreamer_live_control(self, publication: DreamerLiveControlPublication) -> None:
         ...
 
     def publish_status(

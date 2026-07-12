@@ -13,13 +13,6 @@ from espresso_rl.optimizers.cpbo_config import (
 
 _OPTIONS_PATH = Path("/data/options.json")
 _DATA_DIR = Path("/data/espresso_rl")
-_DEFAULT_DREAMER_V3_MODEL_ARTIFACT_PATH = _DATA_DIR / "models" / "dreamer_v3.safetensors"
-_DEFAULT_DREAMER_V3_MODEL_MANIFEST_PATH = _DATA_DIR / "models" / "dreamer_v3_manifest.json"
-_DEFAULT_MODEL_ARTIFACT_MAX_BYTES = 512 * 1024 * 1024
-_RELEASE_DEFAULT_MODEL_ARTIFACT_SHA256 = os.getenv(
-    "ESPRESSORL_RELEASE_MODEL_ARTIFACT_SHA256",
-    "",
-)
 
 
 @dataclass
@@ -43,18 +36,8 @@ class Config:
     initial_relative_grind_um_from_reference: float = 0.0
     initial_dose_g: float = 18.0
     initial_target_yield_g: float = 36.0
-    # Reward weighting: r = alpha*human + (1-alpha)*profile_score
-    alpha: float = 0.5
     optimizer_mode: str = DEFAULT_OPTIMIZER_MODE
     cpbo: CPBOConfig = field(default_factory=application_cpbo_config)
-    optimizer_model_artifact_path: str = ""
-    optimizer_model_artifact_sha256: str = ""
-    optimizer_model_manifest_path: str = ""
-    default_optimizer_model_artifact_sha256: str = ""
-    optimizer_model_artifact_max_bytes: int = _DEFAULT_MODEL_ARTIFACT_MAX_BYTES
-    # When True: run DreamerV3 training thread locally (central-server install only).
-    # When False (default): inference + BO only; downloads weights from central server.
-    training_mode: bool = False
     community_upload_enabled: bool = False
     supabase_registration_url: str = ""
     supabase_ingest_url: str = ""
@@ -72,6 +55,10 @@ class Config:
     admin_collector_lease_seconds: int = 300
     admin_collector_interval_s: float = 30.0
     admin_collector_batch_size: int = 100
+    admin_source_purge_enabled: bool = True
+    admin_source_mirrored_retention_days: int = 1
+    admin_source_rejected_retention_days: int = 30
+    admin_source_failed_retention_days: int = 90
     build_git_sha: str = ""
     admin_dashboard_enabled: bool = False
     admin_dashboard_host: str = "0.0.0.0"
@@ -85,8 +72,13 @@ class Config:
 
     def __post_init__(self) -> None:
         self.optimizer_mode = normalize_optimizer_mode(self.optimizer_mode)
-        if self.optimizer_model_artifact_max_bytes <= 0:
-            raise ValueError("optimizer_model_artifact_max_bytes must be positive")
+        for field_name in (
+            "admin_source_mirrored_retention_days",
+            "admin_source_rejected_retention_days",
+            "admin_source_failed_retention_days",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name} must be at least 1")
 
     def now(self) -> int:
         return int(time.time())
@@ -148,7 +140,6 @@ class Config:
             initial_relative_grind_um_from_reference=initial_relative_grind_um_from_reference,
             initial_dose_g=float(opts.get("initial_dose_g", 18.0)),
             initial_target_yield_g=float(opts.get("initial_target_yield_g", 36.0)),
-            alpha=float(opts.get("alpha", 0.5)),
             optimizer_mode=normalize_optimizer_mode(
                 opts.get(
                     "optimizer_mode",
@@ -156,25 +147,6 @@ class Config:
                 )
             ),
             cpbo=cpbo_config_from_dict(opts.get("cpbo")),
-            optimizer_model_artifact_path=_model_artifact_path(opts),
-            optimizer_model_artifact_sha256=_model_artifact_sha256(opts),
-            optimizer_model_manifest_path=_model_manifest_path(opts),
-            default_optimizer_model_artifact_sha256=_option_string_or_env(
-                opts,
-                "default_optimizer_model_artifact_sha256",
-                "ESPRESSORL_DEFAULT_OPTIMIZER_MODEL_ARTIFACT_SHA256",
-                _RELEASE_DEFAULT_MODEL_ARTIFACT_SHA256,
-            ),
-            optimizer_model_artifact_max_bytes=int(
-                opts.get(
-                    "optimizer_model_artifact_max_bytes",
-                    os.getenv(
-                        "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_MAX_BYTES",
-                        _DEFAULT_MODEL_ARTIFACT_MAX_BYTES,
-                    ),
-                )
-            ),
-            training_mode=bool(opts.get("training_mode", False)),
             community_upload_enabled=bool(opts.get("community_upload_enabled", False)),
             supabase_registration_url=_option_string_or_env(
                 opts,
@@ -230,6 +202,31 @@ class Config:
                 opts.get(
                     "admin_collector_batch_size",
                     os.getenv("ESPRESSORL_ADMIN_COLLECTOR_BATCH_SIZE", 100),
+                )
+            ),
+            admin_source_purge_enabled=bool(
+                opts.get(
+                    "admin_source_purge_enabled",
+                    os.getenv("ESPRESSORL_ADMIN_SOURCE_PURGE_ENABLED", "true").lower()
+                    in {"1", "true", "yes"},
+                )
+            ),
+            admin_source_mirrored_retention_days=int(
+                opts.get(
+                    "admin_source_mirrored_retention_days",
+                    os.getenv("ESPRESSORL_ADMIN_SOURCE_MIRRORED_RETENTION_DAYS", 1),
+                )
+            ),
+            admin_source_rejected_retention_days=int(
+                opts.get(
+                    "admin_source_rejected_retention_days",
+                    os.getenv("ESPRESSORL_ADMIN_SOURCE_REJECTED_RETENTION_DAYS", 30),
+                )
+            ),
+            admin_source_failed_retention_days=int(
+                opts.get(
+                    "admin_source_failed_retention_days",
+                    os.getenv("ESPRESSORL_ADMIN_SOURCE_FAILED_RETENTION_DAYS", 90),
                 )
             ),
             build_git_sha=_option_string_or_env(opts, "build_git_sha", "ESPRESSORL_BUILD_GIT_SHA"),
@@ -292,49 +289,6 @@ def _option_string_or_env(
     if option_value is not None:
         return option_value
     return os.getenv(env_name, default)
-
-
-def _model_artifact_sha256(opts: dict) -> str:
-    release_default = _option_string_or_env(
-        opts,
-        "default_optimizer_model_artifact_sha256",
-        "ESPRESSORL_DEFAULT_OPTIMIZER_MODEL_ARTIFACT_SHA256",
-        _RELEASE_DEFAULT_MODEL_ARTIFACT_SHA256,
-    )
-    return _option_string_or_env(
-        opts,
-        "optimizer_model_artifact_sha256",
-        "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_SHA256",
-        release_default,
-    )
-
-
-def _model_artifact_path(opts: dict) -> str:
-    default_path = (
-        str(_DEFAULT_DREAMER_V3_MODEL_ARTIFACT_PATH)
-        if _model_artifact_sha256(opts)
-        else ""
-    )
-    return _option_string_or_env(
-        opts,
-        "optimizer_model_artifact_path",
-        "ESPRESSORL_OPTIMIZER_MODEL_ARTIFACT_PATH",
-        default_path,
-    )
-
-
-def _model_manifest_path(opts: dict) -> str:
-    default_path = (
-        str(_DEFAULT_DREAMER_V3_MODEL_MANIFEST_PATH)
-        if _model_artifact_sha256(opts)
-        else ""
-    )
-    return _option_string_or_env(
-        opts,
-        "optimizer_model_manifest_path",
-        "ESPRESSORL_OPTIMIZER_MODEL_MANIFEST_PATH",
-        default_path,
-    )
 
 
 def _optional_number(value: object) -> float | None:

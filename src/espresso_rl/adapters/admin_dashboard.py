@@ -20,7 +20,7 @@ SECURITY_HEADERS = {
 
 def create_admin_dashboard_app(service: AdminPipelineService, admin_token: str):
     from fastapi import Depends, FastAPI, Header, HTTPException
-    from fastapi.responses import HTMLResponse, PlainTextResponse
+    from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
     app = FastAPI(title="EspressoRL Admin", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -68,6 +68,22 @@ def create_admin_dashboard_app(service: AdminPipelineService, admin_token: str):
             dry_run=_dry_run(payload),
             requested_by="dashboard",
         ).to_dict()
+
+    @app.get("/api/offline-dataset/manifest", dependencies=[Depends(require_admin)])
+    def offline_dataset_manifest(limit: int | None = None) -> dict:
+        return service.export_offline_dataset(limit=_export_limit(limit)).manifest
+
+    @app.get("/api/offline-dataset/export", dependencies=[Depends(require_admin)])
+    def offline_dataset_export(limit: int | None = None) -> Response:
+        export = service.export_offline_dataset(limit=_export_limit(limit))
+        return Response(
+            content=export.records_jsonl,
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Disposition": 'attachment; filename="preference_examples.jsonl"',
+                "X-EspressoRL-Dataset-SHA256": str(export.manifest["records_sha256"]),
+            },
+        )
 
     return app
 
@@ -138,6 +154,12 @@ def _dry_run(payload: object) -> bool:
     return isinstance(payload, dict) and payload.get("dry_run") is True
 
 
+def _export_limit(value: int | None) -> int | None:
+    if value is None:
+        return None
+    return max(1, min(10_000_000, int(value)))
+
+
 _DASHBOARD_HTML = """
 <!doctype html>
 <html lang="en">
@@ -185,6 +207,7 @@ _DASHBOARD_HTML = """
       <button onclick="action('/api/validation/run')">Run validation once</button>
       <button onclick="action('/api/purge/run', true)">Dry-run purge</button>
       <button onclick="action('/api/purge/run')">Purge retained queue rows</button>
+      <button onclick="downloadDataset()">Download offline dataset</button>
     </section>
     <section>
       <h2>Status</h2>
@@ -230,6 +253,19 @@ _DASHBOARD_HTML = """
       const data = await response.json();
       document.getElementById('output').textContent = JSON.stringify(data, null, 2);
       await refreshStatus();
+    }
+    async function downloadDataset() {
+      const response = await fetch('/api/offline-dataset/export', {headers: authHeaders()});
+      if (!response.ok) {
+        document.getElementById('output').textContent = await response.text();
+        return;
+      }
+      const blob = await response.blob();
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'preference_examples.jsonl';
+      link.click();
+      URL.revokeObjectURL(link.href);
     }
     function authHeaders() {
       return adminToken ? {'Authorization': `Bearer ${adminToken}`} : {};

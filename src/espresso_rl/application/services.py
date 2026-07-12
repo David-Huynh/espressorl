@@ -2,68 +2,48 @@ from __future__ import annotations
 
 import copy
 import logging
-import re
 from dataclasses import dataclass
 from typing import Callable
 
-from espresso_rl.domain.events import (
-    MachineStateEvent,
-    RecommendationApplyEvent,
-    RecommendationDecisionEvent,
-    ShotCorrectionEvent,
-    ShotFeedbackEvent,
-    ShotProfileEvent,
-)
-from espresso_rl.domain.follow_through import infer_follow_through
-from espresso_rl.domain.models import (
-    FollowThroughState,
-    GrinderAdjustmentMode,
-    GrinderCalibrationMode,
-    GrinderStepDirection,
-    MachineState,
-    Recipe,
-    Recommendation,
-    RecommendationApplyStatus,
-    RecommendationDecision,
-    RecommendationStatus,
-    SafetyBounds,
-    ShotRecord,
-    ShotType,
-    now_ts,
-)
-from espresso_rl.domain.optimization import OptimizationContext, PriorPoint, PriorSignal
-from espresso_rl.domain.profile import (
-    build_fixed_cadence_sequence,
-    profile_hash,
-    profile_mse,
-    profile_score,
-    resample_profile_with_quality,
-    resample_shot_metadata,
-)
-from espresso_rl.domain.reward import compute_reward
-from espresso_rl.domain.staleness import check_recommendation_staleness
-from espresso_rl.domain.utility import classify_shot_profile_event
 from espresso_rl.application.upload_payloads import (
     make_comparison_upload_item,
     make_recommendation_upload_item,
     make_shot_upload_item,
 )
 from espresso_rl.domain.community import PairwiseShotComparison
-from espresso_rl.application.rule_priors import rule_prior_signals
-from espresso_rl.ports.optimizers import Optimizer, PriorProvider, StatefulOptimizerHandoff
+from espresso_rl.domain.events import (
+    MachineStateEvent,
+    RecommendationApplyEvent,
+    RecommendationDecisionEvent,
+    ShotCorrectionEvent,
+    ShotProfileEvent,
+)
+from espresso_rl.domain.follow_through import infer_follow_through
+from espresso_rl.domain.models import (
+    FollowThroughState,
+    MachineState,
+    Recommendation,
+    RecommendationApplyStatus,
+    RecommendationDecision,
+    RecommendationStatus,
+    ShotRecord,
+    ShotType,
+    now_ts,
+)
+from espresso_rl.domain.profile import (
+    build_fixed_cadence_sequence,
+    profile_hash,
+    resample_profile_with_quality,
+    resample_shot_metadata,
+)
+from espresso_rl.domain.staleness import check_recommendation_staleness
+from espresso_rl.domain.utility import classify_shot_profile_event
 from espresso_rl.ports.repositories import (
     RecommendationRepository,
     ShotRepository,
     UploadQueueRepository,
 )
-from espresso_rl.domain.prior_rules import PriorRule, PriorSelectionMode, parse_prior_rules
 
-
-LOCAL_BEAN_HISTORY_PRIOR_SOURCE = "local_bean_history"
-LOCAL_BEAN_HISTORY_LOOKBACK = 500
-MAX_LOCAL_BEAN_HISTORY_PRIORS = 64
-MIN_LOCAL_BEAN_HISTORY_RANK_SCALE = 0.35
-MAX_LOCAL_BEAN_HISTORY_OBSERVATION_NOISE = 0.75
 
 logger = logging.getLogger(__name__)
 
@@ -73,33 +53,17 @@ class IngestResult:
     shot: ShotRecord | None
     recommendation: Recommendation | None
     dropped_reason: str | None = None
-    optimizer_handoff_mode: str | None = None
 
     @property
     def stored(self) -> bool:
         return self.shot is not None
 
 
-@dataclass(frozen=True)
-class FeedbackResult:
-    shot: ShotRecord
-    recommendation: Recommendation | None
-    optimizer_handoff_mode: str | None = None
-
-
 def _recommendation_signature(recommendation: Recommendation) -> tuple:
-    """The *meaningful* state of a recommendation for upload deduplication.
-
-    Two recommendations with the same signature differ only in incidental
-    bookkeeping Ã¢â‚¬â€ `shown_count` beyond the first show, `updated_at`, and the
-    per-transition timestamps Ã¢â‚¬â€ so they should not produce a fresh community
-    upload. Real lifecycle transitions (status/apply changes, the first show, or
-    a change to the recommended values/reason) all change the signature.
-    """
     return (
         recommendation.status.value,
         recommendation.apply_status.value,
-        recommendation.shown_count > 0,  # was_shown: first show matters; later bumps do not
+        recommendation.shown_count > 0,
         tuple(sorted(recommendation.applied_fields.items())),
         tuple(sorted(recommendation.manual_fields)),
         recommendation.apply_error,
@@ -121,48 +85,20 @@ def _recommendation_signature(recommendation: Recommendation) -> tuple:
     )
 
 
-def _is_optimizer_observation(shot: ShotRecord) -> bool:
-    return (
-        shot.shot_type == ShotType.ESPRESSO
-        and not shot.exclude_from_local_optimization
-        and shot.optimization_weight > 0.0
-        and shot.feedback_recorded
-        and shot.reward is not None
-    )
-
-
-def _has_optimizer_observation(shots: list[ShotRecord]) -> bool:
-    return any(_is_optimizer_observation(shot) for shot in shots)
-
-
-def _latest_shot_waits_for_feedback(shots: list[ShotRecord]) -> bool:
-    if not shots:
-        return False
-    latest = shots[-1]
-    return latest.rating_prompt_allowed and not latest.feedback_recorded
-
-
 def _normal_context_key(value: str | None) -> str:
-    if not value:
-        return ""
-    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    return "" if value is None else " ".join(value.casefold().split())
 
 
-def _profile_scope_key(*, profile_id: str | None, raw_profile_hash: str | None) -> tuple[str, str] | None:
+def _profile_scope_key(
+    *,
+    profile_id: str | None,
+    raw_profile_hash: str | None,
+) -> tuple[str, str] | None:
     if profile_id:
         return ("id", _normal_context_key(profile_id))
     if raw_profile_hash:
         return ("hash", raw_profile_hash)
     return None
-
-
-def _shot_matches_profile_scope(shot: ShotRecord, scope: tuple[str, str] | None) -> bool:
-    if scope is None:
-        return True
-    kind, value = scope
-    if kind == "hash":
-        return shot.raw_profile_hash == value
-    return _normal_context_key(shot.profile_id) == value
 
 
 def _recommendation_matches_profile_scope(
@@ -177,133 +113,27 @@ def _recommendation_matches_profile_scope(
     return _normal_context_key(recommendation.profile_id) == value
 
 
-def _bean_context_key(bean_context_name: str | None, bean_context_id: str | None) -> str:
-    key = _normal_context_key(bean_context_name)
-    if key:
-        return key
-    if not bean_context_id:
-        return ""
-    context_id = bean_context_id.strip()
-    if context_id.lower().startswith("bean_"):
-        parts = [part for part in context_id[5:].split("_") if part]
-        while parts and parts[-1].isdigit():
-            parts.pop()
-        if parts:
-            return _normal_context_key(" ".join(parts))
-    return _normal_context_key(context_id)
-
-
-def _prior_confidence_from_shot(shot: ShotRecord) -> float:
-    confidence = max(0.0, min(1.0, shot.reward_confidence)) * max(0.0, min(1.0, shot.optimization_weight))
-    if shot.human_rating is not None:
-        confidence += 0.15
-    if shot.recommendation_followed == FollowThroughState.PARTIALLY_FOLLOWED:
-        confidence *= 0.8
-    return max(0.0, min(0.85, confidence))
-
-
-def _same_bean_previous_bag_prior_points(
-    *,
-    current_recipe: Recipe,
-    current_bean_context_id: str | None,
-    current_bean_context_name: str | None,
-    grinder_context_id: str | None,
-    history: list[ShotRecord],
-) -> list[PriorPoint]:
-    if not current_bean_context_id:
-        return []
-    current_key = _bean_context_key(current_bean_context_name, current_bean_context_id)
-    if not current_key:
-        return []
-
-    candidates: list[ShotRecord] = []
-    for shot in history:
-        if shot.bean_context_id == current_bean_context_id:
-            continue
-        if shot.grinder_context_id != grinder_context_id:
-            continue
-        if not shot.grind_observed or shot.relative_grind_steps_from_reference is None:
-            continue
-        if not shot.dose_observed or not shot.realized_yield_observed:
-            continue
-        if not _is_optimizer_observation(shot):
-            continue
-        if _bean_context_key(shot.bean_context_name, shot.bean_context_id) != current_key:
-            continue
-        candidates.append(shot)
-
-    candidates = sorted(
-        candidates,
-        key=lambda shot: (
-            (shot.reward or 0.0) * _prior_confidence_from_shot(shot),
-            shot.timestamp,
-        ),
-        reverse=True,
-    )[:MAX_LOCAL_BEAN_HISTORY_PRIORS]
-
-    points: list[PriorPoint] = []
-    for rank, shot in enumerate(candidates, start=1):
-        rank_scale = max(MIN_LOCAL_BEAN_HISTORY_RANK_SCALE, 1.0 / (rank ** 0.5))
-        confidence = _prior_confidence_from_shot(shot) * rank_scale
-        if confidence <= 0:
-            continue
-        target_yield_g = shot.realized_yield_g
-        target_ratio = target_yield_g / shot.dose_in_g
-        base_observation_noise = 0.25 if shot.human_rating is not None else 0.4
-        observation_noise = min(
-            MAX_LOCAL_BEAN_HISTORY_OBSERVATION_NOISE,
-            base_observation_noise / rank_scale,
-        )
-        if shot.recommendation_followed == FollowThroughState.PARTIALLY_FOLLOWED:
-            observation_noise = max(observation_noise, 0.45)
-        points.append(
-            PriorPoint(
-                grind_delta_um_from_current=(
-                    shot.relative_grind_steps_from_reference
-                    - current_recipe.relative_grind_steps_from_reference
-                )
-                * current_recipe.microns_per_step
-                * current_recipe.grinder_direction_sign,
-                dose_g=shot.dose_in_g,
-                target_yield_g=target_yield_g,
-                target_ratio=target_ratio,
-                predicted_reward=max(0.0, min(1.0, shot.reward or 0.0)),
-                confidence=confidence,
-                observation_noise=observation_noise,
-                source=LOCAL_BEAN_HISTORY_PRIOR_SOURCE,
-                reason="Same bean previous bag local observation.",
-            )
-        )
-    return points
-
-
 class EspressoRLService:
-    """Application service over canonical EspressoRL events."""
+    """Physical-shot and recommendation lifecycle use cases.
+
+    Preference optimization is stateful and is deliberately orchestrated by
+    ``CPBORuntimeBridge``. This service never synthesizes scalar taste rewards.
+    """
 
     def __init__(
         self,
         shots: ShotRepository,
         recommendations: RecommendationRepository,
-        optimizer: Optimizer,
         upload_queue: UploadQueueRepository | None = None,
-        prior_provider: PriorProvider | None = None,
-        safety_bounds: SafetyBounds | None = None,
         clock: Callable[[], int] = now_ts,
         community_upload_enabled_default: bool = False,
-        stateful_preference_mode: bool = False,
     ) -> None:
         self._shots = shots
         self._recommendations = recommendations
-        self._optimizer = optimizer
         self._upload_queue = upload_queue
-        self._prior_provider = prior_provider
-        self._safety_bounds = safety_bounds or SafetyBounds()
         self._clock = clock
         self._community_upload_enabled_default = bool(community_upload_enabled_default)
-        self._stateful_preference_mode = bool(stateful_preference_mode)
         self._community_upload_enabled_by_machine: dict[tuple[str, str], bool] = {}
-        self._prior_mode_by_machine: dict[tuple[str, str], PriorSelectionMode] = {}
-        self._prior_rules_by_machine: dict[tuple[str, str], tuple[PriorRule, ...]] = {}
 
     def ingest_shot_profile(self, event: ShotProfileEvent) -> IngestResult:
         now = self._clock()
@@ -315,22 +145,23 @@ class EspressoRLService:
                 else f"not_locally_optimizable:{classification.shot_type.value}"
             )
             return IngestResult(shot=None, recommendation=None, dropped_reason=reason)
+
         profile_quality = resample_profile_with_quality(event)
         shot_metadata = resample_shot_metadata(event)
         fixed_cadence_sequence = build_fixed_cadence_sequence(event)
-        profile = profile_quality.profile
-        raw_profile_hash = profile_hash(profile)
-        recommendation = self._recommendation_for_event(event, now, raw_profile_hash=event.raw_profile_hash)
-        mse = profile_mse(profile)
-        score = profile_score(profile)
-
+        stable_profile_hash = event.raw_profile_hash or profile_hash(profile_quality.profile)
+        recommendation = self._recommendation_for_event(
+            event,
+            now,
+            raw_profile_hash=stable_profile_hash,
+        )
         shot = ShotRecord(
             shot_id=event.shot_id,
             timestamp=int(event.timestamp),
             install_id=event.install_id,
             machine_id=event.machine_id,
             machine_adapter=event.machine_adapter,
-            profile=profile,
+            profile=profile_quality.profile,
             microns_per_step=event.microns_per_step,
             dose_in_g=event.dose_in_g,
             target_yield_g=event.target_yield_g,
@@ -349,16 +180,16 @@ class EspressoRLService:
             grinder_reference_label=event.grinder_reference_label,
             current_absolute_step=event.current_absolute_step,
             absolute_reference_step=event.absolute_reference_step,
-            recommendation_id=recommendation.recommendation_id if recommendation else event.recommendation_id,
+            recommendation_id=(
+                recommendation.recommendation_id
+                if recommendation is not None
+                else event.recommendation_id
+            ),
             raw_profile_available=len(event.time_ms) >= 2,
-            raw_profile_hash=raw_profile_hash,
-            profile_mse=mse,
-            profile_score=score,
+            raw_profile_hash=stable_profile_hash,
             shot_type=classification.shot_type,
             exclude_from_local_optimization=classification.exclude_from_local_optimization,
             optimization_weight=classification.optimization_weight,
-            rating_prompt_allowed=classification.rating_prompt_allowed,
-            feedback_recorded=not classification.rating_prompt_allowed,
             weight_source=event.weight_source,
             flow_source=event.flow_source,
             flow_units=event.flow_units,
@@ -393,9 +224,15 @@ class EspressoRLService:
 
         decision = self._decision_from_recommendation(recommendation)
         if recommendation is not None:
-            shot.recommended_grind_delta_steps_from_current = recommendation.grind_delta_steps_from_current
-            shot.recommended_grind_delta_um_from_current = recommendation.grind_delta_um_from_current
-            shot.recommended_projected_relative_step_from_reference = recommendation.projected_relative_step_from_reference
+            shot.recommended_grind_delta_steps_from_current = (
+                recommendation.grind_delta_steps_from_current
+            )
+            shot.recommended_grind_delta_um_from_current = (
+                recommendation.grind_delta_um_from_current
+            )
+            shot.recommended_projected_relative_step_from_reference = (
+                recommendation.projected_relative_step_from_reference
+            )
             shot.recommended_dose_g = recommendation.next_dose_g
             shot.recommended_target_yield_g = recommendation.target_yield_g
             shot.recommended_target_ratio = recommendation.target_ratio
@@ -405,137 +242,12 @@ class EspressoRLService:
             shot.recommendation_attribution_weight = followed.attribution_weight
             self._mark_recommendation_used_if_followed(recommendation, followed.state, now)
 
-        reward = compute_reward(
-            human_rating=None,
-            profile_score=score,
-            follow_through=shot.recommendation_followed,
-            taste_tags=shot.taste_tags,
-            profile_complete=shot.raw_profile_available,
+        self._store_shot(
+            shot,
+            now,
+            community_upload_enabled=event.community_upload_enabled,
         )
-        shot.reward = reward.reward
-        shot.reward_confidence = reward.confidence
-        self._store_shot(shot, now, community_upload_enabled=event.community_upload_enabled)
-
-        if self._stateful_preference_mode:
-            return IngestResult(shot=shot, recommendation=None)
-        if not shot.feedback_recorded:
-            return IngestResult(shot=shot, recommendation=None)
-        try:
-            recommendation = self.generate_recommendation(
-                install_id=shot.install_id,
-                machine_id=shot.machine_id,
-                bean_context_id=shot.bean_context_id,
-                bean_context_name=shot.bean_context_name,
-                grinder_context_id=shot.grinder_context_id,
-                current_recipe=self._current_recipe_for_shot(shot),
-                now=now,
-                grinder_calibration_mode=shot.grinder_calibration_mode,
-                grinder_step_direction=shot.grinder_step_direction,
-                grinder_adjustment_mode=shot.grinder_adjustment_mode,
-                grinder_reference_label=shot.grinder_reference_label,
-                current_absolute_step=shot.current_absolute_step,
-                absolute_reference_step=shot.absolute_reference_step,
-                profile_id=shot.profile_id,
-            )
-        except StatefulOptimizerHandoff as exc:
-            self._stateful_preference_mode = True
-            logger.warning("Optimizer handed shot %s to %s: %s", shot.shot_id, exc.target_mode, exc.reason)
-            return IngestResult(
-                shot=shot,
-                recommendation=None,
-                optimizer_handoff_mode=exc.target_mode,
-            )
-        return IngestResult(shot=shot, recommendation=recommendation)
-
-    def record_feedback(self, event: ShotFeedbackEvent) -> FeedbackResult:
-        now = self._clock()
-        shot = self._shots.get(event.shot_id)
-        if shot is None:
-            raise ValueError(f"unknown shot_id {event.shot_id}")
-        if shot.install_id != event.install_id or shot.machine_id != event.machine_id:
-            raise ValueError("shot feedback does not match the stored shot owner")
-        if event.recommendation_id:
-            if shot.recommendation_id and shot.recommendation_id != event.recommendation_id:
-                raise ValueError("shot feedback recommendation_id does not match the stored shot")
-            recommendation = self._recommendations.get(event.recommendation_id)
-            if recommendation is None:
-                raise ValueError(f"unknown recommendation_id {event.recommendation_id}")
-            if recommendation.install_id != shot.install_id or recommendation.machine_id != shot.machine_id:
-                raise ValueError("shot feedback recommendation does not match the stored shot owner")
-            shot.recommendation_id = event.recommendation_id
-
-        human_rating = None if event.skipped else event.rating
-        taste_tags = list(event.taste_tags)
-        feedback_changed = (
-            not shot.feedback_recorded
-            or shot.human_rating != human_rating
-            or shot.taste_tags != taste_tags
-        )
-        shot.human_rating = human_rating
-        shot.taste_tags = taste_tags
-        shot.feedback_recorded = True
-        reward = compute_reward(
-            human_rating=shot.human_rating,
-            profile_score=shot.profile_score or 0.0,
-            follow_through=shot.recommendation_followed,
-            taste_tags=shot.taste_tags,
-            profile_complete=shot.raw_profile_available,
-        )
-        shot.reward = reward.reward
-        shot.reward_confidence = reward.confidence
-        shot.updated_at = now
-        self._store_shot(shot, now)
-
-        if self._stateful_preference_mode:
-            return FeedbackResult(shot=shot, recommendation=None)
-
-        recent = self._shots.list_recent(
-            install_id=shot.install_id,
-            machine_id=shot.machine_id,
-            bean_context_id=shot.bean_context_id,
-            grinder_context_id=shot.grinder_context_id,
-            limit=1,
-        )
-        if not recent or recent[-1].shot_id != shot.shot_id:
-            return FeedbackResult(shot=shot, recommendation=None)
-
-        current = self._recommendations.get_current(
-            install_id=shot.install_id,
-            machine_id=shot.machine_id,
-            bean_context_id=shot.bean_context_id,
-            now=now,
-            grinder_context_id=shot.grinder_context_id,
-            profile_id=shot.profile_id,
-        )
-        if not feedback_changed and current is not None and current.source_shot_id == shot.shot_id:
-            return FeedbackResult(shot=shot, recommendation=current)
-
-        try:
-            recommendation = self.generate_recommendation(
-                install_id=shot.install_id,
-                machine_id=shot.machine_id,
-                bean_context_id=shot.bean_context_id,
-                bean_context_name=shot.bean_context_name,
-                grinder_context_id=shot.grinder_context_id,
-                current_recipe=self._current_recipe_for_shot(shot),
-                now=now,
-                grinder_calibration_mode=shot.grinder_calibration_mode,
-                grinder_step_direction=shot.grinder_step_direction,
-                grinder_adjustment_mode=shot.grinder_adjustment_mode,
-                grinder_reference_label=shot.grinder_reference_label,
-                current_absolute_step=shot.current_absolute_step,
-                absolute_reference_step=shot.absolute_reference_step,
-                profile_id=shot.profile_id,
-            )
-        except StatefulOptimizerHandoff as exc:
-            self._stateful_preference_mode = True
-            logger.warning("Optimizer handed feedback shot %s to %s: %s", shot.shot_id, exc.target_mode, exc.reason)
-            return FeedbackResult(
-                shot=shot,
-                recommendation=None,
-                optimizer_handoff_mode=exc.target_mode,
-            )
-        return FeedbackResult(shot=shot, recommendation=recommendation)
+        return IngestResult(shot=shot, recommendation=None)
 
     def record_shot_correction(self, event: ShotCorrectionEvent) -> ShotRecord:
         now = self._clock()
@@ -552,9 +264,7 @@ class EspressoRLService:
             shot.shot_type = ShotType.UTILITY_FLUSH
 
         should_exclude = event.exclude_from_local_optimization is True
-        if tags.intersection({"bad_puck_prep", "utility_brew"}):
-            should_exclude = True
-        if shot.shot_type != ShotType.ESPRESSO:
+        if tags.intersection({"bad_puck_prep", "utility_brew"}) or shot.shot_type != ShotType.ESPRESSO:
             should_exclude = True
 
         if event.grind_followed is not None:
@@ -562,7 +272,9 @@ class EspressoRLService:
             shot.grind_recommendation_trust = 1.0 if event.grind_followed else 0.0
             if event.grind_followed:
                 if shot.recommended_projected_relative_step_from_reference is not None:
-                    shot.relative_grind_steps_from_reference = shot.recommended_projected_relative_step_from_reference
+                    shot.relative_grind_steps_from_reference = (
+                        shot.recommended_projected_relative_step_from_reference
+                    )
                     shot.relative_grind_um_from_reference = (
                         shot.relative_grind_steps_from_reference
                         * shot.microns_per_step
@@ -604,15 +316,8 @@ class EspressoRLService:
             shot.yield_followed = False
             shot.yield_recommendation_trust = 0.0
 
-        if "channeling_suspected" in tags or "bad_puck_prep" in tags:
-            taste_tags = set(shot.taste_tags)
-            taste_tags.add("channeling_suspected")
-            shot.taste_tags = sorted(taste_tags)
-
         variable_follow = [shot.grind_followed, shot.dose_followed, shot.yield_followed]
         any_not_followed = any(value is False for value in variable_follow)
-        any_followed = any(value is True for value in variable_follow)
-
         if should_exclude:
             shot.exclude_from_local_optimization = True
             shot.optimization_weight = 0.0
@@ -620,8 +325,6 @@ class EspressoRLService:
             shot.grind_recommendation_trust = 0.0
             shot.dose_recommendation_trust = 0.0
             shot.yield_recommendation_trust = 0.0
-            if shot.shot_type != ShotType.ESPRESSO:
-                shot.rating_prompt_allowed = False
             shot.recommendation_followed = FollowThroughState.NOT_FOLLOWED
         elif any_not_followed:
             known = [value for value in variable_follow if value is not None]
@@ -640,24 +343,19 @@ class EspressoRLService:
                     max(0.25, followed_share),
                 )
 
-        reward = compute_reward(
-            human_rating=shot.human_rating,
-            profile_score=shot.profile_score or 0.0,
-            follow_through=shot.recommendation_followed,
-            taste_tags=shot.taste_tags,
-            profile_complete=shot.raw_profile_available,
-        )
-        shot.reward = reward.reward
-        shot.reward_confidence = reward.confidence
         shot.updated_at = now
         self._store_shot(shot, now)
         return shot
 
-    def record_recommendation_decision(self, event: RecommendationDecisionEvent) -> Recommendation:
+    def record_recommendation_decision(
+        self,
+        event: RecommendationDecisionEvent,
+    ) -> Recommendation:
         now = self._clock()
         recommendation = self._recommendations.get(event.recommendation_id)
         if recommendation is None:
             raise ValueError(f"unknown recommendation_id {event.recommendation_id}")
+        self._require_recommendation_owner(recommendation, event.install_id, event.machine_id)
 
         updated = copy.copy(recommendation)
         updated.updated_at = now
@@ -674,7 +372,6 @@ class EspressoRLService:
         else:
             updated.status = RecommendationStatus.SHOWN
             updated.shown_count += 1
-
         self._store_recommendation(updated, now)
         return updated
 
@@ -683,6 +380,7 @@ class EspressoRLService:
         recommendation = self._recommendations.get(event.recommendation_id)
         if recommendation is None:
             raise ValueError(f"unknown recommendation_id {event.recommendation_id}")
+        self._require_recommendation_owner(recommendation, event.install_id, event.machine_id)
 
         updated = copy.copy(recommendation)
         updated.updated_at = now
@@ -703,15 +401,6 @@ class EspressoRLService:
         profile_id: str | None = None,
         raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
-        recent = self._shots.list_recent(
-            install_id=install_id,
-            machine_id=machine_id,
-            bean_context_id=bean_context_id,
-            grinder_context_id=grinder_context_id,
-            limit=200,
-        )
-        if _latest_shot_waits_for_feedback(recent):
-            return None
         return self._recommendations.get_current(
             install_id=install_id,
             machine_id=machine_id,
@@ -735,18 +424,6 @@ class EspressoRLService:
             return None
 
         now = self._clock()
-        current_recipe = event.current_recipe()
-        profile_scope = _profile_scope_key(profile_id=event.profile_id, raw_profile_hash=event.raw_profile_hash)
-        all_recent = self._shots.list_recent(
-            install_id=event.install_id,
-            machine_id=event.machine_id,
-            bean_context_id=event.bean_context_id,
-            grinder_context_id=event.grinder_context_id,
-            limit=200,
-        )
-        if _latest_shot_waits_for_feedback(all_recent):
-            return None
-        recent = [shot for shot in all_recent if _shot_matches_profile_scope(shot, profile_scope)]
         current = self._recommendations.get_current(
             install_id=event.install_id,
             machine_id=event.machine_id,
@@ -756,196 +433,30 @@ class EspressoRLService:
             profile_id=event.profile_id,
             raw_profile_hash=event.raw_profile_hash if event.profile_id is None else None,
         )
-        if current is not None:
-            stale = check_recommendation_staleness(
-                current,
-                now=now,
-                bean_context_id=event.bean_context_id,
-                grinder_context_id=event.grinder_context_id,
-            )
-            if stale.stale:
-                self._expire_recommendation(current, now)
-                current = None
-            elif current.status in {RecommendationStatus.ACCEPTED, RecommendationStatus.EDITED}:
-                return current
-            else:
-                return self._mark_recommendation_shown(current, now)
+        if current is None:
+            return None
+        stale = check_recommendation_staleness(
+            current,
+            now=now,
+            bean_context_id=event.bean_context_id,
+            grinder_context_id=event.grinder_context_id,
+        )
+        if stale.stale:
+            self._expire_recommendation(current, now)
+            return None
+        if current.status in {RecommendationStatus.ACCEPTED, RecommendationStatus.EDITED}:
+            return current
+        return self._mark_recommendation_shown(current, now)
 
-        if current_recipe is None:
-            return None
-        if not _has_optimizer_observation(recent):
-            return None
-        if self._stateful_preference_mode:
-            return None
-        try:
-            recommendation = self.generate_recommendation(
-                install_id=event.install_id,
-                machine_id=event.machine_id,
-                bean_context_id=event.bean_context_id,
-                bean_context_name=event.bean_context_name,
-                grinder_context_id=event.grinder_context_id,
-                current_recipe=current_recipe,
-                now=now,
-                grinder_calibration_mode=event.grinder_calibration_mode,
-                grinder_step_direction=event.grinder_step_direction,
-                grinder_adjustment_mode=event.grinder_adjustment_mode,
-                grinder_reference_label=event.grinder_reference_label,
-                current_absolute_step=event.current_absolute_step,
-                absolute_reference_step=event.absolute_reference_step,
-                profile_id=event.profile_id,
-                raw_profile_hash=event.raw_profile_hash,
-            )
-        except StatefulOptimizerHandoff as exc:
-            self._stateful_preference_mode = True
-            logger.warning(
-                "Optimizer handed machine %s to %s: %s",
-                event.machine_id,
-                exc.target_mode,
-                exc.reason,
-            )
-            return None
-        return self._mark_recommendation_shown(recommendation, now)
-
-    def generate_recommendation(
+    def set_community_upload_enabled(
         self,
         install_id: str,
         machine_id: str,
-        bean_context_id: str | None,
-        current_recipe: Recipe,
-        bean_context_name: str | None = None,
-        grinder_context_id: str | None = None,
-        now: int | None = None,
-        grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED,
-        grinder_step_direction: GrinderStepDirection = GrinderStepDirection.HIGHER_IS_FINER,
-        grinder_adjustment_mode: GrinderAdjustmentMode = GrinderAdjustmentMode.STEPPED,
-        grinder_reference_label: str = "reference",
-        current_absolute_step: float | None = None,
-        absolute_reference_step: float | None = None,
-        profile_id: str | None = None,
-        raw_profile_hash: str | None = None,
-    ) -> Recommendation:
-        timestamp = self._clock() if now is None else now
-        profile_scope = _profile_scope_key(profile_id=profile_id, raw_profile_hash=raw_profile_hash)
-        all_recent = self._shots.list_recent(
-            install_id=install_id,
-            machine_id=machine_id,
-            bean_context_id=bean_context_id,
-            grinder_context_id=grinder_context_id,
-            limit=200,
-        )
-        recent = [shot for shot in all_recent if _shot_matches_profile_scope(shot, profile_scope)]
-        machine_adapter = recent[-1].machine_adapter if recent else (all_recent[-1].machine_adapter if all_recent else None)
-        current_bean_context_name = bean_context_name or next(
-            (shot.bean_context_name for shot in reversed(recent or all_recent) if shot.bean_context_name),
-            None,
-        )
-        last_recommendation = self._recommendations.get_current(
-            install_id=install_id,
-            machine_id=machine_id,
-            bean_context_id=bean_context_id,
-            now=timestamp,
-            grinder_context_id=grinder_context_id,
-            profile_id=profile_id,
-            raw_profile_hash=raw_profile_hash if profile_id is None else None,
-        ) or self._recommendations.get_latest(
-            install_id=install_id,
-            machine_id=machine_id,
-            bean_context_id=bean_context_id,
-            grinder_context_id=grinder_context_id,
-            profile_id=profile_id,
-            raw_profile_hash=raw_profile_hash if profile_id is None else None,
-        )
-        context = OptimizationContext(
-            install_id=install_id,
-            machine_id=machine_id,
-            bean_context_id=bean_context_id,
-            machine_adapter=machine_adapter,
-            current_recipe=current_recipe,
-            shots=recent,
-            safety_bounds=self._safety_bounds,
-            now=timestamp,
-            last_recommendation=last_recommendation,
-            grinder_context_id=grinder_context_id,
-        )
-        prior_points: list[PriorPoint] = []
-        prior_signals: list[PriorSignal] = []
-        prior_mode = self.prior_mode_for(install_id, machine_id)
-        if _has_optimizer_observation(recent) and prior_mode != PriorSelectionMode.NO_PRIORS:
-            prior_points.extend(
-                _same_bean_previous_bag_prior_points(
-                    current_recipe=current_recipe,
-                    current_bean_context_id=bean_context_id,
-                    current_bean_context_name=current_bean_context_name,
-                    grinder_context_id=grinder_context_id,
-                    history=[
-                        shot
-                        for shot in self._shots.list_machine_shots(
-                            install_id=install_id,
-                            machine_id=machine_id,
-                            limit=LOCAL_BEAN_HISTORY_LOOKBACK,
-                        )
-                        if _shot_matches_profile_scope(shot, profile_scope)
-                    ],
-                )
-            )
-            if self._prior_provider is not None:
-                prior_points.extend(self._prior_provider.get_prior_points(context))
-            if prior_mode == PriorSelectionMode.RULES_AND_COMMUNITY:
-                prior_signals.extend(
-                    rule_prior_signals(
-                        context,
-                        self.prior_rules_for(install_id, machine_id),
-                    )
-                )
-        if prior_points or prior_signals:
-            context = OptimizationContext(
-                install_id=context.install_id,
-                machine_id=context.machine_id,
-                bean_context_id=context.bean_context_id,
-                machine_adapter=context.machine_adapter,
-                current_recipe=context.current_recipe,
-                shots=context.shots,
-                safety_bounds=context.safety_bounds,
-                now=context.now,
-                last_recommendation=context.last_recommendation,
-                grinder_context_id=context.grinder_context_id,
-                prior_points=tuple(prior_points),
-                prior_signals=tuple(prior_signals),
-            )
-        recommendation = self._optimizer.recommend(context)
-        recommendation.profile_id = profile_id
-        recommendation.raw_profile_hash = raw_profile_hash
-        self._apply_grinder_display_metadata(
-            recommendation,
-            grinder_calibration_mode=grinder_calibration_mode,
-            grinder_step_direction=grinder_step_direction,
-            grinder_adjustment_mode=grinder_adjustment_mode,
-            grinder_reference_label=grinder_reference_label,
-            current_absolute_step=current_absolute_step,
-            absolute_reference_step=absolute_reference_step,
-        )
-        self._recommendations.supersede_active(
-            install_id=install_id,
-            machine_id=machine_id,
-            bean_context_id=bean_context_id,
-            now=timestamp,
-            except_recommendation_id=recommendation.recommendation_id,
-            grinder_context_id=grinder_context_id,
-            profile_id=profile_id,
-            raw_profile_hash=raw_profile_hash if profile_id is None else None,
-        )
-        self._store_recommendation(recommendation, timestamp)
-        return recommendation
-
-    def set_community_upload_enabled(self, install_id: str, machine_id: str, enabled: bool) -> None:
+        enabled: bool,
+    ) -> None:
         self._community_upload_enabled_by_machine[(install_id, machine_id)] = bool(enabled)
 
-    def set_stateful_preference_mode(self, enabled: bool) -> None:
-        self._stateful_preference_mode = bool(enabled)
-
     def persist_generated_recommendation(self, recommendation: Recommendation) -> None:
-        """Persist a recommendation produced by a stateful optimizer service."""
-
         now = self._clock()
         recommendation.updated_at = now
         self._recommendations.supersede_active(
@@ -964,26 +475,6 @@ class EspressoRLService:
         )
         self._store_recommendation(recommendation, now)
 
-    def configure_prior_policy(
-        self,
-        install_id: str,
-        machine_id: str,
-        mode: PriorSelectionMode,
-        rules: tuple[PriorRule, ...],
-    ) -> None:
-        key = (install_id, machine_id)
-        self._prior_mode_by_machine[key] = PriorSelectionMode(mode)
-        self._prior_rules_by_machine[key] = parse_prior_rules(rules)
-
-    def prior_mode_for(self, install_id: str, machine_id: str) -> PriorSelectionMode:
-        return self._prior_mode_by_machine.get(
-            (install_id, machine_id),
-            PriorSelectionMode.COMMUNITY_ONLY,
-        )
-
-    def prior_rules_for(self, install_id: str, machine_id: str) -> tuple[PriorRule, ...]:
-        return self._prior_rules_by_machine.get((install_id, machine_id), ())
-
     def community_upload_enabled_for(self, install_id: str, machine_id: str) -> bool:
         return self._community_upload_enabled_by_machine.get(
             (install_id, machine_id),
@@ -991,45 +482,18 @@ class EspressoRLService:
         )
 
     def enqueue_comparison_upload(self, comparison: PairwiseShotComparison) -> None:
-        """Queue generic pairwise feedback without making optimization depend on upload."""
-
         if self._upload_queue is None:
             return
         if not self.community_upload_enabled_for(comparison.install_id, comparison.machine_id):
             return
         try:
-            self._upload_queue.enqueue(
-                make_comparison_upload_item(comparison, self._clock())
-            )
+            self._upload_queue.enqueue(make_comparison_upload_item(comparison, self._clock()))
         except Exception as exc:
             logger.warning(
                 "Community upload enqueue failed for comparison %s; local comparison was retained: %s",
                 comparison.comparison_id,
                 exc,
             )
-
-    def _apply_grinder_display_metadata(
-        self,
-        recommendation: Recommendation,
-        *,
-        grinder_calibration_mode: GrinderCalibrationMode,
-        grinder_step_direction: GrinderStepDirection,
-        grinder_adjustment_mode: GrinderAdjustmentMode,
-        grinder_reference_label: str,
-        current_absolute_step: float | None,
-        absolute_reference_step: float | None,
-    ) -> None:
-        recommendation.grinder_calibration_mode = GrinderCalibrationMode(grinder_calibration_mode)
-        recommendation.grinder_step_direction = GrinderStepDirection(grinder_step_direction)
-        recommendation.grinder_adjustment_mode = GrinderAdjustmentMode(grinder_adjustment_mode)
-        recommendation.grinder_reference_label = grinder_reference_label or "reference"
-        recommendation.current_absolute_step = current_absolute_step
-        recommendation.absolute_reference_step = absolute_reference_step
-        recommendation.projected_absolute_step = (
-            current_absolute_step + recommendation.grind_delta_steps_from_current
-            if current_absolute_step is not None
-            else None
-        )
 
     def _recommendation_for_event(
         self,
@@ -1038,11 +502,16 @@ class EspressoRLService:
         *,
         raw_profile_hash: str | None = None,
     ) -> Recommendation | None:
-        profile_scope = _profile_scope_key(profile_id=event.profile_id, raw_profile_hash=raw_profile_hash)
+        profile_scope = _profile_scope_key(
+            profile_id=event.profile_id,
+            raw_profile_hash=raw_profile_hash,
+        )
         if event.recommendation_id:
             recommendation = self._recommendations.get(event.recommendation_id)
             if (
                 recommendation is not None
+                and recommendation.install_id == event.install_id
+                and recommendation.machine_id == event.machine_id
                 and _recommendation_matches_profile_scope(recommendation, profile_scope)
                 and not check_recommendation_staleness(
                     recommendation,
@@ -1061,9 +530,7 @@ class EspressoRLService:
             profile_id=event.profile_id,
             raw_profile_hash=raw_profile_hash if event.profile_id is None else None,
         )
-        if recommendation is None:
-            return None
-        if not _recommendation_matches_profile_scope(recommendation, profile_scope):
+        if recommendation is None or not _recommendation_matches_profile_scope(recommendation, profile_scope):
             return None
         if check_recommendation_staleness(
             recommendation,
@@ -1073,49 +540,6 @@ class EspressoRLService:
         ).stale:
             return None
         return recommendation
-
-    def _current_recipe_for_shot(self, shot: ShotRecord) -> Recipe:
-        profile_scope = _profile_scope_key(profile_id=shot.profile_id, raw_profile_hash=None)
-        recent = self._shots.list_recent(
-            install_id=shot.install_id,
-            machine_id=shot.machine_id,
-            bean_context_id=shot.bean_context_id,
-            grinder_context_id=shot.grinder_context_id,
-            limit=50,
-        )
-        relative_steps = next(
-            (
-                candidate.relative_grind_steps_from_reference
-                for candidate in reversed(recent)
-                if candidate.grind_observed
-                and candidate.relative_grind_steps_from_reference is not None
-                and _shot_matches_profile_scope(candidate, profile_scope)
-            ),
-            0.0,
-        )
-        if shot.grind_observed and shot.relative_grind_steps_from_reference is not None:
-            relative_steps = shot.relative_grind_steps_from_reference
-        dose_g = shot.dose_in_g
-        if not shot.dose_observed:
-            dose_g = next(
-                (
-                    candidate.dose_in_g
-                    for candidate in reversed(recent)
-                    if candidate.dose_observed and _shot_matches_profile_scope(candidate, profile_scope)
-                ),
-                dose_g,
-            )
-        return Recipe(
-            relative_grind_steps_from_reference=relative_steps,
-            microns_per_step=shot.microns_per_step,
-            dose_g=dose_g,
-            target_yield_g=max(
-                self._safety_bounds.target_yield_min_g,
-                min(self._safety_bounds.target_yield_max_g, shot.realized_yield_g),
-            ),
-            grinder_step_direction=shot.grinder_step_direction,
-            grinder_adjustment_mode=shot.grinder_adjustment_mode,
-        )
 
     def _decision_from_recommendation(
         self,
@@ -1157,11 +581,7 @@ class EspressoRLService:
         self._store_recommendation(updated, now)
         return updated
 
-    def _expire_recommendation(
-        self,
-        recommendation: Recommendation,
-        now: int,
-    ) -> None:
+    def _expire_recommendation(self, recommendation: Recommendation, now: int) -> None:
         updated = copy.copy(recommendation)
         updated.status = RecommendationStatus.EXPIRED
         updated.updated_at = now
@@ -1169,11 +589,18 @@ class EspressoRLService:
 
     def _apply_edits(self, recommendation: Recommendation, edited_fields: dict) -> None:
         if "projected_relative_step_from_reference" in edited_fields:
-            projected_relative_step_from_reference = float(edited_fields["projected_relative_step_from_reference"])
-            microns_per_step = recommendation.grind_delta_um_from_current / recommendation.grind_delta_steps_from_current if recommendation.grind_delta_steps_from_current else 0.0
-            recommendation.projected_relative_step_from_reference = projected_relative_step_from_reference
+            projected = float(edited_fields["projected_relative_step_from_reference"])
+            microns_per_step = (
+                recommendation.grind_delta_um_from_current
+                / recommendation.grind_delta_steps_from_current
+                if recommendation.grind_delta_steps_from_current
+                else 0.0
+            )
+            recommendation.projected_relative_step_from_reference = projected
             if microns_per_step > 0:
-                recommendation.projected_relative_grind_um_from_reference = projected_relative_step_from_reference * microns_per_step
+                recommendation.projected_relative_grind_um_from_reference = (
+                    projected * microns_per_step
+                )
         if "next_dose_g" in edited_fields:
             recommendation.next_dose_g = float(edited_fields["next_dose_g"])
         if "target_yield_g" in edited_fields:
@@ -1181,7 +608,9 @@ class EspressoRLService:
         if "target_ratio" in edited_fields:
             recommendation.target_ratio = float(edited_fields["target_ratio"])
         else:
-            recommendation.target_ratio = recommendation.target_yield_g / recommendation.next_dose_g
+            recommendation.target_ratio = (
+                recommendation.target_yield_g / recommendation.next_dose_g
+            )
 
     def _store_shot(
         self,
@@ -1211,20 +640,13 @@ class EspressoRLService:
                     exc,
                 )
 
-    def _store_recommendation(
-        self,
-        recommendation: Recommendation,
-        now: int,
-    ) -> None:
+    def _store_recommendation(self, recommendation: Recommendation, now: int) -> None:
         prior = self._recommendations.get(recommendation.recommendation_id)
         self._recommendations.upsert(recommendation)
         if self._upload_queue is None:
             return
         if not self.community_upload_enabled_for(recommendation.install_id, recommendation.machine_id):
             return
-        # Upload only meaningful lifecycle transitions (created/shown/accepted/
-        # ignored/edited/used/applied/expired). Skip incidental churn such as
-        # repeated shown_count bumps, updated_at-only changes, and idle re-marks.
         if prior is not None and _recommendation_signature(prior) == _recommendation_signature(recommendation):
             return
         try:
@@ -1235,6 +657,17 @@ class EspressoRLService:
                 recommendation.recommendation_id,
                 exc,
             )
+
+    @staticmethod
+    def _require_recommendation_owner(
+        recommendation: Recommendation,
+        install_id: str | None,
+        machine_id: str | None,
+    ) -> None:
+        if install_id is not None and recommendation.install_id != install_id:
+            raise ValueError("recommendation event does not match the stored install owner")
+        if machine_id is not None and recommendation.machine_id != machine_id:
+            raise ValueError("recommendation event does not match the stored machine owner")
 
 
 def _shot_is_community_uploadable(shot: ShotRecord) -> bool:
