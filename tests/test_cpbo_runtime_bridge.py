@@ -121,7 +121,7 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         self.repository = SQLitePreferentialOptimizationRepository(self.store)
         self.shots = _ShotRepository()
         self.recommendations = []
-        self.clock_value = 100
+        self.clock_value = 1_700_000_000
 
     def tearDown(self) -> None:
         self.store.close()

@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,7 +19,8 @@ from espresso_rl.domain.taste_goal import TasteGoal
 
 SHA256_HEX_LENGTH = 64
 SUPPORTED_SCHEMA_VERSION = 1
-MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
+MIN_VALID_EPOCH = 1_600_000_000
+MAX_FUTURE_TIMESTAMP_SECONDS = 365 * 24 * 60 * 60
 RATIO_RELATIVE_TOLERANCE = 1e-3
 RATIO_ABSOLUTE_TOLERANCE = 1e-3
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,160}$")
@@ -340,7 +342,7 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _require_taste_goal(payload, errors)
     _optional_bool(payload, "raw_profile_available", errors)
     _optional_hash(payload, "raw_profile_hash", errors)
-    _require_number_range(payload, "timestamp", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _require_timestamp(payload, "timestamp", errors)
     _optional_number_range(payload, "dose_in_g", RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors)
     _require_number_range(payload, "dose_target_g", RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors)
     _optional_bool(payload, "dose_observed", errors)
@@ -444,8 +446,9 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_pump_target_mode_profile(payload, "pump_target_mode_profile", errors)
     _optional_fixed_cadence_sequence(payload.get("fixed_cadence_sequence"), errors)
     _optional_enum(payload, "shot_end_state", {"finished", "manual_or_interrupted", "unknown"}, errors)
-    _optional_number_range(payload, "created_at", 0, MAX_SAFE_JSON_INTEGER, errors)
-    _optional_number_range(payload, "updated_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_timestamp(payload, "created_at", errors)
+    _optional_timestamp(payload, "updated_at", errors)
+    _validate_created_updated_order(payload, errors)
     _optional_enum(
         payload,
         "shot_type",
@@ -511,14 +514,14 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
     _optional_string(payload, "reason", 500, errors)
     _optional_enum(payload, "status", {"pending", "shown", "accepted", "edited", "ignored", "expired", "used", "superseded"}, errors)
     _optional_int_range(payload, "shown_count", 0, 1_000_000, errors)
-    _optional_number_range(payload, "created_at", 0, MAX_SAFE_JSON_INTEGER, errors)
-    _optional_number_range(payload, "updated_at", 0, MAX_SAFE_JSON_INTEGER, errors)
-    _optional_number_range(payload, "expires_at", 0, MAX_SAFE_JSON_INTEGER, errors)
-    _optional_number_range(payload, "accepted_at", 0, MAX_SAFE_JSON_INTEGER, errors)
-    _optional_number_range(payload, "ignored_at", 0, MAX_SAFE_JSON_INTEGER, errors)
-    _optional_number_range(payload, "edited_at", 0, MAX_SAFE_JSON_INTEGER, errors)
-    _optional_number_range(payload, "used_at", 0, MAX_SAFE_JSON_INTEGER, errors)
-    _optional_number_range(payload, "superseded_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _require_timestamp(payload, "created_at", errors)
+    _require_timestamp(payload, "updated_at", errors)
+    _optional_timestamp(payload, "expires_at", errors)
+    _optional_timestamp(payload, "accepted_at", errors)
+    _optional_timestamp(payload, "ignored_at", errors)
+    _optional_timestamp(payload, "edited_at", errors)
+    _optional_timestamp(payload, "used_at", errors)
+    _optional_timestamp(payload, "superseded_at", errors)
     _optional_identifier(payload, "source_shot_id", errors)
     _optional_identifier(payload, "optimization_run_id", errors)
     _optional_identifier(payload, "comparison_anchor_shot_id", errors)
@@ -544,11 +547,12 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
         if payload.get("comparison_mode") != expected_comparison_mode:
             errors.append("CPBO recommendation comparison_mode does not match mode")
     _optional_enum(payload, "apply_status", {"unknown", "applied", "partially_applied", "manual_required", "failed"}, errors)
-    _optional_number_range(payload, "apply_acknowledged_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_timestamp(payload, "apply_acknowledged_at", errors)
     _optional_object(payload, "applied_fields", errors)
     _optional_string_list(payload, "manual_fields", errors)
     _optional_string(payload, "apply_error", 500, errors)
     _validate_derived_ratio(payload, "target_ratio", "target_yield_g", "next_dose_g", errors)
+    _validate_recommendation_timestamp_order(payload, errors)
 
 
 def _validate_comparison_record(payload: dict[str, Any], errors: list[str]) -> None:
@@ -567,7 +571,7 @@ def _validate_comparison_record(payload: dict[str, Any], errors: list[str]) -> N
     _optional_string(payload, "profile_id", 120, errors)
     _optional_hash(payload, "raw_profile_hash", errors)
     _require_taste_goal(payload, errors)
-    _require_number_range(payload, "created_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _require_timestamp(payload, "created_at", errors)
     _optional_enum(payload, "label", {"new_better", "anchor_better", "tie"}, errors)
     if payload.get("label") is None:
         errors.append("label is required")
@@ -745,6 +749,62 @@ def _optional_number_range(
     if payload.get(key) is None:
         return
     _require_number_range(payload, key, minimum, maximum, errors)
+
+
+def _timestamp_value(payload: dict[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _require_timestamp(payload: dict[str, Any], key: str, errors: list[str]) -> None:
+    value = _timestamp_value(payload, key)
+    now = int(time.time())
+    too_far_in_future = (
+        value is not None
+        and now >= MIN_VALID_EPOCH
+        and value > now + MAX_FUTURE_TIMESTAMP_SECONDS
+    )
+    if value is None or value < MIN_VALID_EPOCH or too_far_in_future:
+        errors.append(f"{key} must be a plausible Unix timestamp")
+
+
+def _optional_timestamp(payload: dict[str, Any], key: str, errors: list[str]) -> None:
+    if payload.get(key) is None:
+        return
+    _require_timestamp(payload, key, errors)
+
+
+def _validate_created_updated_order(payload: dict[str, Any], errors: list[str]) -> None:
+    created_at = _timestamp_value(payload, "created_at")
+    updated_at = _timestamp_value(payload, "updated_at")
+    if created_at is not None and updated_at is not None and updated_at < created_at:
+        errors.append("updated_at cannot precede created_at")
+
+
+def _validate_recommendation_timestamp_order(payload: dict[str, Any], errors: list[str]) -> None:
+    created_at = _timestamp_value(payload, "created_at")
+    updated_at = _timestamp_value(payload, "updated_at")
+    if created_at is None or updated_at is None:
+        return
+    _validate_created_updated_order(payload, errors)
+
+    expires_at = _timestamp_value(payload, "expires_at")
+    if expires_at is not None and expires_at < created_at:
+        errors.append("expires_at cannot precede created_at")
+
+    for key in (
+        "accepted_at",
+        "ignored_at",
+        "edited_at",
+        "used_at",
+        "superseded_at",
+        "apply_acknowledged_at",
+    ):
+        value = _timestamp_value(payload, key)
+        if value is not None and (value < created_at or value > updated_at):
+            errors.append(f"{key} is outside the recommendation lifecycle")
 
 
 def _require_positive_number(payload: dict[str, Any], key: str, errors: list[str]) -> None:

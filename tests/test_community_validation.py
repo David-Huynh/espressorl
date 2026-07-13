@@ -173,6 +173,8 @@ class CommunityValidationTests(unittest.TestCase):
                 "install_id": "verified_install",
                 "machine_id": "machine_1",
                 "taste_goal": balanced_taste_goal(),
+                "created_at": 1_779_999_000,
+                "updated_at": 1_779_999_000,
                 "next_dose_g": 18.0,
                 "target_yield_g": 38.0,
                 "target_ratio": 2.111,

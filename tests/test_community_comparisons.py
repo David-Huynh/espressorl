@@ -18,7 +18,7 @@ def comparison(**overrides) -> PairwiseShotComparison:
         "anchor_shot_id": "shot_anchor",
         "label": "new_better",
         "comparison_mode": "best_incumbent",
-        "created_at": 100,
+        "created_at": 1_700_000_000,
         "install_id": "install_1",
         "machine_id": "machine_1",
         "machine_adapter": "generic",

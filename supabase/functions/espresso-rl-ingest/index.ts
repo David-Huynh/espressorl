@@ -13,6 +13,8 @@ const RECIPE_DOMAIN_OUTPUT_MIN_G = 0.1;
 const RECIPE_DOMAIN_OUTPUT_MAX_G = 1000;
 const RATIO_RELATIVE_TOLERANCE = 1e-3;
 const RATIO_ABSOLUTE_TOLERANCE = 1e-3;
+const MIN_VALID_EPOCH = 1_600_000_000;
+const MAX_FUTURE_TIMESTAMP_SECONDS = 365 * 24 * 60 * 60;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9_.:@-]{1,160}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
 const UNSAFE_TEXT = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f<>]/;
@@ -297,7 +299,7 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalIdentifier(payload, 'bean_context_id', errors);
   optionalString(payload, 'grinder_context_id', 120, errors);
   requireTasteGoal(payload, errors);
-  requireNumberRange(payload, 'timestamp', 0, Number.MAX_SAFE_INTEGER, errors);
+  requireTimestamp(payload, 'timestamp', errors);
   optionalNumberRange(payload, 'dose_in_g', RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors);
   requireNumberRange(payload, 'dose_target_g', RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors);
   optionalBoolean(payload, 'dose_observed', errors);
@@ -371,8 +373,9 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalPumpTargetModeProfile(payload, 'pump_target_mode_profile', errors);
   optionalFixedCadenceSequence(payload.fixed_cadence_sequence, errors);
   optionalEnum(payload, 'shot_end_state', ['finished', 'manual_or_interrupted', 'unknown'], errors);
-  optionalNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
-  optionalNumberRange(payload, 'updated_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalTimestamp(payload, 'created_at', errors);
+  optionalTimestamp(payload, 'updated_at', errors);
+  validateCreatedUpdatedOrder(payload, errors);
   const profile = payload.profile_resampled;
   if (profile !== undefined) {
     if (!Array.isArray(profile) || profile.length !== 5) {
@@ -394,9 +397,9 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   optionalString(payload, 'profile_id', 120, errors);
   optionalSha256(payload, 'raw_profile_hash', errors);
   requireTasteGoal(payload, errors);
-  optionalNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
-  optionalNumberRange(payload, 'updated_at', 0, Number.MAX_SAFE_INTEGER, errors);
-  optionalNumberRange(payload, 'expires_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  requireTimestamp(payload, 'created_at', errors);
+  requireTimestamp(payload, 'updated_at', errors);
+  optionalTimestamp(payload, 'expires_at', errors);
   optionalNumberRange(payload, 'grind_delta_steps_from_current', -1000, 1000, errors);
   optionalNumberRange(payload, 'grind_delta_um_from_current', -100_000, 100_000, errors);
   optionalNumberRange(payload, 'projected_relative_step_from_reference', -10_000, 10_000, errors);
@@ -417,11 +420,11 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   optionalString(payload, 'reason', 500, errors);
   optionalEnum(payload, 'status', ['pending', 'shown', 'accepted', 'edited', 'ignored', 'expired', 'used', 'superseded'], errors);
   optionalIntegerRange(payload, 'shown_count', 0, 1_000_000, errors);
-  optionalNumberRange(payload, 'accepted_at', 0, Number.MAX_SAFE_INTEGER, errors);
-  optionalNumberRange(payload, 'ignored_at', 0, Number.MAX_SAFE_INTEGER, errors);
-  optionalNumberRange(payload, 'edited_at', 0, Number.MAX_SAFE_INTEGER, errors);
-  optionalNumberRange(payload, 'used_at', 0, Number.MAX_SAFE_INTEGER, errors);
-  optionalNumberRange(payload, 'superseded_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalTimestamp(payload, 'accepted_at', errors);
+  optionalTimestamp(payload, 'ignored_at', errors);
+  optionalTimestamp(payload, 'edited_at', errors);
+  optionalTimestamp(payload, 'used_at', errors);
+  optionalTimestamp(payload, 'superseded_at', errors);
   optionalIdentifier(payload, 'source_shot_id', errors);
   optionalIdentifier(payload, 'optimization_run_id', errors);
   optionalIdentifier(payload, 'comparison_anchor_shot_id', errors);
@@ -441,11 +444,12 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
     }
   }
   optionalEnum(payload, 'apply_status', ['unknown', 'applied', 'partially_applied', 'manual_required', 'failed'], errors);
-  optionalNumberRange(payload, 'apply_acknowledged_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  optionalTimestamp(payload, 'apply_acknowledged_at', errors);
   optionalObject(payload, 'applied_fields', errors);
   optionalStringList(payload, 'manual_fields', errors);
   optionalString(payload, 'apply_error', 500, errors);
   validateDerivedRatio(payload, 'target_ratio', 'target_yield_g', 'next_dose_g', errors);
+  validateRecommendationTimestampOrder(payload, errors);
 }
 
 function validateComparisonRecord(payload: JsonRecord, errors: string[]) {
@@ -463,7 +467,7 @@ function validateComparisonRecord(payload: JsonRecord, errors: string[]) {
   optionalString(payload, 'profile_id', 120, errors);
   optionalSha256(payload, 'raw_profile_hash', errors);
   requireTasteGoal(payload, errors);
-  requireNumberRange(payload, 'created_at', 0, Number.MAX_SAFE_INTEGER, errors);
+  requireTimestamp(payload, 'created_at', errors);
   optionalEnum(payload, 'label', ['new_better', 'anchor_better', 'tie'], errors);
   if (payload.label === undefined || payload.label === null) errors.push('label is required');
   optionalEnum(payload, 'comparison_mode', ['global_previous', 'best_incumbent'], errors);
@@ -546,6 +550,65 @@ function optionalNumberRange(payload: JsonRecord, key: string, min: number, max:
     return;
   }
   requireNumberRange(payload, key, min, max, errors);
+}
+
+function timestampValue(payload: JsonRecord, key: string): number | null {
+  const value = payload[key];
+  return typeof value === 'number' && Number.isInteger(value) ? value : null;
+}
+
+function requireTimestamp(payload: JsonRecord, key: string, errors: string[]) {
+  const value = timestampValue(payload, key);
+  const now = Math.floor(Date.now() / 1000);
+  const tooFarInFuture = value !== null
+    && now >= MIN_VALID_EPOCH
+    && value > now + MAX_FUTURE_TIMESTAMP_SECONDS;
+  if (value === null || value < MIN_VALID_EPOCH || tooFarInFuture) {
+    errors.push(`${key} must be a plausible Unix timestamp`);
+  }
+}
+
+function optionalTimestamp(payload: JsonRecord, key: string, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  requireTimestamp(payload, key, errors);
+}
+
+function validateCreatedUpdatedOrder(payload: JsonRecord, errors: string[]) {
+  const createdAt = timestampValue(payload, 'created_at');
+  const updatedAt = timestampValue(payload, 'updated_at');
+  if (createdAt !== null && updatedAt !== null && updatedAt < createdAt) {
+    errors.push('updated_at cannot precede created_at');
+  }
+}
+
+function validateRecommendationTimestampOrder(payload: JsonRecord, errors: string[]) {
+  const createdAt = timestampValue(payload, 'created_at');
+  const updatedAt = timestampValue(payload, 'updated_at');
+  if (createdAt === null || updatedAt === null) {
+    return;
+  }
+  validateCreatedUpdatedOrder(payload, errors);
+
+  const expiresAt = timestampValue(payload, 'expires_at');
+  if (expiresAt !== null && expiresAt < createdAt) {
+    errors.push('expires_at cannot precede created_at');
+  }
+
+  for (const key of [
+    'accepted_at',
+    'ignored_at',
+    'edited_at',
+    'used_at',
+    'superseded_at',
+    'apply_acknowledged_at',
+  ]) {
+    const value = timestampValue(payload, key);
+    if (value !== null && (value < createdAt || value > updatedAt)) {
+      errors.push(`${key} is outside the recommendation lifecycle`);
+    }
+  }
 }
 
 function requirePositiveNumber(payload: JsonRecord, key: string, errors: string[]) {

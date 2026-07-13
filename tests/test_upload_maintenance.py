@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -16,6 +17,8 @@ from espresso_rl.application.upload_validation import (
 )
 from espresso_rl.domain.models import ShotRecord, ShotType, UploadQueueItem, UploadQueueStatus
 
+VALID_TIMESTAMP = 1_700_000_000
+
 
 def payload(**overrides) -> str:
     data = {
@@ -25,7 +28,7 @@ def payload(**overrides) -> str:
         "install_id": "install_1",
         "machine_id": "machine_1",
         "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
-        "timestamp": 1,
+        "timestamp": VALID_TIMESTAMP,
         "dose_in_g": 18.0,
         "dose_target_g": 18.0,
         "target_yield_g": 36.0,
@@ -100,6 +103,25 @@ class UploadMaintenanceTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.errors, [])
+
+    def test_preflight_rejects_noninteger_or_implausible_shot_timestamps(self) -> None:
+        too_old = validate_upload_payload_json(payload(timestamp=1))
+        fractional = validate_upload_payload_json(payload(timestamp=VALID_TIMESTAMP + 0.5))
+
+        self.assertFalse(too_old.ok)
+        self.assertIn("timestamp must be a plausible Unix timestamp", too_old.errors)
+        self.assertFalse(fractional.ok)
+        self.assertIn("timestamp must be a plausible Unix timestamp", fractional.errors)
+
+    def test_preflight_accepts_post_2038_epoch_when_current(self) -> None:
+        post_2038_timestamp = 2_200_000_000
+        with patch(
+            "espresso_rl.application.upload_validation.time.time",
+            return_value=post_2038_timestamp,
+        ):
+            result = validate_upload_payload_json(payload(timestamp=post_2038_timestamp))
+
+        self.assertTrue(result.ok, result.errors)
 
     def test_preflight_accepts_wide_recipe_domain_and_derived_high_ratio(self) -> None:
         result = validate_upload_payload_json(
@@ -176,6 +198,8 @@ class UploadMaintenanceTests(unittest.TestCase):
             "install_id": "install_1",
             "machine_id": "machine_1",
             "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
+            "created_at": VALID_TIMESTAMP,
+            "updated_at": VALID_TIMESTAMP,
             "next_dose_g": 6.0,
             "target_yield_g": 42.0,
             "target_ratio": 7.0,
@@ -190,6 +214,30 @@ class UploadMaintenanceTests(unittest.TestCase):
             "target_ratio must be derived from target_yield_g / next_dose_g",
             rejected.errors,
         )
+
+    def test_recommendation_preflight_enforces_timestamp_lifecycle_order(self) -> None:
+        recommendation = {
+            "event_type": "recommendation_record",
+            "schema_version": 1,
+            "recommendation_id": "rec_1",
+            "install_id": "install_1",
+            "machine_id": "machine_1",
+            "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
+            "created_at": VALID_TIMESTAMP + 100,
+            "updated_at": VALID_TIMESTAMP,
+            "expires_at": VALID_TIMESTAMP - 1,
+            "accepted_at": VALID_TIMESTAMP + 200,
+            "next_dose_g": 18.0,
+            "target_yield_g": 36.0,
+            "target_ratio": 2.0,
+        }
+
+        result = validate_upload_payload_json(json.dumps(recommendation))
+
+        self.assertFalse(result.ok)
+        self.assertIn("updated_at cannot precede created_at", result.errors)
+        self.assertIn("expires_at cannot precede created_at", result.errors)
+        self.assertIn("accepted_at is outside the recommendation lifecycle", result.errors)
 
     def test_preflight_requires_commanded_dose_separately_from_measured_dose(self) -> None:
         result = validate_upload_payload_json(payload(dose_target_g=None))
