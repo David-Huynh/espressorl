@@ -8,10 +8,19 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from espresso_rl.domain.recipe_limits import (
+    RECIPE_DOMAIN_DOSE_MAX_G,
+    RECIPE_DOMAIN_DOSE_MIN_G,
+    RECIPE_DOMAIN_OUTPUT_MAX_G,
+    RECIPE_DOMAIN_OUTPUT_MIN_G,
+)
 from espresso_rl.domain.taste_goal import TasteGoal
 
 SHA256_HEX_LENGTH = 64
 SUPPORTED_SCHEMA_VERSION = 1
+MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
+RATIO_RELATIVE_TOLERANCE = 1e-3
+RATIO_ABSOLUTE_TOLERANCE = 1e-3
 SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:@-]{1,160}$")
 SAFE_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 CONTROL_OR_HTML_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f<>]")
@@ -331,21 +340,27 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _require_taste_goal(payload, errors)
     _optional_bool(payload, "raw_profile_available", errors)
     _optional_hash(payload, "raw_profile_hash", errors)
-    _require_number_range(payload, "timestamp", 0, 9_007_199_254_740_991, errors)
-    _optional_number_range(payload, "dose_in_g", 5, 30, errors)
-    _require_number_range(payload, "dose_target_g", 5, 30, errors)
+    _require_number_range(payload, "timestamp", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_number_range(payload, "dose_in_g", RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors)
+    _require_number_range(payload, "dose_target_g", RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors)
     _optional_bool(payload, "dose_observed", errors)
     _optional_bool(payload, "dose_target_confirmed", errors)
-    _optional_number_range(payload, "beverage_out_g", 0, 120, errors)
+    _optional_number_range(payload, "beverage_out_g", 0, RECIPE_DOMAIN_OUTPUT_MAX_G, errors)
     _optional_string(payload, "beverage_out_observation", 40, errors)
-    _optional_number_range(payload, "predicted_final_beverage_out_g", 0, 120, errors)
+    _optional_number_range(payload, "predicted_final_beverage_out_g", 0, RECIPE_DOMAIN_OUTPUT_MAX_G, errors)
     _optional_bool(payload, "predictive_stop_applied", errors)
     _optional_number_range(payload, "predictive_stop_delay_ms", 0, 10_000, errors)
     _optional_number_range(payload, "predictive_stop_rate_g_per_s", 0, 25, errors)
     _optional_number_range(payload, "predictive_stop_lead_g", 0, 20, errors)
-    _optional_number_range(payload, "brew_ratio", 0.1, 10, errors)
-    _require_number_range(payload, "target_yield_g", 5, 100, errors)
-    _optional_number_range(payload, "target_ratio", 1.2, 3.5, errors)
+    _optional_positive_number(payload, "brew_ratio", errors)
+    _require_number_range(
+        payload,
+        "target_yield_g",
+        RECIPE_DOMAIN_OUTPUT_MIN_G,
+        RECIPE_DOMAIN_OUTPUT_MAX_G,
+        errors,
+    )
+    _optional_positive_number(payload, "target_ratio", errors)
     _optional_number_range(payload, "shot_time_s", 0, 180, errors)
     _optional_enum(
         payload,
@@ -380,9 +395,21 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_number_range(payload, "recommended_grind_delta_steps_from_current", -1000, 1000, errors)
     _optional_number_range(payload, "recommended_grind_delta_um_from_current", -100_000, 100_000, errors)
     _optional_number_range(payload, "recommended_projected_relative_step_from_reference", -10_000, 10_000, errors)
-    _optional_number_range(payload, "recommended_dose_g", 5, 30, errors)
-    _optional_number_range(payload, "recommended_target_yield_g", 5, 100, errors)
-    _optional_number_range(payload, "recommended_target_ratio", 1.2, 3.5, errors)
+    _optional_number_range(
+        payload,
+        "recommended_dose_g",
+        RECIPE_DOMAIN_DOSE_MIN_G,
+        RECIPE_DOMAIN_DOSE_MAX_G,
+        errors,
+    )
+    _optional_number_range(
+        payload,
+        "recommended_target_yield_g",
+        RECIPE_DOMAIN_OUTPUT_MIN_G,
+        RECIPE_DOMAIN_OUTPUT_MAX_G,
+        errors,
+    )
+    _optional_positive_number(payload, "recommended_target_ratio", errors)
     _optional_enum(payload, "recommendation_decision", {"accepted", "edited", "ignored", "dismissed", "unknown"}, errors)
     _optional_enum(payload, "recommendation_followed", {"followed", "partially_followed", "not_followed", "unknown"}, errors)
     _optional_bool(payload, "exclude_from_local_optimization", errors)
@@ -417,8 +444,8 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     _optional_pump_target_mode_profile(payload, "pump_target_mode_profile", errors)
     _optional_fixed_cadence_sequence(payload.get("fixed_cadence_sequence"), errors)
     _optional_enum(payload, "shot_end_state", {"finished", "manual_or_interrupted", "unknown"}, errors)
-    _optional_number_range(payload, "created_at", 0, 9_007_199_254_740_991, errors)
-    _optional_number_range(payload, "updated_at", 0, 9_007_199_254_740_991, errors)
+    _optional_number_range(payload, "created_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_number_range(payload, "updated_at", 0, MAX_SAFE_JSON_INTEGER, errors)
     _optional_enum(
         payload,
         "shot_type",
@@ -431,6 +458,7 @@ def _validate_shot_record(payload: dict[str, Any], errors: list[str]) -> None:
     profile = payload.get("profile_resampled")
     if profile is not None:
         _validate_profile_resampled(profile, errors)
+    _validate_shot_ratios(payload, errors)
 
 
 def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) -> None:
@@ -460,9 +488,15 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
     _optional_number_range(payload, "current_absolute_step", -10_000, 10_000, errors)
     _optional_number_range(payload, "absolute_reference_step", -10_000, 10_000, errors)
     _optional_number_range(payload, "projected_absolute_step", -10_000, 10_000, errors)
-    _require_number_range(payload, "next_dose_g", 5, 30, errors)
-    _require_number_range(payload, "target_yield_g", 5, 100, errors)
-    _require_number_range(payload, "target_ratio", 1.2, 3.5, errors)
+    _require_number_range(payload, "next_dose_g", RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors)
+    _require_number_range(
+        payload,
+        "target_yield_g",
+        RECIPE_DOMAIN_OUTPUT_MIN_G,
+        RECIPE_DOMAIN_OUTPUT_MAX_G,
+        errors,
+    )
+    _require_positive_number(payload, "target_ratio", errors)
     _optional_number_range(payload, "grind_delta_um_from_current", -100_000, 100_000, errors)
     _optional_enum(
         payload,
@@ -477,14 +511,14 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
     _optional_string(payload, "reason", 500, errors)
     _optional_enum(payload, "status", {"pending", "shown", "accepted", "edited", "ignored", "expired", "used", "superseded"}, errors)
     _optional_int_range(payload, "shown_count", 0, 1_000_000, errors)
-    _optional_number_range(payload, "created_at", 0, 9_007_199_254_740_991, errors)
-    _optional_number_range(payload, "updated_at", 0, 9_007_199_254_740_991, errors)
-    _optional_number_range(payload, "expires_at", 0, 9_007_199_254_740_991, errors)
-    _optional_number_range(payload, "accepted_at", 0, 9_007_199_254_740_991, errors)
-    _optional_number_range(payload, "ignored_at", 0, 9_007_199_254_740_991, errors)
-    _optional_number_range(payload, "edited_at", 0, 9_007_199_254_740_991, errors)
-    _optional_number_range(payload, "used_at", 0, 9_007_199_254_740_991, errors)
-    _optional_number_range(payload, "superseded_at", 0, 9_007_199_254_740_991, errors)
+    _optional_number_range(payload, "created_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_number_range(payload, "updated_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_number_range(payload, "expires_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_number_range(payload, "accepted_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_number_range(payload, "ignored_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_number_range(payload, "edited_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_number_range(payload, "used_at", 0, MAX_SAFE_JSON_INTEGER, errors)
+    _optional_number_range(payload, "superseded_at", 0, MAX_SAFE_JSON_INTEGER, errors)
     _optional_identifier(payload, "source_shot_id", errors)
     _optional_identifier(payload, "optimization_run_id", errors)
     _optional_identifier(payload, "comparison_anchor_shot_id", errors)
@@ -510,10 +544,11 @@ def _validate_recommendation_record(payload: dict[str, Any], errors: list[str]) 
         if payload.get("comparison_mode") != expected_comparison_mode:
             errors.append("CPBO recommendation comparison_mode does not match mode")
     _optional_enum(payload, "apply_status", {"unknown", "applied", "partially_applied", "manual_required", "failed"}, errors)
-    _optional_number_range(payload, "apply_acknowledged_at", 0, 9_007_199_254_740_991, errors)
+    _optional_number_range(payload, "apply_acknowledged_at", 0, MAX_SAFE_JSON_INTEGER, errors)
     _optional_object(payload, "applied_fields", errors)
     _optional_string_list(payload, "manual_fields", errors)
     _optional_string(payload, "apply_error", 500, errors)
+    _validate_derived_ratio(payload, "target_ratio", "target_yield_g", "next_dose_g", errors)
 
 
 def _validate_comparison_record(payload: dict[str, Any], errors: list[str]) -> None:
@@ -532,7 +567,7 @@ def _validate_comparison_record(payload: dict[str, Any], errors: list[str]) -> N
     _optional_string(payload, "profile_id", 120, errors)
     _optional_hash(payload, "raw_profile_hash", errors)
     _require_taste_goal(payload, errors)
-    _require_number_range(payload, "created_at", 0, 9_007_199_254_740_991, errors)
+    _require_number_range(payload, "created_at", 0, MAX_SAFE_JSON_INTEGER, errors)
     _optional_enum(payload, "label", {"new_better", "anchor_better", "tie"}, errors)
     if payload.get("label") is None:
         errors.append("label is required")
@@ -559,7 +594,7 @@ def _validate_profile_resampled(profile: Any, errors: list[str]) -> None:
         (0, 15, "target_pressure"),
         (0, 20, "pump_flow"),
         (0, 20, "target_flow"),
-        (-1, 120, "weight"),
+        (-1, RECIPE_DOMAIN_OUTPUT_MAX_G, "weight"),
     ]
     if not isinstance(profile, list) or len(profile) != 5:
         errors.append("profile_resampled must have 5 channels")
@@ -621,7 +656,7 @@ def _optional_fixed_cadence_sequence(value: object, errors: list[str]) -> None:
         "pump_flow_ml_s": (0.0, 20.0),
         "pump_flow_target_ml_s": (0.0, 20.0),
         "beverage_flow_g_s": (0.0, 20.0),
-        "weight_g": (-1.0, 120.0),
+        "weight_g": (-1.0, RECIPE_DOMAIN_OUTPUT_MAX_G),
         "temperature_c": (0.0, 160.0),
         "temperature_target_c": (0.0, 160.0),
     }
@@ -710,6 +745,80 @@ def _optional_number_range(
     if payload.get(key) is None:
         return
     _require_number_range(payload, key, minimum, maximum, errors)
+
+
+def _require_positive_number(payload: dict[str, Any], key: str, errors: list[str]) -> None:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        errors.append(f"{key} must be positive and finite")
+        return
+    if not math.isfinite(float(value)) or float(value) <= 0:
+        errors.append(f"{key} must be positive and finite")
+
+
+def _optional_positive_number(payload: dict[str, Any], key: str, errors: list[str]) -> None:
+    if payload.get(key) is None:
+        return
+    _require_positive_number(payload, key, errors)
+
+
+def _positive_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
+def _validate_derived_ratio(
+    payload: dict[str, Any],
+    ratio_key: str,
+    numerator_key: str,
+    denominator_key: str,
+    errors: list[str],
+) -> None:
+    ratio = payload.get(ratio_key)
+    if ratio is None:
+        return
+    parsed_ratio = _positive_float(ratio)
+    numerator = _positive_float(payload.get(numerator_key))
+    denominator = _positive_float(payload.get(denominator_key))
+    if numerator is None or denominator is None:
+        errors.append(f"{ratio_key} requires positive {numerator_key} and {denominator_key}")
+        return
+    if parsed_ratio is None:
+        return
+    expected = numerator / denominator
+    if not math.isclose(
+        parsed_ratio,
+        expected,
+        rel_tol=RATIO_RELATIVE_TOLERANCE,
+        abs_tol=RATIO_ABSOLUTE_TOLERANCE,
+    ):
+        errors.append(f"{ratio_key} must be derived from {numerator_key} / {denominator_key}")
+
+
+def _validate_shot_ratios(payload: dict[str, Any], errors: list[str]) -> None:
+    _validate_derived_ratio(payload, "target_ratio", "target_yield_g", "dose_target_g", errors)
+    _validate_derived_ratio(
+        payload,
+        "recommended_target_ratio",
+        "recommended_target_yield_g",
+        "recommended_dose_g",
+        errors,
+    )
+    if payload.get("brew_ratio") is None:
+        return
+    observation_flags_missing = payload.get("dose_observed") is None and payload.get("dose_target_confirmed") is None
+    if payload.get("dose_observed") is True and _positive_float(payload.get("dose_in_g")) is not None:
+        denominator_key = "dose_in_g"
+    elif payload.get("dose_target_confirmed") is True:
+        denominator_key = "dose_target_g"
+    elif observation_flags_missing and _positive_float(payload.get("dose_in_g")) is not None:
+        denominator_key = "dose_in_g"
+    else:
+        errors.append("brew_ratio requires an observed or confirmed dose")
+        return
+    _validate_derived_ratio(payload, "brew_ratio", "beverage_out_g", denominator_key, errors)
 
 
 def _optional_int_range(

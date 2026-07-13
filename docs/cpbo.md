@@ -307,6 +307,13 @@ is derived from target output divided by dose and is not an independent search
 coordinate or feasibility bound. All nested fields are strictly allowlisted;
 unknown configuration keys fail startup.
 
+Advanced domains remain inside a broad data-integrity envelope: grind radius
+0.1-1,000 steps, dose 0.1-100 g, and target output 0.1-1,000 g. These limits
+reject malformed or abusive inputs at trust boundaries; they are not the
+optimizer's active search region or machine-safety claims. Upload adapters
+validate any supplied ratio against output divided by dose instead of imposing
+a separate ratio range.
+
 Each run snapshots and fingerprints its recipe domain. A changed domain ends
 the incompatible active run before a new normalized model is initialized.
 Canonical events and offline datasets retain physical units; normalized

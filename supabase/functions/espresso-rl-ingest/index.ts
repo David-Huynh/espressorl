@@ -7,6 +7,12 @@ const INSTALL_MINUTE_LIMIT = 30;
 const INSTALL_DAY_LIMIT = 500;
 const IP_MINUTE_LIMIT = 30;
 const SUPPORTED_SCHEMA_VERSION = 1;
+const RECIPE_DOMAIN_DOSE_MIN_G = 0.1;
+const RECIPE_DOMAIN_DOSE_MAX_G = 100;
+const RECIPE_DOMAIN_OUTPUT_MIN_G = 0.1;
+const RECIPE_DOMAIN_OUTPUT_MAX_G = 1000;
+const RATIO_RELATIVE_TOLERANCE = 1e-3;
+const RATIO_ABSOLUTE_TOLERANCE = 1e-3;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9_.:@-]{1,160}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
 const UNSAFE_TEXT = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f<>]/;
@@ -292,20 +298,20 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalString(payload, 'grinder_context_id', 120, errors);
   requireTasteGoal(payload, errors);
   requireNumberRange(payload, 'timestamp', 0, Number.MAX_SAFE_INTEGER, errors);
-  optionalNumberRange(payload, 'dose_in_g', 5, 30, errors);
-  requireNumberRange(payload, 'dose_target_g', 5, 30, errors);
+  optionalNumberRange(payload, 'dose_in_g', RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors);
+  requireNumberRange(payload, 'dose_target_g', RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors);
   optionalBoolean(payload, 'dose_observed', errors);
   optionalBoolean(payload, 'dose_target_confirmed', errors);
-  optionalNumberRange(payload, 'beverage_out_g', 0, 120, errors);
+  optionalNumberRange(payload, 'beverage_out_g', 0, RECIPE_DOMAIN_OUTPUT_MAX_G, errors);
   optionalString(payload, 'beverage_out_observation', 40, errors);
-  optionalNumberRange(payload, 'predicted_final_beverage_out_g', 0, 120, errors);
+  optionalNumberRange(payload, 'predicted_final_beverage_out_g', 0, RECIPE_DOMAIN_OUTPUT_MAX_G, errors);
   optionalBoolean(payload, 'predictive_stop_applied', errors);
   optionalNumberRange(payload, 'predictive_stop_delay_ms', 0, 10000, errors);
   optionalNumberRange(payload, 'predictive_stop_rate_g_per_s', 0, 25, errors);
   optionalNumberRange(payload, 'predictive_stop_lead_g', 0, 20, errors);
-  optionalNumberRange(payload, 'brew_ratio', 0.1, 10, errors);
-  requireNumberRange(payload, 'target_yield_g', 5, 100, errors);
-  optionalNumberRange(payload, 'target_ratio', 1.2, 3.5, errors);
+  optionalPositiveNumber(payload, 'brew_ratio', errors);
+  requireNumberRange(payload, 'target_yield_g', RECIPE_DOMAIN_OUTPUT_MIN_G, RECIPE_DOMAIN_OUTPUT_MAX_G, errors);
+  optionalPositiveNumber(payload, 'target_ratio', errors);
   optionalNumberRange(payload, 'shot_time_s', 0, 180, errors);
   optionalBoolean(payload, 'raw_profile_available', errors);
   optionalSha256(payload, 'raw_profile_hash', errors);
@@ -323,9 +329,9 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
   optionalNumberRange(payload, 'recommended_grind_delta_steps_from_current', -1000, 1000, errors);
   optionalNumberRange(payload, 'recommended_grind_delta_um_from_current', -100_000, 100_000, errors);
   optionalNumberRange(payload, 'recommended_projected_relative_step_from_reference', -10_000, 10_000, errors);
-  optionalNumberRange(payload, 'recommended_dose_g', 5, 30, errors);
-  optionalNumberRange(payload, 'recommended_target_yield_g', 5, 100, errors);
-  optionalNumberRange(payload, 'recommended_target_ratio', 1.2, 3.5, errors);
+  optionalNumberRange(payload, 'recommended_dose_g', RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors);
+  optionalNumberRange(payload, 'recommended_target_yield_g', RECIPE_DOMAIN_OUTPUT_MIN_G, RECIPE_DOMAIN_OUTPUT_MAX_G, errors);
+  optionalPositiveNumber(payload, 'recommended_target_ratio', errors);
   optionalEnum(payload, 'recommendation_decision', ['accepted', 'edited', 'ignored', 'dismissed', 'unknown'], errors);
   optionalEnum(payload, 'recommendation_followed', ['followed', 'partially_followed', 'not_followed', 'unknown'], errors);
   optionalEnum(payload, 'shot_type', ['espresso', 'utility_flush', 'cleaning', 'calibration', 'unknown'], errors);
@@ -375,6 +381,7 @@ function validateShotRecord(payload: JsonRecord, errors: string[]) {
       validateProfileResampled(profile, errors);
     }
   }
+  validateShotRatios(payload, errors);
 }
 
 function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
@@ -402,9 +409,9 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   optionalNumberRange(payload, 'current_absolute_step', -10_000, 10_000, errors);
   optionalNumberRange(payload, 'absolute_reference_step', -10_000, 10_000, errors);
   optionalNumberRange(payload, 'projected_absolute_step', -10_000, 10_000, errors);
-  requireNumberRange(payload, 'next_dose_g', 5, 30, errors);
-  requireNumberRange(payload, 'target_yield_g', 5, 100, errors);
-  requireNumberRange(payload, 'target_ratio', 1.2, 3.5, errors);
+  requireNumberRange(payload, 'next_dose_g', RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G, errors);
+  requireNumberRange(payload, 'target_yield_g', RECIPE_DOMAIN_OUTPUT_MIN_G, RECIPE_DOMAIN_OUTPUT_MAX_G, errors);
+  requirePositiveNumber(payload, 'target_ratio', errors);
   optionalEnum(payload, 'mode', ['cpbo_global_previous', 'cpbo_best_incumbent'], errors);
   optionalNumberRange(payload, 'confidence', 0, 1, errors);
   optionalString(payload, 'reason', 500, errors);
@@ -438,6 +445,7 @@ function validateRecommendationRecord(payload: JsonRecord, errors: string[]) {
   optionalObject(payload, 'applied_fields', errors);
   optionalStringList(payload, 'manual_fields', errors);
   optionalString(payload, 'apply_error', 500, errors);
+  validateDerivedRatio(payload, 'target_ratio', 'target_yield_g', 'next_dose_g', errors);
 }
 
 function validateComparisonRecord(payload: JsonRecord, errors: string[]) {
@@ -538,6 +546,80 @@ function optionalNumberRange(payload: JsonRecord, key: string, min: number, max:
     return;
   }
   requireNumberRange(payload, key, min, max, errors);
+}
+
+function requirePositiveNumber(payload: JsonRecord, key: string, errors: string[]) {
+  const value = payload[key];
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    errors.push(`${key} must be positive and finite`);
+  }
+}
+
+function optionalPositiveNumber(payload: JsonRecord, key: string, errors: string[]) {
+  if (payload[key] === undefined || payload[key] === null) {
+    return;
+  }
+  requirePositiveNumber(payload, key, errors);
+}
+
+function positiveNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function validateDerivedRatio(
+  payload: JsonRecord,
+  ratioKey: string,
+  numeratorKey: string,
+  denominatorKey: string,
+  errors: string[],
+) {
+  if (payload[ratioKey] === undefined || payload[ratioKey] === null) {
+    return;
+  }
+  const ratio = positiveNumber(payload[ratioKey]);
+  const numerator = positiveNumber(payload[numeratorKey]);
+  const denominator = positiveNumber(payload[denominatorKey]);
+  if (numerator === null || denominator === null) {
+    errors.push(`${ratioKey} requires positive ${numeratorKey} and ${denominatorKey}`);
+    return;
+  }
+  if (ratio === null) {
+    return;
+  }
+  const expected = numerator / denominator;
+  const tolerance = Math.max(RATIO_ABSOLUTE_TOLERANCE, Math.abs(expected) * RATIO_RELATIVE_TOLERANCE);
+  if (Math.abs(ratio - expected) > tolerance) {
+    errors.push(`${ratioKey} must be derived from ${numeratorKey} / ${denominatorKey}`);
+  }
+}
+
+function validateShotRatios(payload: JsonRecord, errors: string[]) {
+  validateDerivedRatio(payload, 'target_ratio', 'target_yield_g', 'dose_target_g', errors);
+  validateDerivedRatio(
+    payload,
+    'recommended_target_ratio',
+    'recommended_target_yield_g',
+    'recommended_dose_g',
+    errors,
+  );
+  if (payload.brew_ratio === undefined || payload.brew_ratio === null) {
+    return;
+  }
+  const observationFlagsMissing = (payload.dose_observed === undefined || payload.dose_observed === null) &&
+    (payload.dose_target_confirmed === undefined || payload.dose_target_confirmed === null);
+  let denominatorKey: string | null = null;
+  if (payload.dose_observed === true && positiveNumber(payload.dose_in_g) !== null) {
+    denominatorKey = 'dose_in_g';
+  } else if (payload.dose_target_confirmed === true) {
+    denominatorKey = 'dose_target_g';
+  } else if (observationFlagsMissing && positiveNumber(payload.dose_in_g) !== null) {
+    denominatorKey = 'dose_in_g';
+  }
+  if (denominatorKey === null) {
+    errors.push('brew_ratio requires an observed or confirmed dose');
+    return;
+  }
+  validateDerivedRatio(payload, 'brew_ratio', 'beverage_out_g', denominatorKey, errors);
 }
 
 function optionalBoolean(payload: JsonRecord, key: string, errors: string[]) {
@@ -708,7 +790,7 @@ function validateProfileResampled(profile: unknown[], errors: string[]) {
     [0, 15, 'target_pressure'],
     [0, 20, 'pump_flow'],
     [0, 20, 'target_flow'],
-    [-1, 120, 'weight'],
+    [-1, RECIPE_DOMAIN_OUTPUT_MAX_G, 'weight'],
   ];
   for (let channelIndex = 0; channelIndex < 5; channelIndex += 1) {
     const channel = profile[channelIndex];
@@ -777,7 +859,7 @@ function optionalFixedCadenceSequence(value: unknown, errors: string[]) {
     pump_flow_ml_s: [0, 20],
     pump_flow_target_ml_s: [0, 20],
     beverage_flow_g_s: [0, 20],
-    weight_g: [-1, 120],
+    weight_g: [-1, RECIPE_DOMAIN_OUTPUT_MAX_G],
     temperature_c: [0, 160],
     temperature_target_c: [0, 160],
   };

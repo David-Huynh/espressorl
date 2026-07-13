@@ -11,6 +11,7 @@ from espresso_rl.domain.cpbo import (
     PreferenceComparison,
     PreferenceLabel,
     PreferenceShot,
+    RecipeDomain,
     RecipeParameter,
     RecipePoint,
     RecipeSpace,
@@ -73,12 +74,22 @@ class RecipeSpaceTests(unittest.TestCase):
         self.assertEqual(first.target_output_g, 36.0)
         self.assertAlmostEqual(first.brew_ratio, 2.0)
 
-    def test_brew_ratio_is_derived_and_infeasible_ratio_is_rejected(self) -> None:
+    def test_brew_ratio_is_derived_without_an_independent_ratio_bound(self) -> None:
         space = recipe_space(GrinderStepDirection.HIGHER_IS_FINER)
         point = RecipePoint.create("run", space, 5.0, 18.0, 38.0, created_at=1)
         self.assertAlmostEqual(point.brew_ratio, 38.0 / 18.0)
-        with self.assertRaisesRegex(ValueError, "brew ratio"):
-            RecipePoint.create("run", space, 5.0, 20.0, 20.0, created_at=1)
+        one_to_one = RecipePoint.create("run", space, 5.0, 20.0, 20.0, created_at=1)
+        self.assertEqual(one_to_one.brew_ratio, 1.0)
+
+    def test_recipe_domain_accepts_wide_defaults_but_rejects_abusive_extremes(self) -> None:
+        domain = RecipeDomain()
+        self.assertEqual(domain.dose_min_g, 6.0)
+        self.assertEqual(domain.dose_max_g, 30.0)
+        self.assertEqual(domain.target_output_max_g, 250.0)
+        with self.assertRaisesRegex(ValueError, "integrity envelope"):
+            RecipeDomain(dose_max_g=101.0)
+        with self.assertRaisesRegex(ValueError, "integrity envelope"):
+            RecipeDomain(target_output_max_g=1_001.0)
 
     def test_context_fingerprint_partitions_material_context(self) -> None:
         base = OptimizationRunContext("install", "machine", "bean", "grinder", "profile")

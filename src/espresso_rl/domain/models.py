@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from espresso_rl.domain.recipe_limits import RECIPE_DOMAIN_OUTPUT_MAX_G
 from espresso_rl.domain.taste_goal import TasteGoal
 
 
@@ -317,7 +318,7 @@ class FixedCadenceShotSequence:
             "pump_flow_ml_s": (0.0, 20.0),
             "pump_flow_target_ml_s": (0.0, 20.0),
             "beverage_flow_g_s": (0.0, 20.0),
-            "weight_g": (-1.0, 120.0),
+            "weight_g": (-1.0, RECIPE_DOMAIN_OUTPUT_MAX_G),
             "temperature_c": (0.0, 160.0),
             "temperature_target_c": (0.0, 160.0),
         }

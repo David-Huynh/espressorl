@@ -101,6 +101,96 @@ class UploadMaintenanceTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.errors, [])
 
+    def test_preflight_accepts_wide_recipe_domain_and_derived_high_ratio(self) -> None:
+        result = validate_upload_payload_json(
+            payload(
+                dose_in_g=6.0,
+                dose_target_g=6.0,
+                target_yield_g=42.0,
+                target_ratio=7.0,
+                beverage_out_g=42.0,
+            )
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.errors, [])
+
+    def test_preflight_rejects_ratio_that_disagrees_with_dose_and_yield(self) -> None:
+        result = validate_upload_payload_json(
+            payload(dose_target_g=6.0, target_yield_g=42.0, target_ratio=2.0)
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn(
+            "target_ratio must be derived from target_yield_g / dose_target_g",
+            result.errors,
+        )
+
+    def test_brew_ratio_uses_confirmed_target_when_dose_was_not_measured(self) -> None:
+        accepted = validate_upload_payload_json(
+            payload(
+                dose_in_g=17.0,
+                dose_target_g=18.0,
+                dose_observed=False,
+                dose_target_confirmed=True,
+                beverage_out_g=36.0,
+                brew_ratio=2.0,
+            )
+        )
+        rejected = validate_upload_payload_json(
+            payload(
+                dose_in_g=17.0,
+                dose_target_g=18.0,
+                dose_observed=False,
+                dose_target_confirmed=True,
+                beverage_out_g=36.0,
+                brew_ratio=36.0 / 17.0,
+            )
+        )
+
+        self.assertTrue(accepted.ok)
+        self.assertFalse(rejected.ok)
+        self.assertIn(
+            "brew_ratio must be derived from beverage_out_g / dose_target_g",
+            rejected.errors,
+        )
+
+    def test_preflight_rejects_recipe_mass_outside_integrity_envelope(self) -> None:
+        too_much_dose = validate_upload_payload_json(
+            payload(dose_in_g=101.0, dose_target_g=101.0)
+        )
+        too_much_output = validate_upload_payload_json(
+            payload(target_yield_g=1_001.0, target_ratio=1_001.0 / 18.0)
+        )
+
+        self.assertFalse(too_much_dose.ok)
+        self.assertIn("dose_target_g out of range", too_much_dose.errors)
+        self.assertFalse(too_much_output.ok)
+        self.assertIn("target_yield_g out of range", too_much_output.errors)
+
+    def test_recommendation_preflight_accepts_high_ratio_and_rejects_mismatch(self) -> None:
+        recommendation = {
+            "event_type": "recommendation_record",
+            "schema_version": 1,
+            "recommendation_id": "rec_1",
+            "install_id": "install_1",
+            "machine_id": "machine_1",
+            "taste_goal": {"schema_version": 1, "mode": "balanced", "targets": {}},
+            "next_dose_g": 6.0,
+            "target_yield_g": 42.0,
+            "target_ratio": 7.0,
+        }
+        accepted = validate_upload_payload_json(json.dumps(recommendation))
+        recommendation["target_ratio"] = 2.0
+        rejected = validate_upload_payload_json(json.dumps(recommendation))
+
+        self.assertTrue(accepted.ok)
+        self.assertFalse(rejected.ok)
+        self.assertIn(
+            "target_ratio must be derived from target_yield_g / next_dose_g",
+            rejected.errors,
+        )
+
     def test_preflight_requires_commanded_dose_separately_from_measured_dose(self) -> None:
         result = validate_upload_payload_json(payload(dose_target_g=None))
 

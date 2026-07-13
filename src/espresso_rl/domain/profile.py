@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .recipe_limits import RECIPE_DOMAIN_OUTPUT_MAX_G
 from .events import ShotProfileEvent
 from .models import (
     FIXED_CADENCE_MAX_STEPS,
@@ -120,7 +121,7 @@ def build_fixed_cadence_sequence(
         "pump_flow_ml_s": (event.pump_flow, FLOW_RANGE),
         "pump_flow_target_ml_s": (event.target_flow, FLOW_RANGE),
         "beverage_flow_g_s": (event.beverage_flow, FLOW_RANGE),
-        "weight_g": (event.weight, (-1.0, 120.0)),
+        "weight_g": (event.weight, (-1.0, RECIPE_DOMAIN_OUTPUT_MAX_G)),
         "temperature_c": (event.temperature, TEMPERATURE_RANGE),
         "temperature_target_c": (event.target_temperature, TEMPERATURE_RANGE),
     }

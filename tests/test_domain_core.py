@@ -65,6 +65,25 @@ class DomainCoreTests(unittest.TestCase):
         self.assertIsNotNone(sequence)
         self.assertEqual(sequence.sample_interval_ms, 250)  # type: ignore[union-attr]
 
+    def test_fixed_cadence_accepts_wide_output_without_unbounded_weight(self) -> None:
+        control = {
+            "time_ms": [0, 250, 500],
+            "temperature": [90.0, 90.5, 91.0],
+            "target_temperature": [91.0, 91.0, 91.0],
+            "pump_target_mode": [1, 1, 2],
+            "valve_open": [True, True, False],
+        }
+        sequence = build_fixed_cadence_sequence(
+            _event(weight=[0.0, 125.0, 250.0], **control)
+        )
+        rejected = build_fixed_cadence_sequence(
+            _event(weight=[0.0, 500.0, 1_001.0], **control)
+        )
+
+        self.assertIsNotNone(sequence)
+        self.assertEqual(float(sequence.weight_g[-1]), 250.0)  # type: ignore[union-attr]
+        self.assertIsNone(rejected)
+
     def test_invalid_pump_flow_is_masked_without_losing_beverage_flow(self) -> None:
         shot = _event(pump_flow=[0.0, 500.0, 500.0])
         quality = resample_profile_with_quality(shot)

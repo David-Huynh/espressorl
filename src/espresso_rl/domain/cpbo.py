@@ -10,6 +10,14 @@ from enum import Enum
 from typing import Any, Mapping, Sequence
 
 from espresso_rl.domain.models import GrinderStepDirection
+from espresso_rl.domain.recipe_limits import (
+    RECIPE_DOMAIN_DOSE_MAX_G,
+    RECIPE_DOMAIN_DOSE_MIN_G,
+    RECIPE_DOMAIN_GRIND_RADIUS_MAX_STEPS,
+    RECIPE_DOMAIN_GRIND_RADIUS_MIN_STEPS,
+    RECIPE_DOMAIN_OUTPUT_MAX_G,
+    RECIPE_DOMAIN_OUTPUT_MIN_G,
+)
 from espresso_rl.domain.taste_goal import TasteGoal
 
 
@@ -62,6 +70,31 @@ class RecipeDomain:
             raise ValueError("recipe domain values must be numeric")
         if not all(math.isfinite(float(value)) and float(value) > 0 for value in values):
             raise ValueError("recipe domain values must be positive and finite")
+        bounded_values = (
+            (
+                "grind_radius_steps",
+                self.grind_radius_steps,
+                RECIPE_DOMAIN_GRIND_RADIUS_MIN_STEPS,
+                RECIPE_DOMAIN_GRIND_RADIUS_MAX_STEPS,
+            ),
+            ("dose_min_g", self.dose_min_g, RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G),
+            ("dose_max_g", self.dose_max_g, RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G),
+            (
+                "target_output_min_g",
+                self.target_output_min_g,
+                RECIPE_DOMAIN_OUTPUT_MIN_G,
+                RECIPE_DOMAIN_OUTPUT_MAX_G,
+            ),
+            (
+                "target_output_max_g",
+                self.target_output_max_g,
+                RECIPE_DOMAIN_OUTPUT_MIN_G,
+                RECIPE_DOMAIN_OUTPUT_MAX_G,
+            ),
+        )
+        for name, value, minimum, maximum in bounded_values:
+            if not minimum <= float(value) <= maximum:
+                raise ValueError(f"recipe domain {name} is outside the integrity envelope")
         if self.dose_max_g <= self.dose_min_g:
             raise ValueError("recipe domain dose_max_g must exceed dose_min_g")
         if self.target_output_max_g <= self.target_output_min_g:
