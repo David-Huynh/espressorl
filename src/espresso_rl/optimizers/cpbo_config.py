@@ -6,7 +6,7 @@ import math
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Mapping
 
-from espresso_rl.domain.cpbo import ComparisonMode
+from espresso_rl.domain.cpbo import ComparisonMode, RecipeDomain
 
 
 @dataclass(frozen=True)
@@ -203,7 +203,7 @@ class CPBOConfig:
     trust_region: TrustRegionConfig = field(default_factory=TrustRegionConfig)
     physics: PhysicsProxyConfig = field(default_factory=PhysicsProxyConfig)
     trace: TraceSurrogateConfig = field(default_factory=TraceSurrogateConfig)
-    grind_domain_radius_steps: float = 10.0
+    recipe_domain: RecipeDomain = field(default_factory=RecipeDomain)
     stepped_grind_resolution: float = 1.0
     stepless_grind_resolution: float = 0.1
     dose_resolution_g: float = 0.1
@@ -221,7 +221,6 @@ class CPBOConfig:
         if self.random_seed < 0 or self.checkpoint_max_bytes < 1:
             raise ValueError("CPBO seed and checkpoint limit are invalid")
         for name in (
-            "grind_domain_radius_steps",
             "stepped_grind_resolution",
             "stepless_grind_resolution",
             "dose_resolution_g",
@@ -240,6 +239,7 @@ class CPBOConfig:
     def effective_configuration_version(self) -> str:
         payload = self.to_dict()
         declared_version = str(payload.pop("configuration_version"))
+        payload.pop("recipe_domain")
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
         digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
         return f"{declared_version}:{digest}"
@@ -248,7 +248,7 @@ class CPBOConfig:
 def application_cpbo_config() -> CPBOConfig:
     """Runtime defaults calibrated for espresso latency, not paper reproduction."""
 
-    return CPBOConfig()
+    return CPBOConfig(trust_region=TrustRegionConfig(initial_length=0.1))
 
 
 def paper_fidelity_cpbo_config() -> CPBOConfig:
@@ -302,6 +302,7 @@ def cpbo_config_from_dict(value: Mapping[str, Any] | None) -> CPBOConfig:
         "trust_region": TrustRegionConfig,
         "physics": PhysicsProxyConfig,
         "trace": TraceSurrogateConfig,
+        "recipe_domain": RecipeDomain,
     }
     for key, raw in value.items():
         if key in nested:

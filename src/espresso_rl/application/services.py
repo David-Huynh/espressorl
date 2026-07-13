@@ -631,12 +631,7 @@ class EspressoRLService:
             recommendation.next_dose_g = float(edited_fields["next_dose_g"])
         if "target_yield_g" in edited_fields:
             recommendation.target_yield_g = float(edited_fields["target_yield_g"])
-        if "target_ratio" in edited_fields:
-            recommendation.target_ratio = float(edited_fields["target_ratio"])
-        else:
-            recommendation.target_ratio = (
-                recommendation.target_yield_g / recommendation.next_dose_g
-            )
+        recommendation.target_ratio = recommendation.target_yield_g / recommendation.next_dose_g
 
     def _store_shot(
         self,

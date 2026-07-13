@@ -16,6 +16,7 @@ from espresso_rl.domain.taste_goal import TasteGoal
 CPBO_MODEL_VERSION = "cpbo_jnd_mes_v1"
 CPBO_CONFIGURATION_VERSION = "cpbo_config_v1"
 CPBO_FEATURE_VERSION = "espresso_physics_trace_v1"
+RECIPE_DOMAIN_VERSION = "recipe_domain_v1"
 _NORMALIZED_DIMENSION = 3
 _FLOAT_TOLERANCE = 1e-9
 
@@ -40,13 +41,87 @@ class PhysicalShotStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class RecipeDomain:
+    """Physical search limits used to normalize one CPBO optimization run."""
+
+    grind_radius_steps: float = 10.0
+    dose_min_g: float = 6.0
+    dose_max_g: float = 30.0
+    target_output_min_g: float = 5.0
+    target_output_max_g: float = 250.0
+
+    def __post_init__(self) -> None:
+        values = (
+            self.grind_radius_steps,
+            self.dose_min_g,
+            self.dose_max_g,
+            self.target_output_min_g,
+            self.target_output_max_g,
+        )
+        if any(isinstance(value, bool) for value in values):
+            raise ValueError("recipe domain values must be numeric")
+        if not all(math.isfinite(float(value)) and float(value) > 0 for value in values):
+            raise ValueError("recipe domain values must be positive and finite")
+        if self.dose_max_g <= self.dose_min_g:
+            raise ValueError("recipe domain dose_max_g must exceed dose_min_g")
+        if self.target_output_max_g <= self.target_output_min_g:
+            raise ValueError(
+                "recipe domain target_output_max_g must exceed target_output_min_g"
+            )
+
+    def to_dict(self) -> dict[str, float]:
+        return {
+            "grind_radius_steps": float(self.grind_radius_steps),
+            "dose_min_g": float(self.dose_min_g),
+            "dose_max_g": float(self.dose_max_g),
+            "target_output_min_g": float(self.target_output_min_g),
+            "target_output_max_g": float(self.target_output_max_g),
+        }
+
+    @property
+    def effective_version(self) -> str:
+        encoded = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+        return f"{RECIPE_DOMAIN_VERSION}:{digest}"
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "RecipeDomain":
+        if not isinstance(value, Mapping):
+            raise ValueError("recipe domain must be an object")
+        allowed = {
+            "grind_radius_steps",
+            "dose_min_g",
+            "dose_max_g",
+            "target_output_min_g",
+            "target_output_max_g",
+        }
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise ValueError(f"unknown recipe domain fields: {', '.join(unknown)}")
+        if any(isinstance(value.get(name), bool) for name in value):
+            raise ValueError("recipe domain values must be numeric")
+        defaults = cls()
+        return cls(
+            grind_radius_steps=float(value.get("grind_radius_steps", defaults.grind_radius_steps)),
+            dose_min_g=float(value.get("dose_min_g", defaults.dose_min_g)),
+            dose_max_g=float(value.get("dose_max_g", defaults.dose_max_g)),
+            target_output_min_g=float(
+                value.get("target_output_min_g", defaults.target_output_min_g)
+            ),
+            target_output_max_g=float(
+                value.get("target_output_max_g", defaults.target_output_max_g)
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class RecipeParameter:
     name: str
     physical_min: float
     physical_max: float
     resolution: float
     unit: str
-    safety_constraints: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -97,8 +172,6 @@ class RecipeSpace:
     dose: RecipeParameter
     target_output: RecipeParameter
     grinder_step_direction: GrinderStepDirection
-    brew_ratio_min: float
-    brew_ratio_max: float
     version: str = CPBO_CONFIGURATION_VERSION
 
     def __post_init__(self) -> None:
@@ -113,10 +186,6 @@ class RecipeSpace:
             raise ValueError("dose parameter must be named dose_g")
         if self.target_output.name != "target_output_g":
             raise ValueError("target output parameter must be named target_output_g")
-        if not math.isfinite(self.brew_ratio_min) or not math.isfinite(self.brew_ratio_max):
-            raise ValueError("brew ratio bounds must be finite")
-        if self.brew_ratio_min <= 0 or self.brew_ratio_max <= self.brew_ratio_min:
-            raise ValueError("brew ratio bounds are invalid")
         if not self.version.strip():
             raise ValueError("recipe space version is required")
 
@@ -143,11 +212,6 @@ class RecipeSpace:
         self.grind.validate_physical(grind_size, allow_roundoff=True)
         self.dose.validate_physical(dose_g, allow_roundoff=True)
         self.target_output.validate_physical(target_output_g, allow_roundoff=True)
-        ratio = float(target_output_g) / float(dose_g)
-        if ratio < self.brew_ratio_min - _FLOAT_TOLERANCE:
-            raise ValueError("recipe brew ratio is below the feasible bound")
-        if ratio > self.brew_ratio_max + _FLOAT_TOLERANCE:
-            raise ValueError("recipe brew ratio is above the feasible bound")
 
     def normalize_recipe(
         self,
@@ -203,8 +267,6 @@ class RecipeSpace:
             "dose": _parameter_to_dict(self.dose),
             "target_output": _parameter_to_dict(self.target_output),
             "grinder_step_direction": self.grinder_step_direction.value,
-            "brew_ratio_min": self.brew_ratio_min,
-            "brew_ratio_max": self.brew_ratio_max,
             "version": self.version,
         }
 
@@ -217,8 +279,6 @@ class RecipeSpace:
             dose=_parameter_from_dict(value.get("dose")),
             target_output=_parameter_from_dict(value.get("target_output")),
             grinder_step_direction=GrinderStepDirection(value.get("grinder_step_direction")),
-            brew_ratio_min=float(value.get("brew_ratio_min")),
-            brew_ratio_max=float(value.get("brew_ratio_max")),
             version=str(value.get("version") or ""),
         )
 
@@ -647,7 +707,7 @@ def _parameter_to_dict(parameter: RecipeParameter) -> dict[str, Any]:
         "physical_max": parameter.physical_max,
         "resolution": parameter.resolution,
         "unit": parameter.unit,
-        "safety_constraints": list(parameter.safety_constraints),
+        "constraints": list(parameter.constraints),
     }
 
 
@@ -660,7 +720,10 @@ def _parameter_from_dict(value: Any) -> RecipeParameter:
         physical_max=float(value.get("physical_max")),
         resolution=float(value.get("resolution")),
         unit=str(value.get("unit") or ""),
-        safety_constraints=tuple(str(item) for item in value.get("safety_constraints") or ()),
+        constraints=tuple(
+            str(item)
+            for item in (value.get("constraints") or value.get("safety_constraints") or ())
+        ),
     )
 
 

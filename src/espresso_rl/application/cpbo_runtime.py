@@ -12,11 +12,12 @@ from espresso_rl.domain.cpbo import (
     OptimizationRunContext,
     PhysicalShotStatus,
     PreferenceLabel,
+    RecipeDomain,
     Suggestion,
 )
 from espresso_rl.domain.events import PreferenceFeedbackEvent
 from espresso_rl.domain.community import PairwiseShotComparison
-from espresso_rl.domain.models import Recipe, Recommendation, SafetyBounds, ShotRecord, ShotType
+from espresso_rl.domain.models import Recipe, Recommendation, ShotRecord, ShotType
 from espresso_rl.ports.repositories import ShotRepository
 
 
@@ -45,7 +46,6 @@ class CPBORuntimeBridge:
         comparison_sink: ComparisonSink | None = None,
         *,
         comparison_mode: ComparisonMode,
-        safety_bounds: SafetyBounds,
     ) -> None:
         self._optimizer = optimizer
         self._shots = shots
@@ -53,7 +53,9 @@ class CPBORuntimeBridge:
         self._context_factory = context_factory
         self._comparison_sink = comparison_sink
         self._comparison_mode = ComparisonMode(comparison_mode)
-        self._safety_bounds = safety_bounds
+
+    def configure_recipe_domain(self, recipe_domain: RecipeDomain) -> None:
+        self._optimizer.configure_recipe_domain(recipe_domain)
 
     def handle_shot(self, shot: ShotRecord) -> CPBOShotOutcome:
         if shot.shot_type != ShotType.ESPRESSO or shot.exclude_from_local_optimization:
@@ -190,7 +192,6 @@ class CPBORuntimeBridge:
         return self._optimizer.suggestion_to_machine_recommendation(
             suggestion,
             current_recipe=current_recipe,
-            safety_bounds=self._safety_bounds,
             install_id=shot.install_id,
             machine_id=shot.machine_id,
             bean_context_id=shot.bean_context_id,

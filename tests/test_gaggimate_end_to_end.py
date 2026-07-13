@@ -29,7 +29,7 @@ from espresso_rl.domain.cpbo import (
     SuggestionComputation,
     TrustRegionDiagnostics,
 )
-from espresso_rl.domain.models import Recipe, Recommendation, SafetyBounds
+from espresso_rl.domain.models import Recipe, Recommendation
 from espresso_rl.optimizers.cpbo_config import TrustRegionConfig
 from espresso_rl.optimizers.cpbo_trust_region import update_trust_region
 
@@ -157,7 +157,6 @@ class GaggimateEndToEndTests(unittest.TestCase):
                     strict_context_from_shot,
                     service.enqueue_comparison_upload,
                     comparison_mode=ComparisonMode.BEST_INCUMBENT,
-                    safety_bounds=SafetyBounds(),
                 )
                 transport = FakeTransport()
 
@@ -255,7 +254,7 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 self.assertFalse(any("human_rating" in payload for payload in recommendation_payloads))
 
 
-def _recipe_space(recipe: Recipe) -> RecipeSpace:
+def _recipe_space(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:
     return RecipeSpace(
         RecipeParameter("grind_size", 0.0, 10.0, 1.0, "step"),
         RecipeParameter("dose_g", 14.0, 22.0, 0.1, "g"),

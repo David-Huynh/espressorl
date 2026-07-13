@@ -273,7 +273,14 @@ CPBO is selected with:
   "cpbo": {
     "profile_name": "application",
     "comparison_mode": "best_incumbent",
-    "random_seed": 17
+    "random_seed": 17,
+    "recipe_domain": {
+      "grind_radius_steps": 10.0,
+      "dose_min_g": 6.0,
+      "dose_max_g": 30.0,
+      "target_output_min_g": 5.0,
+      "target_output_max_g": 250.0
+    }
   }
 }
 ~~~
@@ -284,14 +291,26 @@ raw-to-physics initial kernel mixture, and trace activation after eight valid
 telemetry shots. These values prioritize bounded container latency and are
 application assumptions, not claimed espresso psychophysics.
 
+The application trust region starts at normalized length 0.1 so the wider
+physical recipe domain still begins with local exploration. The
+paper-fidelity profile retains the reference 0.8 initial length.
+
 profile_name set to paper_fidelity uses global-previous mode, 2,000 GP steps,
 25,000 Gumbel samples, 20 bins, and 1,000 truncated samples per bin. It is
 intended for reproduction and offline analysis, not low-latency operation.
 
-The default relative grind domain is the baseline plus or minus 10 grinder
-steps. Stepped resolution defaults to 1.0 and stepless resolution to 0.1.
-Dose/output limits come from global machine safety bounds. All nested fields
-are strictly allowlisted; unknown configuration keys fail startup.
+The recipe domain is CPBO's configurable physical search space, not a set of
+machine-safety limits. The default relative grind domain is the baseline plus
+or minus 10 grinder steps, dose spans 6-30 g, and target output spans 5-250 g.
+Stepped resolution defaults to 1.0 and stepless resolution to 0.1. Brew ratio
+is derived from target output divided by dose and is not an independent search
+coordinate or feasibility bound. All nested fields are strictly allowlisted;
+unknown configuration keys fail startup.
+
+Each run snapshots and fingerprints its recipe domain. A changed domain ends
+the incompatible active run before a new normalized model is initialized.
+Canonical events and offline datasets retain physical units; normalized
+coordinates are derived only at the CPBO model boundary.
 
 ## Operational Loop
 

@@ -29,7 +29,7 @@ from espresso_rl.domain.cpbo import (
     TrustRegionDiagnostics,
 )
 from espresso_rl.domain.events import PreferenceFeedbackEvent
-from espresso_rl.domain.models import GrinderStepDirection, Recipe, SafetyBounds, ShotRecord
+from espresso_rl.domain.models import GrinderStepDirection, Recipe, ShotRecord
 from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.optimizers.cpbo_config import TrustRegionConfig
 from espresso_rl.optimizers.cpbo_trust_region import update_trust_region
@@ -142,7 +142,6 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
             strict_context_from_shot,
             comparison_sink,
             comparison_mode=ComparisonMode.BEST_INCUMBENT,
-            safety_bounds=SafetyBounds(),
         )
 
     def clock(self) -> int:
@@ -333,7 +332,7 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         )
 
 
-def _recipe_space(recipe: Recipe) -> RecipeSpace:
+def _recipe_space(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:
     return RecipeSpace(
         RecipeParameter("grind_size", 0.0, 10.0, 1.0, "step"),
         RecipeParameter("dose_g", 14.0, 22.0, 0.1, "g"),

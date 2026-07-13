@@ -227,7 +227,7 @@ def baseline_recipe() -> Recipe:
     )
 
 
-def recipe_space_factory(recipe: Recipe) -> RecipeSpace:
+def recipe_space_factory(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:
     return RecipeSpace(
         RecipeParameter("grind_size", 0.0, 10.0, 1.0, "step"),
         RecipeParameter("dose_g", 16.0, 20.0, 0.1, "g"),
@@ -248,7 +248,7 @@ def corner_baseline_recipe() -> Recipe:
     )
 
 
-def corner_recipe_space_factory(recipe: Recipe) -> RecipeSpace:
+def corner_recipe_space_factory(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:
     return RecipeSpace(
         RecipeParameter("grind_size", 0.0, 10.0, 1.0, "step"),
         RecipeParameter("dose_g", 14.0, 22.0, 0.1, "g"),

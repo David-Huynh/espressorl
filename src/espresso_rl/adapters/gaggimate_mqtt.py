@@ -21,6 +21,7 @@ from espresso_rl.domain.events import (
     ShotProfileEvent,
     UploadQueueMaintenanceEvent,
 )
+from espresso_rl.domain.cpbo import RecipeDomain
 from espresso_rl.domain.models import Recommendation
 from espresso_rl.domain.models import new_id
 from espresso_rl.domain.taste_goal import TasteGoal
@@ -573,6 +574,7 @@ class GaggimateMQTTClient:
         )
 
     def translate_optimizer_settings_payload(self, payload: dict[str, Any], mac: str) -> OptimizerSettingsEvent:
+        recipe_domain = payload.get("recipe_domain")
         return OptimizerSettingsEvent(
             install_id=str(payload.get("install_id") or self._config.install_id),
             machine_id=str(payload.get("machine_id") or f"gaggimate:{mac}"),
@@ -584,6 +586,7 @@ class GaggimateMQTTClient:
             profile_id=_optional_string(payload.get("profile_id")),
             profile_label=_optional_string(payload.get("profile_label")),
             taste_goal=TasteGoal.from_dict(payload.get("taste_goal")),
+            recipe_domain=(RecipeDomain.from_dict(recipe_domain) if recipe_domain is not None else None),
             source=payload.get("source", "gaggimate_mqtt"),
         )
 

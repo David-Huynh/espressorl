@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Any, Callable, Mapping
 
@@ -14,6 +15,7 @@ from espresso_rl.domain.cpbo import (
     PreferenceComparison,
     PreferenceLabel,
     PreferenceShot,
+    RecipeDomain,
     RecipePoint,
     RecipeSpace,
     ShotRequest,
@@ -21,21 +23,14 @@ from espresso_rl.domain.cpbo import (
     TrustRegionState,
     new_cpbo_id,
 )
-from espresso_rl.domain.models import (
-    Recipe,
-    Recommendation,
-    RecommendationMode,
-    RecommendationStatus,
-    SafetyBounds,
-)
-from espresso_rl.domain.safety import validate_preferential_recommendation
+from espresso_rl.domain.models import Recipe, Recommendation, RecommendationMode, RecommendationStatus
 from espresso_rl.ports.preference_optimization import (
     PreferentialOptimizationRepository,
     PreferentialOptimizerEngine,
 )
 
 
-RecipeSpaceFactory = Callable[[Recipe], RecipeSpace]
+RecipeSpaceFactory = Callable[[Recipe, RecipeDomain], RecipeSpace]
 TraceFeatureExtractor = Callable[[Any], tuple[tuple[str, ...], tuple[float, ...] | None]]
 
 
@@ -50,6 +45,8 @@ class ConsecutivePreferenceOptimizationService:
         *,
         random_seed: int,
         configuration_version: str = CPBO_CONFIGURATION_VERSION,
+        recipe_domain: RecipeDomain = RecipeDomain(),
+        initial_trust_region_length: float = 0.8,
         trace_feature_extractor: TraceFeatureExtractor | None = None,
         clock: Callable[[], int],
     ) -> None:
@@ -57,11 +54,15 @@ class ConsecutivePreferenceOptimizationService:
             raise ValueError("CPBO random seed must be nonnegative")
         if not configuration_version.strip():
             raise ValueError("CPBO configuration version is required")
+        if not math.isfinite(initial_trust_region_length) or initial_trust_region_length <= 0:
+            raise ValueError("initial trust-region length must be positive and finite")
         self._repository = repository
         self._optimizer = optimizer
         self._recipe_space_factory = recipe_space_factory
         self._random_seed = random_seed
         self._configuration_version = configuration_version
+        self._recipe_domain = recipe_domain
+        self._initial_trust_region_length = initial_trust_region_length
         self._trace_feature_extractor = trace_feature_extractor
         self._clock = clock
 
@@ -107,8 +108,8 @@ class ConsecutivePreferenceOptimizationService:
 
         now = self._clock()
         recipe_space = replace(
-            self._recipe_space_factory(baseline_recipe),
-            version=self._configuration_version,
+            self._recipe_space_factory(baseline_recipe, self._recipe_domain),
+            version=self._recipe_domain.effective_version,
         )
         run = OptimizationRun(
             run_id=new_cpbo_id("run"),
@@ -131,7 +132,10 @@ class ConsecutivePreferenceOptimizationService:
             previous_valid_shot_id=None,
             incumbent_shot_id=None,
             iteration=0,
-            trust_region_state=TrustRegionState(center=baseline.normalized_x),
+            trust_region_state=TrustRegionState(
+                center=baseline.normalized_x,
+                length=self._initial_trust_region_length,
+            ),
             model_checkpoint=None,
             trace_model_checkpoint=None,
             random_seed=self._random_seed,
@@ -388,7 +392,7 @@ class ConsecutivePreferenceOptimizationService:
             return None
         if (
             run.configuration_version == self._configuration_version
-            and run.recipe_space.version == self._configuration_version
+            and run.recipe_space.version == self._recipe_domain.effective_version
         ):
             return run
         self._repository.deactivate_run(run.run_id)
@@ -399,7 +403,6 @@ class ConsecutivePreferenceOptimizationService:
         suggestion: Suggestion,
         *,
         current_recipe: Recipe,
-        safety_bounds: SafetyBounds,
         install_id: str,
         machine_id: str,
         bean_context_id: str | None,
@@ -409,7 +412,13 @@ class ConsecutivePreferenceOptimizationService:
         now: int | None = None,
     ) -> Recommendation:
         timestamp = self._clock() if now is None else int(now)
+        run = self._require_run(suggestion.optimization_run_id)
         candidate = suggestion.recipe
+        run.recipe_space.validate_recipe(
+            candidate.grind_size,
+            candidate.dose_g,
+            candidate.target_output_g,
+        )
         grind_delta = candidate.grind_size - current_recipe.relative_grind_steps_from_reference
         mode = (
             RecommendationMode.CPBO_GLOBAL_PREVIOUS
@@ -449,12 +458,14 @@ class ConsecutivePreferenceOptimizationService:
             comparison_anchor_shot_id=suggestion.anchor_shot_id,
             comparison_mode=suggestion.comparison_mode.value,
             preference_feedback_required=True,
-            taste_goal=self._require_run(suggestion.optimization_run_id).context.taste_goal,
+            taste_goal=run.context.taste_goal,
             grinder_step_direction=current_recipe.grinder_step_direction,
             grinder_adjustment_mode=current_recipe.grinder_adjustment_mode,
         )
-        validate_preferential_recommendation(recommendation, safety_bounds)
         return recommendation
+
+    def configure_recipe_domain(self, recipe_domain: RecipeDomain) -> None:
+        self._recipe_domain = recipe_domain
 
     def _canonical_recipe(self, run: OptimizationRun, recipe: Recipe | RecipePoint) -> RecipePoint:
         if isinstance(recipe, RecipePoint):

@@ -159,19 +159,6 @@ class Recipe:
         return 1 if self.grinder_step_direction == GrinderStepDirection.HIGHER_IS_FINER else -1
 
 
-@dataclass(frozen=True)
-class SafetyBounds:
-    dose_min_g: float = 14.0
-    dose_max_g: float = 22.0
-    target_yield_min_g: float = 20.0
-    target_yield_max_g: float = 60.0
-    target_ratio_min: float = 1.2
-    target_ratio_max: float = 3.5
-    max_grind_delta_steps_from_current: int = 5
-    max_dose_delta_g: float = 1.0
-    max_yield_delta_g: float = 8.0
-
-
 @dataclass
 class Recommendation:
     recommendation_id: str
@@ -230,12 +217,13 @@ class Recommendation:
         if not isinstance(self.taste_goal, TasteGoal):
             self.taste_goal = TasteGoal.from_dict(self.taste_goal)
         self.confidence = max(0.0, min(1.0, float(self.confidence)))
-        if self.next_dose_g <= 0:
-            raise ValueError("next_dose_g must be positive")
-        if self.target_yield_g <= 0:
-            raise ValueError("target_yield_g must be positive")
-        if self.target_ratio <= 0:
-            raise ValueError("target_ratio must be positive")
+        targets = (self.next_dose_g, self.target_yield_g, self.target_ratio)
+        if not all(math.isfinite(value) and value > 0 for value in targets):
+            raise ValueError("recommendation targets must be positive and finite")
+        derived_ratio = self.target_yield_g / self.next_dose_g
+        if not math.isclose(self.target_ratio, derived_ratio, rel_tol=1e-3, abs_tol=1e-3):
+            raise ValueError("target_ratio must be derived from target_yield_g / next_dose_g")
+        self.target_ratio = derived_ratio
         if self.comparison_mode not in {None, "global_previous", "best_incumbent"}:
             raise ValueError("comparison_mode is invalid")
         if not isinstance(self.preference_feedback_required, bool):

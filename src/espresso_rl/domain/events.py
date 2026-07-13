@@ -15,7 +15,7 @@ from .models import (
     ShotType,
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
-from .cpbo import ComparisonMode, PreferenceLabel
+from .cpbo import ComparisonMode, PreferenceLabel, RecipeDomain
 from .taste_goal import TasteGoal
 
 VALID_CORRECTION_TAGS = {
@@ -542,11 +542,15 @@ class RecommendationDecisionEvent:
             "projected_relative_step_from_reference",
             "next_dose_g",
             "target_yield_g",
-            "target_ratio",
         }
         unknown = set(self.edited_fields) - allowed_edits
         if unknown:
             raise ValueError(f"unsupported edited fields: {sorted(unknown)}")
+        for name, value in self.edited_fields.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"edited field {name} must be numeric and finite")
+            if name in {"next_dose_g", "target_yield_g"} and value <= 0:
+                raise ValueError(f"edited field {name} must be positive")
 
 
 @dataclass(frozen=True)
@@ -700,6 +704,7 @@ class OptimizerSettingsEvent:
     profile_id: str | None = None
     profile_label: str | None = None
     taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
+    recipe_domain: RecipeDomain | None = None
     source: str = "unknown"
 
     event_type: str = field(default="optimizer_settings", init=False)
@@ -714,6 +719,8 @@ class OptimizerSettingsEvent:
         object.__setattr__(self, "profile_label", _optional_string(self.profile_label, "profile_label", 160))
         if not isinstance(self.taste_goal, TasteGoal):
             object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
+        if self.recipe_domain is not None and not isinstance(self.recipe_domain, RecipeDomain):
+            object.__setattr__(self, "recipe_domain", RecipeDomain.from_dict(self.recipe_domain))
         object.__setattr__(self, "source", _optional_string(self.source, "source", 80) or "unknown")
 
 

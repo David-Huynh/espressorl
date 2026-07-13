@@ -212,8 +212,6 @@ def recipe_space(direction: GrinderStepDirection) -> RecipeSpace:
         dose=RecipeParameter("dose_g", 14.0, 22.0, 0.1, "g"),
         target_output=RecipeParameter("target_output_g", 20.0, 60.0, 0.1, "g"),
         grinder_step_direction=direction,
-        brew_ratio_min=1.2,
-        brew_ratio_max=3.5,
     )
 
 

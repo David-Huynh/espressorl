@@ -54,7 +54,7 @@ from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityUploadCredentials
-from espresso_rl.domain.cpbo import RecipeParameter, RecipeSpace
+from espresso_rl.domain.cpbo import RecipeDomain, RecipeParameter, RecipeSpace
 from espresso_rl.domain.events import (
     LocalResetEvent,
     MachineStateEvent,
@@ -69,7 +69,6 @@ from espresso_rl.domain.models import (
     GrinderAdjustmentMode,
     Recipe,
     Recommendation,
-    SafetyBounds,
     UploadQueueStatus,
 )
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_CPBO
@@ -112,17 +111,18 @@ def run_public(config: Config) -> None:
         local_data_repo,
         preference_optimization_repo,
     ) = open_repositories(config)
-    safety_bounds = SafetyBounds()
     cpbo_service = ConsecutivePreferenceOptimizationService(
         repository=preference_optimization_repo,
         optimizer=ConsecutivePreferentialBayesianOptimizer(config.cpbo),
-        recipe_space_factory=lambda baseline: build_cpbo_recipe_space(
+        recipe_space_factory=lambda baseline, recipe_domain: build_cpbo_recipe_space(
             baseline,
             config=config,
-            safety_bounds=safety_bounds,
+            recipe_domain=recipe_domain,
         ),
         random_seed=config.cpbo.random_seed,
         configuration_version=config.cpbo.effective_configuration_version,
+        recipe_domain=config.cpbo.recipe_domain,
+        initial_trust_region_length=config.cpbo.trust_region.initial_length,
         trace_feature_extractor=lambda sequence: (
             TRACE_FEATURE_NAMES,
             extract_trace_features(sequence, config.cpbo.trace).values,
@@ -143,7 +143,6 @@ def run_public(config: Config) -> None:
         comparison_sink=service.enqueue_comparison_upload,
         context_factory=strict_context_from_shot,
         comparison_mode=config.cpbo.comparison_mode,
-        safety_bounds=safety_bounds,
     )
     upload_maintenance = UploadQueueMaintenanceService(upload_queue_repo, clock=config.now)
     local_data_service = LocalDataService(
@@ -356,6 +355,8 @@ def run_public(config: Config) -> None:
             return
         if event.optimizer_mode != OPTIMIZER_MODE_CPBO:
             raise ValueError("only CPBO is available")
+        if event.recipe_domain is not None:
+            cpbo_runtime.configure_recipe_domain(event.recipe_domain)
         publish_status(
             event.machine_id,
             event.bean_context_id,
@@ -1049,14 +1050,14 @@ def build_cpbo_recipe_space(
     baseline: Recipe,
     *,
     config: Config,
-    safety_bounds: SafetyBounds,
+    recipe_domain: RecipeDomain,
 ) -> RecipeSpace:
     grind_resolution = (
         config.cpbo.stepless_grind_resolution
         if baseline.grinder_adjustment_mode == GrinderAdjustmentMode.STEPLESS
         else config.cpbo.stepped_grind_resolution
     )
-    grind_radius = config.cpbo.grind_domain_radius_steps
+    grind_radius = recipe_domain.grind_radius_steps
     return RecipeSpace(
         grind=RecipeParameter(
             name="grind_size",
@@ -1064,28 +1065,26 @@ def build_cpbo_recipe_space(
             physical_max=baseline.relative_grind_steps_from_reference + grind_radius,
             resolution=grind_resolution,
             unit="grinder_step_from_reference",
-            safety_constraints=("configured_grinder_search_domain",),
+            constraints=("configured_recipe_domain",),
         ),
         dose=RecipeParameter(
             name="dose_g",
-            physical_min=safety_bounds.dose_min_g,
-            physical_max=safety_bounds.dose_max_g,
+            physical_min=recipe_domain.dose_min_g,
+            physical_max=recipe_domain.dose_max_g,
             resolution=config.cpbo.dose_resolution_g,
             unit="g",
-            safety_constraints=("basket_dose_limit",),
+            constraints=("configured_recipe_domain",),
         ),
         target_output=RecipeParameter(
             name="target_output_g",
-            physical_min=safety_bounds.target_yield_min_g,
-            physical_max=safety_bounds.target_yield_max_g,
+            physical_min=recipe_domain.target_output_min_g,
+            physical_max=recipe_domain.target_output_max_g,
             resolution=config.cpbo.target_output_resolution_g,
             unit="g",
-            safety_constraints=("machine_output_limit",),
+            constraints=("configured_recipe_domain",),
         ),
         grinder_step_direction=baseline.grinder_step_direction,
-        brew_ratio_min=safety_bounds.target_ratio_min,
-        brew_ratio_max=safety_bounds.target_ratio_max,
-        version=config.cpbo.effective_configuration_version,
+        version=recipe_domain.effective_version,
     )
 
 

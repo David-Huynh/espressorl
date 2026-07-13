@@ -8,13 +8,11 @@ from espresso_rl.domain.events import OptimizerSettingsEvent, ShotProfileEvent
 from espresso_rl.domain.follow_through import infer_follow_through
 from espresso_rl.domain.models import (
     FollowThroughState,
-    GrinderAdjustmentMode,
     Recipe,
     Recommendation,
     RecommendationDecision,
     RecommendationMode,
     RecommendationStatus,
-    SafetyBounds,
     ShotRecord,
 )
 from espresso_rl.domain.profile import (
@@ -23,38 +21,10 @@ from espresso_rl.domain.profile import (
     resample_profile_with_quality,
     resample_shot_metadata,
 )
-from espresso_rl.domain.safety import clamp_candidate_recipe
 from espresso_rl.domain.staleness import check_recommendation_staleness
 
 
 class DomainCoreTests(unittest.TestCase):
-    def test_candidate_clamp_uses_grinder_resolution(self) -> None:
-        stepped = Recipe(42, 12.5, 18.0, 36.0)
-        stepped_result = clamp_candidate_recipe(
-            stepped,
-            candidate_relative_grind_steps_from_reference=42.4,
-            candidate_dose_g=18.24,
-            candidate_target_yield_g=36.2,
-            bounds=SafetyBounds(),
-        )
-        self.assertEqual(stepped_result.relative_grind_steps_from_reference, 42.0)
-
-        stepless = Recipe(
-            42,
-            12.5,
-            18.0,
-            36.0,
-            grinder_adjustment_mode=GrinderAdjustmentMode.STEPLESS,
-        )
-        stepless_result = clamp_candidate_recipe(
-            stepless,
-            candidate_relative_grind_steps_from_reference=42.4,
-            candidate_dose_g=18.24,
-            candidate_target_yield_g=36.2,
-            bounds=SafetyBounds(),
-        )
-        self.assertEqual(stepless_result.relative_grind_steps_from_reference, 42.4)
-
     def test_optimizer_settings_migrates_old_bo_name_but_rejects_removed_model(self) -> None:
         event = OptimizerSettingsEvent("install", "machine", 1, optimizer_mode="bayesian_optimization")
         self.assertEqual(event.optimizer_mode, "cpbo")
