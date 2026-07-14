@@ -4,6 +4,7 @@ import logging
 import signal
 import sys
 import threading
+from dataclasses import replace
 from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
@@ -54,7 +55,13 @@ from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
 from espresso_rl.domain.community import CommunityUploadCredentials
-from espresso_rl.domain.cpbo import RecipeDomain, RecipeParameter, RecipeSpace
+from espresso_rl.domain.cpbo import (
+    CPBOProfile,
+    ComparisonMode,
+    RecipeDomain,
+    RecipeParameter,
+    RecipeSpace,
+)
 from espresso_rl.domain.events import (
     LocalResetEvent,
     MachineStateEvent,
@@ -74,6 +81,11 @@ from espresso_rl.domain.models import (
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_CPBO
 from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.optimizers.cpbo import ConsecutivePreferentialBayesianOptimizer
+from espresso_rl.optimizers.cpbo_config import (
+    CPBOConfig,
+    application_cpbo_config,
+    paper_fidelity_cpbo_config,
+)
 from espresso_rl.optimizers.cpbo_trace import TRACE_FEATURE_NAMES, extract_trace_features
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
 from espresso_rl.ports.preference_optimization import PreferentialOptimizationRepository
@@ -111,24 +123,33 @@ def run_public(config: Config) -> None:
         local_data_repo,
         preference_optimization_repo,
     ) = open_repositories(config)
-    cpbo_service = ConsecutivePreferenceOptimizationService(
-        repository=preference_optimization_repo,
-        optimizer=ConsecutivePreferentialBayesianOptimizer(config.cpbo),
-        recipe_space_factory=lambda baseline, recipe_domain: build_cpbo_recipe_space(
-            baseline,
-            config=config,
-            recipe_domain=recipe_domain,
-        ),
-        random_seed=config.cpbo.random_seed,
-        configuration_version=config.cpbo.effective_configuration_version,
-        recipe_domain=config.cpbo.recipe_domain,
-        initial_trust_region_length=config.cpbo.trust_region.initial_length,
-        trace_feature_extractor=lambda sequence: (
-            TRACE_FEATURE_NAMES,
-            extract_trace_features(sequence, config.cpbo.trace).values,
-        ),
-        clock=config.now,
-    )
+    cpbo_profiles = {
+        CPBOProfile.APPLICATION.value: application_cpbo_config(),
+        CPBOProfile.PAPER_FIDELITY.value: paper_fidelity_cpbo_config(),
+    }
+    cpbo_profiles[config.cpbo.profile_name] = config.cpbo
+
+    def make_cpbo_service(cpbo_config: CPBOConfig) -> ConsecutivePreferenceOptimizationService:
+        return ConsecutivePreferenceOptimizationService(
+            repository=preference_optimization_repo,
+            optimizer=ConsecutivePreferentialBayesianOptimizer(cpbo_config),
+            recipe_space_factory=lambda baseline, recipe_domain: build_cpbo_recipe_space(
+                baseline,
+                cpbo_config=cpbo_config,
+                recipe_domain=recipe_domain,
+            ),
+            random_seed=cpbo_config.random_seed,
+            configuration_version=cpbo_config.effective_configuration_version,
+            recipe_domain=cpbo_config.recipe_domain,
+            initial_trust_region_length=cpbo_config.trust_region.initial_length,
+            trace_feature_extractor=lambda sequence: (
+                TRACE_FEATURE_NAMES,
+                extract_trace_features(sequence, cpbo_config.trace).values,
+            ),
+            clock=config.now,
+        )
+
+    cpbo_service = make_cpbo_service(config.cpbo)
     service = EspressoRLService(
         shots=shot_repo,
         recommendations=recommendation_repo,
@@ -355,14 +376,62 @@ def run_public(config: Config) -> None:
             return
         if event.optimizer_mode != OPTIMIZER_MODE_CPBO:
             raise ValueError("only CPBO is available")
-        if event.recipe_domain is not None:
-            cpbo_runtime.configure_recipe_domain(event.recipe_domain)
+        recipe_domain = event.recipe_domain or config.cpbo.recipe_domain
+        base_profile = cpbo_profiles[event.cpbo_profile_name.value]
+        next_cpbo = replace(
+            base_profile,
+            comparison_mode=event.cpbo_comparison_mode,
+            recipe_domain=recipe_domain,
+        )
+        configuration_changed = (
+            next_cpbo.effective_configuration_version != config.cpbo.effective_configuration_version
+            or next_cpbo.recipe_domain.effective_version != config.cpbo.recipe_domain.effective_version
+        )
+        if configuration_changed:
+            logger.info(
+                "Applying CPBO configuration profile=%s comparison=%s domain=%s",
+                next_cpbo.profile_name,
+                next_cpbo.comparison_mode.value,
+                next_cpbo.recipe_domain.effective_version,
+            )
+            cpbo_runtime.configure_optimizer(
+                make_cpbo_service(next_cpbo),
+                comparison_mode=next_cpbo.comparison_mode,
+            )
+            config.cpbo = next_cpbo
+            service.supersede_active_recommendation(
+                install_id=event.install_id,
+                machine_id=event.machine_id,
+                bean_context_id=event.bean_context_id,
+                grinder_context_id=event.grinder_context_id,
+                profile_id=event.profile_id,
+                taste_goal_fingerprint=event.taste_goal.fingerprint,
+            )
+        current_recommendation = service.get_current_recommendation(
+            install_id=event.install_id,
+            machine_id=event.machine_id,
+            bean_context_id=event.bean_context_id,
+            grinder_context_id=event.grinder_context_id,
+            profile_id=event.profile_id,
+            taste_goal_fingerprint=event.taste_goal.fingerprint,
+        )
+        if current_recommendation is None:
+            mqtt_client.clear_recommendation(event.machine_id)
+        else:
+            mqtt_client.publish_recommendation(current_recommendation)
         publish_status(
             event.machine_id,
             event.bean_context_id,
             event.grinder_context_id,
             profile_id=event.profile_id,
             profile_label=event.profile_label,
+            last_recommendation_id=(
+                current_recommendation.recommendation_id if current_recommendation is not None else None
+            ),
+            last_recommendation_at=(
+                current_recommendation.updated_at if current_recommendation is not None else None
+            ),
+            mode=current_recommendation.mode.value if current_recommendation is not None else None,
             taste_goal=event.taste_goal,
         )
 
@@ -643,6 +712,8 @@ def build_status_payload(
         "optimizer_available_modes": [OPTIMIZER_MODE_CPBO],
         "optimizer_unavailable_modes": {},
         "optimizer_fallback_reason": None,
+        "cpbo_profile_name": config.cpbo.profile_name,
+        "cpbo_comparison_mode": config.cpbo.comparison_mode.value,
         "local_shot_count": len(optimizer_shots),
         "best_known_recipe": None,
         "upload_queue_count": upload_queue_count,
@@ -1049,13 +1120,13 @@ def upload_queue_for_service(
 def build_cpbo_recipe_space(
     baseline: Recipe,
     *,
-    config: Config,
+    cpbo_config: CPBOConfig,
     recipe_domain: RecipeDomain,
 ) -> RecipeSpace:
     grind_resolution = (
-        config.cpbo.stepless_grind_resolution
+        cpbo_config.stepless_grind_resolution
         if baseline.grinder_adjustment_mode == GrinderAdjustmentMode.STEPLESS
-        else config.cpbo.stepped_grind_resolution
+        else cpbo_config.stepped_grind_resolution
     )
     grind_radius = recipe_domain.grind_radius_steps
     return RecipeSpace(
@@ -1071,7 +1142,7 @@ def build_cpbo_recipe_space(
             name="dose_g",
             physical_min=recipe_domain.dose_min_g,
             physical_max=recipe_domain.dose_max_g,
-            resolution=config.cpbo.dose_resolution_g,
+            resolution=cpbo_config.dose_resolution_g,
             unit="g",
             constraints=("configured_recipe_domain",),
         ),
@@ -1079,7 +1150,7 @@ def build_cpbo_recipe_space(
             name="target_output_g",
             physical_min=recipe_domain.target_output_min_g,
             physical_max=recipe_domain.target_output_max_g,
-            resolution=config.cpbo.target_output_resolution_g,
+            resolution=cpbo_config.target_output_resolution_g,
             unit="g",
             constraints=("configured_recipe_domain",),
         ),

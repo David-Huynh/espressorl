@@ -57,6 +57,15 @@ class CPBORuntimeBridge:
     def configure_recipe_domain(self, recipe_domain: RecipeDomain) -> None:
         self._optimizer.configure_recipe_domain(recipe_domain)
 
+    def configure_optimizer(
+        self,
+        optimizer: ConsecutivePreferenceOptimizationService,
+        *,
+        comparison_mode: ComparisonMode,
+    ) -> None:
+        self._optimizer = optimizer
+        self._comparison_mode = ComparisonMode(comparison_mode)
+
     def handle_shot(self, shot: ShotRecord) -> CPBOShotOutcome:
         if shot.shot_type != ShotType.ESPRESSO or shot.exclude_from_local_optimization:
             return CPBOShotOutcome(None, None, False, "shot_not_locally_optimizable")
@@ -77,7 +86,7 @@ class CPBORuntimeBridge:
         except ValueError as exc:
             return CPBOShotOutcome(None, None, False, str(exc))
 
-        run = self._optimizer.active_run(context)
+        run = self._optimizer.active_run(context, comparison_mode=self._comparison_mode)
         if run is None:
             request = self._optimizer.initialize(
                 context,
@@ -133,7 +142,10 @@ class CPBORuntimeBridge:
             raise ValueError("preference install_id does not own the CPBO run")
         if not _same_machine_id(run.context.machine_id, event.machine_id):
             raise ValueError("preference machine_id does not own the CPBO run")
-        if event.comparison_mode is not None and event.comparison_mode != run.comparison_mode:
+        pending = self._optimizer.get_pending_suggestion(event.optimization_run_id)
+        if pending is None:
+            raise ValueError("preference optimization run has no pending comparison")
+        if event.comparison_mode is not None and event.comparison_mode != pending.comparison_mode:
             raise ValueError("preference comparison_mode does not match the optimization run")
         if event.taste_goal.fingerprint != run.context.taste_goal.fingerprint:
             raise ValueError("preference taste goal does not match the optimization run")

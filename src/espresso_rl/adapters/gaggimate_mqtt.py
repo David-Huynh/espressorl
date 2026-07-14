@@ -581,6 +581,10 @@ class GaggimateMQTTClient:
             timestamp=int(payload.get("timestamp") or self._config.now()),
             schema_version=int(payload.get("schema_version", 1)),
             optimizer_mode=str(payload.get("optimizer_mode") or payload.get("mode") or self._config.optimizer_mode),
+            cpbo_profile_name=str(payload.get("cpbo_profile_name") or self._config.cpbo.profile_name),
+            cpbo_comparison_mode=str(
+                payload.get("cpbo_comparison_mode") or self._config.cpbo.comparison_mode.value
+            ),
             bean_context_id=_optional_string(payload.get("bean_context_id")),
             grinder_context_id=_optional_string(payload.get("grinder_context_id")),
             profile_id=_optional_string(payload.get("profile_id")),

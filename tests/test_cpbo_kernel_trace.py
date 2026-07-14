@@ -163,8 +163,6 @@ def recipe_space() -> RecipeSpace:
         RecipeParameter("dose_g", 14.0, 22.0, 0.1, "g"),
         RecipeParameter("target_output_g", 20.0, 60.0, 0.1, "g"),
         GrinderStepDirection.HIGHER_IS_FINER,
-        1.2,
-        3.5,
     )
 
 

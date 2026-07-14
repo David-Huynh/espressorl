@@ -443,8 +443,8 @@ def _validate_comparison_history(
     previous_id = valid_shots[0].shot_id
     seen_new_shots: set[str] = set()
     for row in ordered:
-        if row.optimization_run_id != run.run_id or row.comparison_mode != run.comparison_mode:
-            raise ValueError("comparison belongs to another run or mode")
+        if row.optimization_run_id != run.run_id:
+            raise ValueError("comparison belongs to another run")
         if row.new_shot_id not in shot_by_id or row.anchor_shot_id not in shot_by_id:
             raise ValueError("comparison references an unknown shot")
         new_shot = shot_by_id[row.new_shot_id]
@@ -453,14 +453,14 @@ def _validate_comparison_history(
             raise ValueError("failed or aborted shots cannot create preference comparisons")
         if row.new_shot_id in seen_new_shots:
             raise ValueError("a physical shot cannot have two preference labels")
-        expected_anchor = previous_id if run.comparison_mode == ComparisonMode.GLOBAL_PREVIOUS else incumbent_id
+        expected_anchor = previous_id if row.comparison_mode == ComparisonMode.GLOBAL_PREVIOUS else incumbent_id
         if row.anchor_shot_id != expected_anchor:
             raise ValueError("comparison orientation or anchor history is invalid")
         if new_shot.sequence_number <= anchor_shot.sequence_number:
             raise ValueError("new shot must occur after its anchor")
         seen_new_shots.add(row.new_shot_id)
         previous_id = row.new_shot_id
-        if run.comparison_mode == ComparisonMode.BEST_INCUMBENT and row.label == PreferenceLabel.NEW_BETTER:
+        if row.anchor_shot_id == incumbent_id and row.label == PreferenceLabel.NEW_BETTER:
             incumbent_id = row.new_shot_id
 
 

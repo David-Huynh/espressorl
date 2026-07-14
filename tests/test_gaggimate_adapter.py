@@ -20,7 +20,7 @@ from espresso_rl.adapters.gaggimate_mqtt import (
     GaggimateMQTTClient,
 )
 from espresso_rl.config import Config
-from espresso_rl.domain.cpbo import ComparisonMode, PreferenceLabel
+from espresso_rl.domain.cpbo import CPBOProfile, ComparisonMode, PreferenceLabel
 from espresso_rl.domain.models import (
     Recommendation,
     RecommendationMode,
@@ -140,6 +140,8 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "install_id": "install_1",
                 "machine_id": "gaggimate:AA_BB",
                 "timestamp": 100,
+                "cpbo_profile_name": "paper_fidelity",
+                "cpbo_comparison_mode": "global_previous",
                 "profile_id": "profile_1",
                 "profile_label": "Profile One",
                 "source": "webui",
@@ -147,6 +149,8 @@ class GaggimateAdapterTests(unittest.TestCase):
             "AA_BB",
         )
         self.assertEqual(event.optimizer_mode, "cpbo")
+        self.assertEqual(event.cpbo_profile_name, CPBOProfile.PAPER_FIDELITY)
+        self.assertEqual(event.cpbo_comparison_mode, ComparisonMode.GLOBAL_PREVIOUS)
         self.assertEqual(event.profile_id, "profile_1")
         self.assertEqual(event.profile_label, "Profile One")
         with self.assertRaises(ValueError):
@@ -162,6 +166,23 @@ class GaggimateAdapterTests(unittest.TestCase):
                 },
                 "AA_BB",
             )
+        for field, invalid in (
+            ("cpbo_profile_name", "fastest"),
+            ("cpbo_comparison_mode", "random_anchor"),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.client.translate_optimizer_settings_payload(
+                    {
+                        "event_type": "optimizer_settings",
+                        "schema_version": 1,
+                        "optimizer_mode": "cpbo",
+                        field: invalid,
+                        "install_id": "install_1",
+                        "machine_id": "gaggimate:AA_BB",
+                        "timestamp": 100,
+                    },
+                    "AA_BB",
+                )
 
     def test_connect_subscribes_to_preference_contract_without_rating_or_model_topics(self) -> None:
         mqtt = FakeMQTT()

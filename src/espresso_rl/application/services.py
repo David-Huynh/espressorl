@@ -498,6 +498,26 @@ class EspressoRLService:
         )
         self._store_recommendation(recommendation, now)
 
+    def supersede_active_recommendation(
+        self,
+        *,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str | None,
+        grinder_context_id: str | None,
+        profile_id: str | None,
+        taste_goal_fingerprint: str,
+    ) -> None:
+        self._recommendations.supersede_active(
+            install_id=install_id,
+            machine_id=machine_id,
+            bean_context_id=bean_context_id,
+            grinder_context_id=grinder_context_id,
+            profile_id=profile_id,
+            taste_goal_fingerprint=taste_goal_fingerprint,
+            now=self._clock(),
+        )
+
     def community_upload_enabled_for(self, install_id: str, machine_id: str) -> bool:
         return self._community_upload_enabled_by_machine.get(
             (install_id, machine_id),

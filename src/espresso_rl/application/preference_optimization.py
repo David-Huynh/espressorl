@@ -73,7 +73,10 @@ class ConsecutivePreferenceOptimizationService:
         *,
         comparison_mode: ComparisonMode,
     ) -> ShotRequest:
-        existing = self._compatible_active_run(run_context)
+        existing = self._compatible_active_run(
+            run_context,
+            comparison_mode=ComparisonMode(comparison_mode),
+        )
         if existing is not None:
             state = self._require_state(existing.run_id)
             pending = self._repository.get_pending_suggestion(existing.run_id)
@@ -300,6 +303,9 @@ class ConsecutivePreferenceOptimizationService:
         recipe = self._repository.get_recipe(new_shot.recipe_id)
         if recipe is None:
             raise ValueError("new shot references a missing recipe")
+        pending = self._repository.get_pending_suggestion(run_id)
+        if pending is None:
+            raise ValueError("pending CPBO suggestion is missing")
 
         now = self._clock()
         comparison = PreferenceComparison(
@@ -308,20 +314,20 @@ class ConsecutivePreferenceOptimizationService:
             new_shot_id=new_shot_id,
             anchor_shot_id=anchor_shot_id,
             label=label,
-            comparison_mode=run.comparison_mode,
+            comparison_mode=pending.comparison_mode,
             created_at=now,
             taste_goal=run.context.taste_goal,
         )
         incumbent_shot_id = state.incumbent_shot_id
         trust_region_state = state.trust_region_state
-        if run.comparison_mode == ComparisonMode.BEST_INCUMBENT:
+        if pending.comparison_mode == ComparisonMode.BEST_INCUMBENT:
             trust_region_state = self._optimizer.update_trust_region_state(
                 trust_region_state,
                 label,
                 candidate_center=recipe.normalized_x,
             )
-            if label == PreferenceLabel.NEW_BETTER:
-                incumbent_shot_id = new_shot_id
+        if label == PreferenceLabel.NEW_BETTER and anchor_shot_id == incumbent_shot_id:
+            incumbent_shot_id = new_shot_id
         updated_state = replace(
             state,
             previous_valid_shot_id=new_shot_id,
@@ -341,6 +347,9 @@ class ConsecutivePreferenceOptimizationService:
 
     def get_run(self, run_id: str) -> OptimizationRun:
         return self._require_run(run_id)
+
+    def get_pending_suggestion(self, run_id: str) -> Suggestion | None:
+        return self._repository.get_pending_suggestion(run_id)
 
     def get_shot(self, shot_id: str) -> PreferenceShot:
         shot = self._repository.get_shot(shot_id)
@@ -380,23 +389,82 @@ class ConsecutivePreferenceOptimizationService:
             state=self._require_state(run_id),
         )
 
-    def active_run(self, context: OptimizationRunContext) -> OptimizationRun | None:
-        return self._compatible_active_run(context)
+    def active_run(
+        self,
+        context: OptimizationRunContext,
+        *,
+        comparison_mode: ComparisonMode | None = None,
+    ) -> OptimizationRun | None:
+        return self._compatible_active_run(context, comparison_mode=comparison_mode)
+
+    def run_matches_configuration(
+        self,
+        run: OptimizationRun,
+        *,
+        comparison_mode: ComparisonMode | None = None,
+    ) -> bool:
+        return (
+            run.configuration_version == self._configuration_version
+            and run.recipe_space.version == self._recipe_domain.effective_version
+            and (comparison_mode is None or run.comparison_mode == ComparisonMode(comparison_mode))
+        )
 
     def _compatible_active_run(
         self,
         context: OptimizationRunContext,
+        *,
+        comparison_mode: ComparisonMode | None = None,
     ) -> OptimizationRun | None:
         run = self._repository.find_active_run(context)
         if run is None:
             return None
-        if (
-            run.configuration_version == self._configuration_version
-            and run.recipe_space.version == self._recipe_domain.effective_version
-        ):
+        if run.recipe_space.version != self._recipe_domain.effective_version:
+            self._repository.deactivate_run(run.run_id)
+            return None
+        if self.run_matches_configuration(run, comparison_mode=comparison_mode):
             return run
-        self._repository.deactivate_run(run.run_id)
-        return None
+        state = self._require_state(run.run_id)
+        if state.pending_shot_id is not None:
+            return run
+        desired_mode = run.comparison_mode if comparison_mode is None else ComparisonMode(comparison_mode)
+        anchor_id = (
+            state.previous_valid_shot_id
+            if desired_mode == ComparisonMode.GLOBAL_PREVIOUS
+            else state.incumbent_shot_id
+        )
+        if anchor_id is None:
+            center = self._repository.list_recipes(run.run_id)[0].normalized_x
+        else:
+            anchor_shot = self._repository.get_shot(anchor_id)
+            if anchor_shot is None:
+                raise ValueError("CPBO reconfiguration anchor shot is missing")
+            anchor_recipe = self._repository.get_recipe(anchor_shot.recipe_id)
+            if anchor_recipe is None:
+                raise ValueError("CPBO reconfiguration anchor recipe is missing")
+            center = anchor_recipe.normalized_x
+        updated_run = replace(
+            run,
+            comparison_mode=desired_mode,
+            configuration_version=self._configuration_version,
+        )
+        updated_state = replace(
+            state,
+            trust_region_state=TrustRegionState(
+                center=center,
+                length=self._initial_trust_region_length,
+            ),
+            model_checkpoint=None,
+            trace_model_checkpoint=None,
+            random_seed=self._random_seed,
+            configuration_version=self._configuration_version,
+            pending_recipe_id=None,
+            pending_anchor_shot_id=None,
+            pending_shot_id=None,
+            pending_suggestion_json=None,
+            updated_at=self._clock(),
+        )
+        self._repository.update_run_configuration(updated_run, updated_state)
+        return updated_run
 
     def suggestion_to_machine_recommendation(
         self,

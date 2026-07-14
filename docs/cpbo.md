@@ -295,9 +295,25 @@ The application trust region starts at normalized length 0.1 so the wider
 physical recipe domain still begins with local exploration. The
 paper-fidelity profile retains the reference 0.8 initial length.
 
-profile_name set to paper_fidelity uses global-previous mode, 2,000 GP steps,
+The paper_fidelity profile defaults to global-previous mode, 2,000 GP steps,
 25,000 Gumbel samples, 20 bins, and 1,000 truncated samples per bin. It is
 intended for reproduction and offline analysis, not low-latency operation.
+The runtime comparison policy is independent and may override that profile
+default.
+
+Gaggimate publishes the selected `cpbo_profile_name` and
+`cpbo_comparison_mode` in its `optimizer_settings` event. Both fields are
+strict enums. The display defaults to `application` and `best_incumbent`.
+Changing either field clears an outstanding, unconsumed recommendation and
+forces a model refit, but it does not change the bean/grinder context or delete
+physical shots and pairwise comparisons. When the physical recipe domain is
+unchanged, the active run retains compatible evidence across configuration
+changes, including comparisons collected with the other anchor policy. Each
+stored comparison retains the policy under which its anchor was selected.
+Switching away from a bean/grinder context and later returning to the same
+context resumes its active run and current recommendation. A different recipe
+profile or taste goal is a different optimization context and retains its own
+independent run.
 
 The recipe domain is CPBO's configurable physical search space, not a set of
 machine-safety limits. The default relative grind domain is the baseline plus

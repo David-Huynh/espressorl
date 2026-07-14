@@ -391,6 +391,36 @@ class PostgresPreferentialOptimizationRepository:
             if cursor.rowcount != 1:
                 raise ValueError("CPBO run could not be deactivated")
 
+    def update_run_configuration(
+        self,
+        run: OptimizationRun,
+        state: OptimizerState,
+    ) -> None:
+        if run.run_id != state.optimization_run_id:
+            raise ValueError("run and optimizer state identifiers disagree")
+        if not run.active:
+            raise ValueError("cannot reconfigure an inactive CPBO run")
+        if state.pending_recipe_id is not None or state.pending_shot_id is not None:
+            raise ValueError("cannot reconfigure a CPBO run with pending work")
+        with self._lock, self._store.conn.transaction():
+            cursor = self._store.conn.execute(
+                """
+                UPDATE cpbo_runs SET payload_json=%s
+                WHERE run_id=%s AND active=TRUE
+                """,
+                (run_to_json(run), run.run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("active CPBO run could not be reconfigured")
+            self._store.conn.execute(
+                """
+                UPDATE cpbo_suggestions SET status='superseded'
+                WHERE run_id=%s AND status IN ('pending', 'awaiting_preference')
+                """,
+                (run.run_id,),
+            )
+            self._upsert_state(state)
+
     def get_recipe(self, recipe_id: str) -> RecipePoint | None:
         row = self._store.conn.execute(
             "SELECT payload_json FROM cpbo_recipes WHERE recipe_id=%s",

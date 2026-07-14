@@ -207,6 +207,81 @@ class RealCPBOEngineIntegrationTests(unittest.TestCase):
                     [False, False, True, True],
                 )
 
+    def test_real_engine_refits_mixed_anchor_policy_history(self) -> None:
+        config = fast_cpbo_config()
+        clock = CounterClock()
+        context = OptimizationRunContext("install", "machine", "bean", "grinder", "profile")
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "cpbo.db") as store:
+                repository = SQLitePreferentialOptimizationRepository(store)
+                service = ConsecutivePreferenceOptimizationService(
+                    repository,
+                    ConsecutivePreferentialBayesianOptimizer(config),
+                    recipe_space_factory,
+                    random_seed=config.random_seed,
+                    configuration_version=config.effective_configuration_version,
+                    clock=clock,
+                )
+                baseline = service.initialize(
+                    context,
+                    baseline_recipe(),
+                    comparison_mode=ComparisonMode.BEST_INCUMBENT,
+                )
+                service.record_shot(
+                    baseline.optimization_run_id,
+                    baseline.recipe,
+                    PhysicalShotStatus.VALID,
+                    shot_id="baseline",
+                    started_at=1,
+                    completed_at=2,
+                )
+                local = service.suggest_next(baseline.optimization_run_id)
+                service.record_shot(
+                    baseline.optimization_run_id,
+                    local.recipe,
+                    PhysicalShotStatus.VALID,
+                    shot_id="local_candidate",
+                    started_at=3,
+                    completed_at=4,
+                )
+                service.record_preference(
+                    baseline.optimization_run_id,
+                    "local_candidate",
+                    "baseline",
+                    PreferenceLabel.TIE,
+                )
+
+                global_request = service.initialize(
+                    context,
+                    baseline_recipe(),
+                    comparison_mode=ComparisonMode.GLOBAL_PREVIOUS,
+                )
+                self.assertEqual(global_request.optimization_run_id, baseline.optimization_run_id)
+                self.assertEqual(global_request.anchor_shot_id, "local_candidate")
+                service.record_shot(
+                    baseline.optimization_run_id,
+                    global_request.recipe,
+                    PhysicalShotStatus.VALID,
+                    shot_id="global_candidate",
+                    started_at=5,
+                    completed_at=6,
+                )
+                service.record_preference(
+                    baseline.optimization_run_id,
+                    "global_candidate",
+                    "local_candidate",
+                    PreferenceLabel.TIE,
+                )
+
+                local_again = service.initialize(
+                    context,
+                    baseline_recipe(),
+                    comparison_mode=ComparisonMode.BEST_INCUMBENT,
+                )
+                self.assertEqual(local_again.optimization_run_id, baseline.optimization_run_id)
+                self.assertEqual(local_again.anchor_shot_id, "baseline")
+                self.assertEqual(len(repository.list_comparisons(baseline.optimization_run_id)), 2)
+
 
 class CounterClock:
     def __init__(self) -> None:
@@ -233,8 +308,6 @@ def recipe_space_factory(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:
         RecipeParameter("dose_g", 16.0, 20.0, 0.1, "g"),
         RecipeParameter("target_output_g", 26.0, 46.0, 0.1, "g"),
         recipe.grinder_step_direction,
-        1.4,
-        2.8,
     )
 
 
@@ -254,8 +327,6 @@ def corner_recipe_space_factory(recipe: Recipe, _recipe_domain: object) -> Recip
         RecipeParameter("dose_g", 14.0, 22.0, 0.1, "g"),
         RecipeParameter("target_output_g", 20.0, 60.0, 0.1, "g"),
         recipe.grinder_step_direction,
-        1.2,
-        3.5,
     )
 
 

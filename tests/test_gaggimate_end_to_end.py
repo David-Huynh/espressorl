@@ -260,8 +260,6 @@ def _recipe_space(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:
         RecipeParameter("dose_g", 14.0, 22.0, 0.1, "g"),
         RecipeParameter("target_output_g", 20.0, 60.0, 0.1, "g"),
         recipe.grinder_step_direction,
-        1.2,
-        3.5,
     )
 
 

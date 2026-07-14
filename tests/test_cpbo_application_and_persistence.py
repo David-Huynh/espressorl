@@ -273,6 +273,73 @@ class CPBOApplicationTests(unittest.TestCase):
         self.assertEqual(service.active_run(sweet_context).run_id, sweet_request.optimization_run_id)
         self.assertEqual(service.active_run(run_context()).run_id, first_run)
 
+    def test_changing_comparison_policy_reuses_the_active_run_evidence(self) -> None:
+        service, _, first_run = self.service(ComparisonMode.BEST_INCUMBENT)
+        suggestion = service.suggest_next(first_run)
+        service.record_shot(
+            first_run,
+            suggestion.recipe,
+            PhysicalShotStatus.VALID,
+            shot_id="candidate_before_policy_change",
+            started_at=3,
+            completed_at=4,
+        )
+        service.record_preference(
+            first_run,
+            "candidate_before_policy_change",
+            "baseline",
+            PreferenceLabel.NEW_BETTER,
+        )
+        original_shots = self.repository.list_shots(first_run)
+        original_comparisons = self.repository.list_comparisons(first_run)
+
+        replacement = service.initialize(
+            run_context(),
+            baseline_recipe(),
+            comparison_mode=ComparisonMode.GLOBAL_PREVIOUS,
+        )
+
+        self.assertEqual(replacement.optimization_run_id, first_run)
+        self.assertTrue(self.repository.get_run(first_run).active)
+        self.assertEqual(replacement.comparison_mode, ComparisonMode.GLOBAL_PREVIOUS)
+        self.assertEqual(self.repository.list_shots(first_run), original_shots)
+        self.assertEqual(self.repository.list_comparisons(first_run), original_comparisons)
+
+    def test_policy_change_waits_for_pending_preference_without_losing_it(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        suggestion = service.suggest_next(run_id)
+        service.record_shot(
+            run_id,
+            suggestion.recipe,
+            PhysicalShotStatus.VALID,
+            shot_id="candidate_before_policy_change",
+            started_at=3,
+            completed_at=4,
+        )
+
+        pending_run = service.active_run(
+            run_context(),
+            comparison_mode=ComparisonMode.GLOBAL_PREVIOUS,
+        )
+        self.assertEqual(pending_run.run_id, run_id)
+        self.assertEqual(pending_run.comparison_mode, ComparisonMode.BEST_INCUMBENT)
+
+        service.record_preference(
+            run_id,
+            "candidate_before_policy_change",
+            "baseline",
+            PreferenceLabel.TIE,
+        )
+        reconfigured_run = service.active_run(
+            run_context(),
+            comparison_mode=ComparisonMode.GLOBAL_PREVIOUS,
+        )
+
+        self.assertEqual(reconfigured_run.run_id, run_id)
+        self.assertEqual(reconfigured_run.comparison_mode, ComparisonMode.GLOBAL_PREVIOUS)
+        comparison = self.repository.list_comparisons(run_id)[0]
+        self.assertEqual(comparison.comparison_mode, ComparisonMode.BEST_INCUMBENT)
+
     def test_initialize_resumes_with_a_new_suggestion_not_the_incumbent(self) -> None:
         service, engine, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
 
@@ -341,7 +408,7 @@ class CPBOApplicationTests(unittest.TestCase):
                 comparison_mode=ComparisonMode.BEST_INCUMBENT,
             )
 
-    def test_configuration_change_archives_run_without_mutating_history(self) -> None:
+    def test_configuration_change_refits_the_active_run_without_losing_history(self) -> None:
         first_service = ConsecutivePreferenceOptimizationService(
             self.repository,
             RecordingEngine(),
@@ -365,15 +432,16 @@ class CPBOApplicationTests(unittest.TestCase):
             configuration_version="config:v2",
             clock=self.clock,
         )
-        self.assertIsNone(second_service.active_run(run_context()))
-        self.assertFalse(self.repository.get_run(first.optimization_run_id).active)
+        active = second_service.active_run(run_context())
+        self.assertEqual(active.run_id, first.optimization_run_id)
+        self.assertTrue(self.repository.get_run(first.optimization_run_id).active)
         second = second_service.initialize(
             run_context(),
             baseline_recipe(),
             comparison_mode=ComparisonMode.BEST_INCUMBENT,
         )
 
-        self.assertNotEqual(first.optimization_run_id, second.optimization_run_id)
+        self.assertEqual(first.optimization_run_id, second.optimization_run_id)
         self.assertEqual(self.repository.get_recipe(first_recipe.recipe_id), first_recipe)
         self.assertEqual(
             self.repository.get_run(second.optimization_run_id).configuration_version,
@@ -410,8 +478,6 @@ def recipe_space_factory(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:
         RecipeParameter("dose_g", 14.0, 22.0, 0.1, "g"),
         RecipeParameter("target_output_g", 20.0, 60.0, 0.1, "g"),
         recipe.grinder_step_direction,
-        1.2,
-        3.5,
     )
 
 

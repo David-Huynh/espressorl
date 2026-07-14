@@ -42,6 +42,11 @@ class ComparisonMode(str, Enum):
     BEST_INCUMBENT = "best_incumbent"
 
 
+class CPBOProfile(str, Enum):
+    APPLICATION = "application"
+    PAPER_FIDELITY = "paper_fidelity"
+
+
 class PhysicalShotStatus(str, Enum):
     VALID = "valid"
     MACHINE_FAILURE = "machine_failure"

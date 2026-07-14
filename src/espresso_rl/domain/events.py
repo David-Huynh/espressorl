@@ -15,7 +15,7 @@ from .models import (
     ShotType,
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
-from .cpbo import ComparisonMode, PreferenceLabel, RecipeDomain
+from .cpbo import CPBOProfile, ComparisonMode, PreferenceLabel, RecipeDomain
 from .taste_goal import TasteGoal
 
 VALID_CORRECTION_TAGS = {
@@ -698,6 +698,8 @@ class OptimizerSettingsEvent:
     machine_id: str
     timestamp: int
     optimizer_mode: str = DEFAULT_OPTIMIZER_MODE
+    cpbo_profile_name: CPBOProfile = CPBOProfile.APPLICATION
+    cpbo_comparison_mode: ComparisonMode = ComparisonMode.BEST_INCUMBENT
     schema_version: int = 1
     bean_context_id: str | None = None
     grinder_context_id: str | None = None
@@ -713,6 +715,8 @@ class OptimizerSettingsEvent:
         if self.schema_version != 1:
             raise ValueError("unsupported optimizer settings schema_version")
         object.__setattr__(self, "optimizer_mode", normalize_optimizer_mode(self.optimizer_mode))
+        object.__setattr__(self, "cpbo_profile_name", CPBOProfile(self.cpbo_profile_name))
+        object.__setattr__(self, "cpbo_comparison_mode", ComparisonMode(self.cpbo_comparison_mode))
         object.__setattr__(self, "bean_context_id", _optional_string(self.bean_context_id, "bean_context_id", 160))
         object.__setattr__(self, "grinder_context_id", _optional_string(self.grinder_context_id, "grinder_context_id"))
         object.__setattr__(self, "profile_id", _optional_string(self.profile_id, "profile_id"))

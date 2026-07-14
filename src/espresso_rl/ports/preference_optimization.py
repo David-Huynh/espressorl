@@ -69,6 +69,13 @@ class PreferentialOptimizationRepository(Protocol):
     def deactivate_run(self, run_id: str) -> None:
         ...
 
+    def update_run_configuration(
+        self,
+        run: OptimizationRun,
+        state: OptimizerState,
+    ) -> None:
+        ...
+
     def get_recipe(self, recipe_id: str) -> RecipePoint | None:
         ...
 
