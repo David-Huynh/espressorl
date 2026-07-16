@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
+from espresso_rl.application.live_telemetry import LiveShotTelemetryService
 from espresso_rl.application.services import EspressoRLService, IngestResult
 from espresso_rl.domain.events import MachineStateEvent, ShotProfileEvent
 from espresso_rl.domain.models import Recommendation, ShotRecord
@@ -23,11 +24,13 @@ class AutoTuningRuntimeCoordinator:
         publisher: AutoTuningRuntimePublisher,
         outcome_observer: OutcomeObserver | None = None,
         post_shot_recommendation: PostShotRecommendation | None = None,
+        live_telemetry: LiveShotTelemetryService | None = None,
     ) -> None:
         self._service = service
         self._publisher = publisher
         self._outcome_observer = outcome_observer
         self._post_shot_recommendation = post_shot_recommendation
+        self._live_telemetry = live_telemetry
 
     def handle_shot(self, event: ShotProfileEvent) -> IngestResult:
         result = self._service.ingest_shot_profile(event)
@@ -38,6 +41,18 @@ class AutoTuningRuntimeCoordinator:
                 result.dropped_reason or "unknown",
             )
             return result
+
+        if self._live_telemetry is not None:
+            live_session_matched = self._live_telemetry.reconcile_completed_shot(
+                result.shot.shot_id,
+                result.shot.install_id,
+                result.shot.machine_id,
+            )
+            if not live_session_matched:
+                logger.warning(
+                    "Discarded conflicting live telemetry for authoritative shot %s",
+                    result.shot.shot_id,
+                )
 
         recommendation = result.recommendation
         if recommendation is None and self._post_shot_recommendation is not None:

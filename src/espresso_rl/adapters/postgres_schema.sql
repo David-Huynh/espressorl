@@ -92,6 +92,47 @@ CREATE TABLE IF NOT EXISTS shots (
 CREATE INDEX IF NOT EXISTS idx_shots_context_time
     ON shots (install_id, machine_id, bean_context_id, timestamp DESC);
 
+CREATE TABLE IF NOT EXISTS live_shot_sessions (
+    shot_id TEXT PRIMARY KEY,
+    install_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    started_at_ms BIGINT NOT NULL,
+    sample_interval_ms INTEGER NOT NULL,
+    weight_source TEXT NOT NULL,
+    flow_source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    last_sequence INTEGER,
+    sample_count INTEGER NOT NULL,
+    gap_count INTEGER NOT NULL,
+    ended_at_ms BIGINT,
+    end_state TEXT,
+    reconciled_at_ms BIGINT,
+    updated_at_ms BIGINT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_live_shot_sessions_updated
+    ON live_shot_sessions (status, updated_at_ms);
+
+CREATE TABLE IF NOT EXISTS live_shot_samples (
+    shot_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    install_id TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    timestamp_ms BIGINT NOT NULL,
+    elapsed_ms INTEGER NOT NULL,
+    pressure_bar DOUBLE PRECISION NOT NULL,
+    pressure_target_bar DOUBLE PRECISION NOT NULL,
+    pump_flow_ml_s DOUBLE PRECISION NOT NULL,
+    pump_flow_target_ml_s DOUBLE PRECISION NOT NULL,
+    beverage_flow_g_s DOUBLE PRECISION NOT NULL,
+    weight_g DOUBLE PRECISION NOT NULL,
+    temperature_c DOUBLE PRECISION NOT NULL,
+    temperature_target_c DOUBLE PRECISION NOT NULL,
+    pump_target_mode INTEGER NOT NULL,
+    valve_open BOOLEAN NOT NULL,
+    PRIMARY KEY (shot_id, sequence)
+);
+
 ALTER TABLE shots
     ADD COLUMN IF NOT EXISTS grinder_context_id TEXT;
 

@@ -15,6 +15,7 @@ gaggimate/{topic_id}/rl/preference
 gaggimate/{topic_id}/rl/recommendation
 gaggimate/{topic_id}/rl/status
 gaggimate/{topic_id}/rl/shot/ack
+gaggimate/{topic_id}/rl/shot/live
 ```
 
 Shot profiles and acknowledgements use QoS 1. The acknowledgement is an
@@ -31,6 +32,15 @@ bounded reason code, retryability, and timestamp. Shot `machine_id` must match
 the MQTT topic. Exception text and infrastructure details are never published.
 The receipt is non-retained, so a lost receipt causes a safe idempotent replay
 rather than accepting stale broker state.
+
+Live shot telemetry uses non-retained QoS 0 start, sample, and end events at a
+nominal 250 ms cadence. The MQTT adapter validates topic ownership and channel
+bounds before translating these payloads into canonical live-shot events. The
+application service persists sequence gaps and session state through a
+`LiveShotSessionRepository`; SQLite and Postgres are adapter implementations.
+Live sessions never mutate recommendation or follow-through state. When the
+immutable completed shot arrives over QoS 1, it becomes authoritative and the
+duplicate live samples are removed. Stale sessions expire after 24 hours.
 
 Corrections may exclude bad puck preparation, utility brews, or unobserved
 recipe controls. Failed and aborted physical shots remain operational records

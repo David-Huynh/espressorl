@@ -21,6 +21,12 @@ from espresso_rl.domain.events import (
     ShotProfileEvent,
     UploadQueueMaintenanceEvent,
 )
+from espresso_rl.domain.live_telemetry import (
+    LiveShotEndedEvent,
+    LiveShotEvent,
+    LiveShotSampleEvent,
+    LiveShotStartedEvent,
+)
 from espresso_rl.domain.cpbo import RecipeDomain
 from espresso_rl.domain.models import Recommendation
 from espresso_rl.domain.models import new_id
@@ -37,6 +43,7 @@ APPLY_TOPIC = "gaggimate/+/rl/recommendation/apply"
 MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
 OPTIMIZER_SETTINGS_TOPIC = "gaggimate/+/rl/settings"
 LOCAL_RESET_TOPIC = "gaggimate/+/rl/local/reset"
+LIVE_SHOT_TOPIC = "gaggimate/+/rl/shot/live"
 SHOT_ACK_EVENT_TYPE = "shot_delivery_ack"
 SHOT_ACK_TOPIC_SUFFIX = "rl/shot/ack"
 _MACHINE_TOPIC_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -74,6 +81,7 @@ class GaggimateMQTTClient:
         on_preference: Callable[[PreferenceFeedbackEvent], None] | None = None,
         on_optimizer_settings: Callable[[OptimizerSettingsEvent], None] | None = None,
         on_local_reset: Callable[[LocalResetEvent], None] | None = None,
+        on_live_shot: Callable[[LiveShotEvent], None] | None = None,
     ) -> None:
         self._config = config
         self._on_shot = on_shot
@@ -85,6 +93,7 @@ class GaggimateMQTTClient:
         self._on_preference = on_preference or (lambda event: None)
         self._on_optimizer_settings = on_optimizer_settings or (lambda event: None)
         self._on_local_reset = on_local_reset or (lambda event: None)
+        self._on_live_shot = on_live_shot or (lambda event: None)
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.mqtt_user:
             self._client.username_pw_set(config.mqtt_user, config.mqtt_password)
@@ -178,8 +187,9 @@ class GaggimateMQTTClient:
             client.subscribe(MACHINE_STATE_TOPIC)
             client.subscribe(OPTIMIZER_SETTINGS_TOPIC)
             client.subscribe(LOCAL_RESET_TOPIC)
+            client.subscribe(LIVE_SHOT_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
                 PREFERENCE_TOPIC,
                 CORRECTION_TOPIC,
@@ -189,6 +199,7 @@ class GaggimateMQTTClient:
                 MACHINE_STATE_TOPIC,
                 OPTIMIZER_SETTINGS_TOPIC,
                 LOCAL_RESET_TOPIC,
+                LIVE_SHOT_TOPIC,
             )
         else:
             logger.error("MQTT connection refused: %s", reason_code)
@@ -206,9 +217,13 @@ class GaggimateMQTTClient:
             if not payload_text:
                 logger.debug("Ignoring empty MQTT payload on %s", msg.topic)
                 return
+            if msg.topic.endswith("/rl/shot/live") and len(msg.payload) > 4096:
+                raise ValueError("live-shot payload exceeds 4096 bytes")
             payload = json.loads(payload_text)
             if msg.topic.endswith("/shot/profile"):
                 self._handle_shot_message(payload, mac)
+            elif msg.topic.endswith("/rl/shot/live"):
+                self._on_live_shot(self.translate_live_shot_payload(payload, mac))
             elif msg.topic.endswith("/rl/preference"):
                 self._on_preference(self.translate_preference_payload(payload, mac))
             elif msg.topic.endswith("/rl/shot/correction"):
@@ -443,6 +458,60 @@ class GaggimateMQTTClient:
             final_phase_temperature_c=_optional_float(payload.get("final_phase_temperature_c")),
             shot_end_state=_optional_string(payload.get("shot_end_state")),
         )
+
+    def translate_live_shot_payload(self, payload: Any, mac: str) -> LiveShotEvent:
+        if not isinstance(payload, dict):
+            raise ValueError("live-shot payload must be an object")
+        if payload.get("schema_version") != 1:
+            raise ValueError("unsupported live-shot schema_version")
+        topic_machine_id = f"gaggimate:{mac}"
+        machine_id = _required_field(payload, "machine_id")
+        if not isinstance(machine_id, str):
+            raise ValueError("live-shot machine_id must be a string")
+        if not _same_gaggimate_machine_id(topic_machine_id, machine_id):
+            raise ValueError("live-shot machine_id does not match topic")
+        common = {
+            "shot_id": _required_field(payload, "shot_id"),
+            "install_id": self._config.install_id,
+            "machine_id": machine_id,
+            "timestamp_ms": _required_field(payload, "timestamp_ms"),
+            "schema_version": 1,
+        }
+        event_type = payload.get("event_type")
+        if event_type == "live_shot_started":
+            return LiveShotStartedEvent(
+                **common,
+                sample_interval_ms=_required_field(payload, "sample_interval_ms"),
+                weight_source=_required_field(payload, "weight_source"),
+                flow_source=_required_field(payload, "flow_source"),
+            )
+        if event_type == "live_shot_sample":
+            sample = _required_field(payload, "sample")
+            if not isinstance(sample, dict):
+                raise ValueError("live-shot sample must be an object")
+            return LiveShotSampleEvent(
+                **common,
+                sequence=_required_field(payload, "sequence"),
+                elapsed_ms=_required_field(payload, "elapsed_ms"),
+                pressure_bar=_required_field(sample, "pressure_bar"),
+                pressure_target_bar=_required_field(sample, "pressure_target_bar"),
+                pump_flow_ml_s=_required_field(sample, "pump_flow_ml_s"),
+                pump_flow_target_ml_s=_required_field(sample, "pump_flow_target_ml_s"),
+                beverage_flow_g_s=_required_field(sample, "beverage_flow_g_s"),
+                weight_g=_required_field(sample, "weight_g"),
+                temperature_c=_required_field(sample, "temperature_c"),
+                temperature_target_c=_required_field(sample, "temperature_target_c"),
+                pump_target_mode=_required_field(sample, "pump_target_mode"),
+                valve_open=_required_field(sample, "valve_open"),
+            )
+        if event_type == "live_shot_ended":
+            return LiveShotEndedEvent(
+                **common,
+                final_sequence=_required_field(payload, "final_sequence"),
+                elapsed_ms=_required_field(payload, "elapsed_ms"),
+                end_state=_required_field(payload, "end_state"),
+            )
+        raise ValueError("unsupported live-shot event_type")
 
     def translate_preference_payload(
         self,
@@ -856,6 +925,12 @@ def _positive_optional_float(value: Any) -> float | None:
     if parsed is None or parsed <= 0:
         return None
     return parsed
+
+
+def _required_field(payload: dict[str, Any], field_name: str) -> Any:
+    if field_name not in payload or payload[field_name] is None:
+        raise ValueError(f"{field_name} is required")
+    return payload[field_name]
 
 
 def _nonnegative_control_float(value: Any, field_name: str) -> float | None:

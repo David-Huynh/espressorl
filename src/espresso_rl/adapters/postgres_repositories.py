@@ -9,11 +9,14 @@ from typing import Any
 from espresso_rl.adapters.sqlite_repositories import (
     _recommendation_to_row,
     _row_to_recommendation,
+    _row_to_live_sample,
+    _row_to_live_session,
     _row_to_shot,
     _row_to_upload_item,
     _shot_to_row,
     _upload_item_to_row,
 )
+from espresso_rl.domain.live_telemetry import LiveShotSampleEvent, LiveShotSession
 from espresso_rl.domain.community import (
     AdminActionLogEntry,
     CommunityAbuseEvent,
@@ -734,6 +737,101 @@ class PostgresShotRepository:
             (install_id, machine_id, limit),
         ).fetchall()
         return list(reversed([_row_to_shot(row) for row in rows]))
+
+
+class PostgresLiveShotSessionRepository:
+    def __init__(self, store: PostgresStore) -> None:
+        self._store = store
+        self._lock = threading.RLock()
+
+    def get_session(self, shot_id: str) -> LiveShotSession | None:
+        with self._lock:
+            row = self._store.conn.execute(
+                "SELECT * FROM live_shot_sessions WHERE shot_id=%s", (shot_id,)
+            ).fetchone()
+        return _row_to_live_session(row) if row else None
+
+    def upsert_session(self, session: LiveShotSession) -> None:
+        with self._lock:
+            _upsert(
+                self._store.conn,
+                "live_shot_sessions",
+                "shot_id",
+                _live_session_dict(session),
+            )
+
+    def get_sample(self, shot_id: str, sequence: int) -> LiveShotSampleEvent | None:
+        with self._lock:
+            row = self._store.conn.execute(
+                "SELECT * FROM live_shot_samples WHERE shot_id=%s AND sequence=%s",
+                (shot_id, sequence),
+            ).fetchone()
+        return _row_to_live_sample(row) if row else None
+
+    def append_sample(
+        self,
+        sample: LiveShotSampleEvent,
+        session: LiveShotSession,
+    ) -> None:
+        row = _live_sample_dict(sample)
+        columns = list(row)
+        with self._lock:
+            try:
+                self._store.conn.execute(
+                    f"INSERT INTO live_shot_samples ({', '.join(columns)}) "
+                    f"VALUES ({', '.join(f'%({column})s' for column in columns)})",
+                    row,
+                )
+                _upsert_without_commit(
+                    self._store.conn,
+                    "live_shot_sessions",
+                    "shot_id",
+                    _live_session_dict(session),
+                )
+                self._store.conn.commit()
+            except Exception:
+                self._store.conn.rollback()
+                raise
+
+    def reconcile_session(self, session: LiveShotSession) -> None:
+        with self._lock:
+            try:
+                _upsert_without_commit(
+                    self._store.conn,
+                    "live_shot_sessions",
+                    "shot_id",
+                    _live_session_dict(session),
+                )
+                self._store.conn.execute(
+                    "DELETE FROM live_shot_samples WHERE shot_id=%s",
+                    (session.shot_id,),
+                )
+                self._store.conn.commit()
+            except Exception:
+                self._store.conn.rollback()
+                raise
+
+    def expire_before(self, cutoff_ms: int, updated_at_ms: int) -> int:
+        with self._lock:
+            try:
+                rows = self._store.conn.execute(
+                    """
+                    UPDATE live_shot_sessions
+                    SET status='expired', updated_at_ms=%s
+                    WHERE status IN ('active', 'ended') AND updated_at_ms < %s
+                    RETURNING shot_id
+                    """,
+                    (updated_at_ms, cutoff_ms),
+                ).fetchall()
+                for row in rows:
+                    self._store.conn.execute(
+                        "DELETE FROM live_shot_samples WHERE shot_id=%s", (row["shot_id"],)
+                    )
+                self._store.conn.commit()
+            except Exception:
+                self._store.conn.rollback()
+                raise
+        return len(rows)
 
 
 class PostgresLocalDataRepository:
@@ -1849,24 +1947,69 @@ class PostgresCommunityWarehouse:
         return [_row_to_admin_action(row) for row in rows]
 
 
+def _live_session_dict(session: LiveShotSession) -> dict[str, Any]:
+    return {
+        "shot_id": session.shot_id,
+        "install_id": session.install_id,
+        "machine_id": session.machine_id,
+        "started_at_ms": session.started_at_ms,
+        "sample_interval_ms": session.sample_interval_ms,
+        "weight_source": session.weight_source,
+        "flow_source": session.flow_source,
+        "status": session.status.value,
+        "last_sequence": session.last_sequence,
+        "sample_count": session.sample_count,
+        "gap_count": session.gap_count,
+        "ended_at_ms": session.ended_at_ms,
+        "end_state": session.end_state,
+        "reconciled_at_ms": session.reconciled_at_ms,
+        "updated_at_ms": session.updated_at_ms,
+    }
+
+
+def _live_sample_dict(sample: LiveShotSampleEvent) -> dict[str, Any]:
+    return {
+        "shot_id": sample.shot_id,
+        "sequence": sample.sequence,
+        "install_id": sample.install_id,
+        "machine_id": sample.machine_id,
+        "timestamp_ms": sample.timestamp_ms,
+        "elapsed_ms": sample.elapsed_ms,
+        "pressure_bar": sample.pressure_bar,
+        "pressure_target_bar": sample.pressure_target_bar,
+        "pump_flow_ml_s": sample.pump_flow_ml_s,
+        "pump_flow_target_ml_s": sample.pump_flow_target_ml_s,
+        "beverage_flow_g_s": sample.beverage_flow_g_s,
+        "weight_g": sample.weight_g,
+        "temperature_c": sample.temperature_c,
+        "temperature_target_c": sample.temperature_target_c,
+        "pump_target_mode": sample.pump_target_mode,
+        "valve_open": sample.valve_open,
+    }
+
+
 def _upsert(conn, table: str, key: str, row: dict[str, Any]) -> None:
-    columns = list(row)
-    column_sql = ", ".join(columns)
-    value_sql = ", ".join(f"%({column})s" for column in columns)
-    update_sql = ", ".join(f"{column}=EXCLUDED.{column}" for column in columns if column != key)
     try:
-        conn.execute(
-            f"""
-            INSERT INTO {table} ({column_sql})
-            VALUES ({value_sql})
-            ON CONFLICT ({key}) DO UPDATE SET {update_sql}
-            """,
-            row,
-        )
+        _upsert_without_commit(conn, table, key, row)
         conn.commit()
     except Exception:
         conn.rollback()
         raise
+
+
+def _upsert_without_commit(conn, table: str, key: str, row: dict[str, Any]) -> None:
+    columns = list(row)
+    column_sql = ", ".join(columns)
+    value_sql = ", ".join(f"%({column})s" for column in columns)
+    update_sql = ", ".join(f"{column}=EXCLUDED.{column}" for column in columns if column != key)
+    conn.execute(
+        f"""
+        INSERT INTO {table} ({column_sql})
+        VALUES ({value_sql})
+        ON CONFLICT ({key}) DO UPDATE SET {update_sql}
+        """,
+        row,
+    )
 
 
 def _count_table(conn, table: str) -> int:

@@ -10,6 +10,7 @@ from espresso_rl.adapters.gaggimate_mqtt import (
     CORRECTION_TOPIC,
     DECISION_TOPIC,
     LOCAL_RESET_TOPIC,
+    LIVE_SHOT_TOPIC,
     MACHINE_STATE_TOPIC,
     OPTIMIZER_SETTINGS_TOPIC,
     PREFERENCE_TOPIC,
@@ -29,6 +30,30 @@ from espresso_rl.domain.models import (
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "gaggimate_shot_profile.json"
+
+
+def _live_sample_payload(sequence: int, elapsed_ms: int) -> dict[str, object]:
+    return {
+        "event_type": "live_shot_sample",
+        "schema_version": 1,
+        "shot_id": "shot_live_1",
+        "machine_id": "gaggimate:AA_BB",
+        "timestamp_ms": 1_800_000_000_000 + elapsed_ms,
+        "sequence": sequence,
+        "elapsed_ms": elapsed_ms,
+        "sample": {
+            "pressure_bar": 9.0,
+            "pressure_target_bar": 9.0,
+            "pump_flow_ml_s": 4.0,
+            "pump_flow_target_ml_s": 4.0,
+            "beverage_flow_g_s": 2.0,
+            "weight_g": 5.0,
+            "temperature_c": 93.0,
+            "temperature_target_c": 93.0,
+            "pump_target_mode": 1,
+            "valve_open": True,
+        },
+    }
 
 
 class FakeMQTT:
@@ -199,9 +224,48 @@ class GaggimateAdapterTests(unittest.TestCase):
                 MACHINE_STATE_TOPIC,
                 OPTIMIZER_SETTINGS_TOPIC,
                 LOCAL_RESET_TOPIC,
+                LIVE_SHOT_TOPIC,
             },
         )
         self.assertFalse(any("rating" in topic or "dreamer" in topic for topic in mqtt.subscriptions))
+
+    def test_live_shot_payload_translates_to_canonical_events(self) -> None:
+        started = self.client.translate_live_shot_payload(
+            {
+                "event_type": "live_shot_started",
+                "schema_version": 1,
+                "shot_id": "shot_live_1",
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp_ms": 1_800_000_000_000,
+                "sample_interval_ms": 250,
+                "weight_source": "hardware_scale",
+                "flow_source": "hardware_scale",
+            },
+            "AA_BB",
+        )
+        self.assertEqual(started.shot_id, "shot_live_1")
+        sample = self.client.translate_live_shot_payload(
+            _live_sample_payload(sequence=0, elapsed_ms=250),
+            "AA_BB",
+        )
+        self.assertEqual(sample.temperature_c, 93.0)
+        self.assertEqual(sample.pump_target_mode, 1)
+
+    def test_live_shot_payload_rejects_untrusted_identity_and_channels(self) -> None:
+        wrong_machine = _live_sample_payload(sequence=0, elapsed_ms=250)
+        wrong_machine["machine_id"] = "gaggimate:OTHER"
+        with self.assertRaisesRegex(ValueError, "machine_id"):
+            self.client.translate_live_shot_payload(wrong_machine, "AA_BB")
+
+        invalid_pressure = _live_sample_payload(sequence=0, elapsed_ms=250)
+        invalid_pressure["sample"]["pressure_bar"] = 100.0
+        with self.assertRaisesRegex(ValueError, "pressure_bar"):
+            self.client.translate_live_shot_payload(invalid_pressure, "AA_BB")
+
+        numeric_shot_id = _live_sample_payload(sequence=0, elapsed_ms=250)
+        numeric_shot_id["shot_id"] = 123
+        with self.assertRaisesRegex(ValueError, "shot_id"):
+            self.client.translate_live_shot_payload(numeric_shot_id, "AA_BB")
 
     def test_recommendation_publication_contains_comparison_identity(self) -> None:
         mqtt = FakeMQTT()

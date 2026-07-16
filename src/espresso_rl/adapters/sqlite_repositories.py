@@ -8,6 +8,11 @@ from pathlib import Path
 
 import numpy as np
 
+from espresso_rl.domain.live_telemetry import (
+    LiveShotSampleEvent,
+    LiveShotSession,
+    LiveShotSessionStatus,
+)
 from espresso_rl.domain.models import (
     AUX_PROFILE_SHAPE,
     PROFILE_DTYPE,
@@ -213,6 +218,48 @@ class SQLiteStore:
                 absolute_reference_step REAL,
                 projected_absolute_step REAL
             )
+            """
+        )
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS live_shot_sessions (
+                shot_id TEXT PRIMARY KEY,
+                install_id TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                started_at_ms INTEGER NOT NULL,
+                sample_interval_ms INTEGER NOT NULL,
+                weight_source TEXT NOT NULL,
+                flow_source TEXT NOT NULL,
+                status TEXT NOT NULL,
+                last_sequence INTEGER,
+                sample_count INTEGER NOT NULL,
+                gap_count INTEGER NOT NULL,
+                ended_at_ms INTEGER,
+                end_state TEXT,
+                reconciled_at_ms INTEGER,
+                updated_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_live_shot_sessions_updated
+                ON live_shot_sessions (status, updated_at_ms);
+            CREATE TABLE IF NOT EXISTS live_shot_samples (
+                shot_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                install_id TEXT NOT NULL,
+                machine_id TEXT NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                elapsed_ms INTEGER NOT NULL,
+                pressure_bar REAL NOT NULL,
+                pressure_target_bar REAL NOT NULL,
+                pump_flow_ml_s REAL NOT NULL,
+                pump_flow_target_ml_s REAL NOT NULL,
+                beverage_flow_g_s REAL NOT NULL,
+                weight_g REAL NOT NULL,
+                temperature_c REAL NOT NULL,
+                temperature_target_c REAL NOT NULL,
+                pump_target_mode INTEGER NOT NULL,
+                valve_open INTEGER NOT NULL,
+                PRIMARY KEY (shot_id, sequence)
+            );
             """
         )
         self.conn.execute(
@@ -996,6 +1043,106 @@ class SQLiteShotRepository:
             (install_id, machine_id, limit),
         ).fetchall()
         return list(reversed([_row_to_shot(row) for row in rows]))
+
+
+class SQLiteLiveShotSessionRepository:
+    def __init__(self, store: SQLiteStore) -> None:
+        self._store = store
+        self._lock = threading.RLock()
+
+    def get_session(self, shot_id: str) -> LiveShotSession | None:
+        with self._lock:
+            row = self._store.conn.execute(
+                "SELECT * FROM live_shot_sessions WHERE shot_id=?", (shot_id,)
+            ).fetchone()
+        return _row_to_live_session(row) if row else None
+
+    def upsert_session(self, session: LiveShotSession) -> None:
+        with self._lock, self._store.conn:
+            self._write_session(session)
+
+    def get_sample(self, shot_id: str, sequence: int) -> LiveShotSampleEvent | None:
+        with self._lock:
+            row = self._store.conn.execute(
+                "SELECT * FROM live_shot_samples WHERE shot_id=? AND sequence=?",
+                (shot_id, sequence),
+            ).fetchone()
+        return _row_to_live_sample(row) if row else None
+
+    def append_sample(
+        self,
+        sample: LiveShotSampleEvent,
+        session: LiveShotSession,
+    ) -> None:
+        with self._lock, self._store.conn:
+            self._store.conn.execute(
+                """
+                INSERT INTO live_shot_samples (
+                    shot_id, sequence, install_id, machine_id, timestamp_ms, elapsed_ms,
+                    pressure_bar, pressure_target_bar, pump_flow_ml_s,
+                    pump_flow_target_ml_s, beverage_flow_g_s, weight_g, temperature_c,
+                    temperature_target_c, pump_target_mode, valve_open
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                _live_sample_row(sample),
+            )
+            self._write_session(session)
+
+    def reconcile_session(self, session: LiveShotSession) -> None:
+        with self._lock, self._store.conn:
+            self._write_session(session)
+            self._store.conn.execute(
+                "DELETE FROM live_shot_samples WHERE shot_id=?",
+                (session.shot_id,),
+            )
+
+    def expire_before(self, cutoff_ms: int, updated_at_ms: int) -> int:
+        with self._lock, self._store.conn:
+            rows = self._store.conn.execute(
+                """
+                SELECT shot_id FROM live_shot_sessions
+                WHERE status IN ('active', 'ended') AND updated_at_ms < ?
+                """,
+                (cutoff_ms,),
+            ).fetchall()
+            shot_ids = [str(row["shot_id"]) for row in rows]
+            for shot_id in shot_ids:
+                self._store.conn.execute(
+                    """
+                    UPDATE live_shot_sessions SET status='expired', updated_at_ms=?
+                    WHERE shot_id=?
+                    """,
+                    (updated_at_ms, shot_id),
+                )
+                self._store.conn.execute("DELETE FROM live_shot_samples WHERE shot_id=?", (shot_id,))
+        return len(shot_ids)
+
+    def _write_session(self, session: LiveShotSession) -> None:
+        self._store.conn.execute(
+            """
+            INSERT INTO live_shot_sessions (
+                shot_id, install_id, machine_id, started_at_ms, sample_interval_ms,
+                weight_source, flow_source, status, last_sequence, sample_count,
+                gap_count, ended_at_ms, end_state, reconciled_at_ms, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(shot_id) DO UPDATE SET
+                install_id=excluded.install_id,
+                machine_id=excluded.machine_id,
+                started_at_ms=excluded.started_at_ms,
+                sample_interval_ms=excluded.sample_interval_ms,
+                weight_source=excluded.weight_source,
+                flow_source=excluded.flow_source,
+                status=excluded.status,
+                last_sequence=excluded.last_sequence,
+                sample_count=excluded.sample_count,
+                gap_count=excluded.gap_count,
+                ended_at_ms=excluded.ended_at_ms,
+                end_state=excluded.end_state,
+                reconciled_at_ms=excluded.reconciled_at_ms,
+                updated_at_ms=excluded.updated_at_ms
+            """,
+            _live_session_row(session),
+        )
 
 
 class SQLiteLocalDataRepository:
@@ -1926,6 +2073,98 @@ def _fixed_cadence_sequence_from_json(value: str | None) -> FixedCadenceShotSequ
     if not isinstance(parsed, dict):
         raise ValueError("fixed_cadence_sequence_json must contain an object")
     return FixedCadenceShotSequence.from_dict(parsed)
+
+
+def _live_session_row(session: LiveShotSession) -> tuple[object, ...]:
+    return (
+        session.shot_id,
+        session.install_id,
+        session.machine_id,
+        session.started_at_ms,
+        session.sample_interval_ms,
+        session.weight_source,
+        session.flow_source,
+        session.status.value,
+        session.last_sequence,
+        session.sample_count,
+        session.gap_count,
+        session.ended_at_ms,
+        session.end_state,
+        session.reconciled_at_ms,
+        session.updated_at_ms,
+    )
+
+
+def _row_to_live_session(row: sqlite3.Row) -> LiveShotSession:
+    return LiveShotSession(
+        shot_id=str(row["shot_id"]),
+        install_id=str(row["install_id"]),
+        machine_id=str(row["machine_id"]),
+        started_at_ms=int(row["started_at_ms"]),
+        sample_interval_ms=int(row["sample_interval_ms"]),
+        weight_source=str(row["weight_source"]),
+        flow_source=str(row["flow_source"]),
+        status=LiveShotSessionStatus(str(row["status"])),
+        last_sequence=int(row["last_sequence"]) if row["last_sequence"] is not None else None,
+        sample_count=int(row["sample_count"]),
+        gap_count=int(row["gap_count"]),
+        ended_at_ms=int(row["ended_at_ms"]) if row["ended_at_ms"] is not None else None,
+        end_state=str(row["end_state"]) if row["end_state"] is not None else None,
+        reconciled_at_ms=(
+            int(row["reconciled_at_ms"]) if row["reconciled_at_ms"] is not None else None
+        ),
+        updated_at_ms=int(row["updated_at_ms"]),
+    )
+
+
+def _live_sample_row(sample: LiveShotSampleEvent) -> tuple[object, ...]:
+    return (
+        sample.shot_id,
+        sample.sequence,
+        sample.install_id,
+        sample.machine_id,
+        sample.timestamp_ms,
+        sample.elapsed_ms,
+        sample.pressure_bar,
+        sample.pressure_target_bar,
+        sample.pump_flow_ml_s,
+        sample.pump_flow_target_ml_s,
+        sample.beverage_flow_g_s,
+        sample.weight_g,
+        sample.temperature_c,
+        sample.temperature_target_c,
+        sample.pump_target_mode,
+        int(sample.valve_open),
+    )
+
+
+def _row_to_live_sample(row: sqlite3.Row) -> LiveShotSampleEvent:
+    return LiveShotSampleEvent(
+        shot_id=str(row["shot_id"]),
+        install_id=str(row["install_id"]),
+        machine_id=str(row["machine_id"]),
+        timestamp_ms=int(row["timestamp_ms"]),
+        sequence=int(row["sequence"]),
+        elapsed_ms=int(row["elapsed_ms"]),
+        pressure_bar=float(row["pressure_bar"]),
+        pressure_target_bar=float(row["pressure_target_bar"]),
+        pump_flow_ml_s=float(row["pump_flow_ml_s"]),
+        pump_flow_target_ml_s=float(row["pump_flow_target_ml_s"]),
+        beverage_flow_g_s=float(row["beverage_flow_g_s"]),
+        weight_g=float(row["weight_g"]),
+        temperature_c=float(row["temperature_c"]),
+        temperature_target_c=float(row["temperature_target_c"]),
+        pump_target_mode=int(row["pump_target_mode"]),
+        valve_open=_stored_bool(row["valve_open"], "valve_open"),
+    )
+
+
+def _stored_bool(value: object, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return value == 1
+    raise ValueError(f"stored {field_name} must be boolean")
 
 
 def _taste_goal_to_json(value: TasteGoal) -> str:

@@ -12,6 +12,7 @@ from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
 from espresso_rl.adapters.postgres_repositories import (
     PostgresCommunityWarehouse,
     PostgresLocalDataRepository,
+    PostgresLiveShotSessionRepository,
     PostgresPreferentialOptimizationRepository,
     PostgresRecommendationRepository,
     PostgresShotRepository,
@@ -20,6 +21,7 @@ from espresso_rl.adapters.postgres_repositories import (
 )
 from espresso_rl.adapters.sqlite_repositories import (
     SQLiteLocalDataRepository,
+    SQLiteLiveShotSessionRepository,
     SQLitePreferentialOptimizationRepository,
     SQLiteRecommendationRepository,
     SQLiteShotRepository,
@@ -41,6 +43,7 @@ from espresso_rl.adapters.supabase_upload import (
     UploadQueueWorker,
 )
 from espresso_rl.application.admin_pipeline import AdminPipelineService
+from espresso_rl.application.live_telemetry import LiveShotTelemetryService
 from espresso_rl.application.community_credentials import CommunityCredentialService
 from espresso_rl.application.community_mirror import CommunityMirrorService
 from espresso_rl.application.community_validation import CommunityValidationService
@@ -88,6 +91,7 @@ from espresso_rl.optimizers.cpbo_config import (
 )
 from espresso_rl.optimizers.cpbo_trace import TRACE_FEATURE_NAMES, extract_trace_features
 from espresso_rl.ports.community import CommunityCredentialRegistrar, CommunityCredentialStore
+from espresso_rl.ports.live_telemetry import LiveShotSessionRepository
 from espresso_rl.ports.preference_optimization import PreferentialOptimizationRepository
 from espresso_rl.ports.repositories import (
     LocalDataRepository,
@@ -122,6 +126,7 @@ def run_public(config: Config) -> None:
         upload_queue_repo,
         local_data_repo,
         preference_optimization_repo,
+        live_shot_repo,
     ) = open_repositories(config)
     cpbo_profiles = {
         CPBOProfile.APPLICATION.value: application_cpbo_config(),
@@ -156,6 +161,10 @@ def run_public(config: Config) -> None:
         upload_queue=upload_queue_for_service(config, upload_queue_repo),
         clock=config.now,
         community_upload_enabled_default=False,
+    )
+    live_telemetry = LiveShotTelemetryService(
+        live_shot_repo,
+        clock_ms=lambda: int(config.now()) * 1000,
     )
     cpbo_runtime = CPBORuntimeBridge(
         optimizer=cpbo_service,
@@ -283,6 +292,7 @@ def run_public(config: Config) -> None:
         service=service,
         publisher=RuntimePublisher(),
         post_shot_recommendation=cpbo_recommendation_after_shot,
+        live_telemetry=live_telemetry,
     )
 
     def on_preference(event: PreferenceFeedbackEvent) -> None:
@@ -460,6 +470,7 @@ def run_public(config: Config) -> None:
         on_machine_state=on_machine_state,
         on_optimizer_settings=on_optimizer_settings,
         on_local_reset=on_local_reset,
+        on_live_shot=live_telemetry.handle,
     )
 
     def shutdown(sig: int, frame: object) -> None:
@@ -1167,6 +1178,7 @@ def open_repositories(
     UploadQueueRepository,
     LocalDataRepository,
     PreferentialOptimizationRepository,
+    LiveShotSessionRepository,
 ]:
     if config.storage_backend == "postgres":
         store = PostgresStore(config.postgres_dsn)
@@ -1176,6 +1188,7 @@ def open_repositories(
             PostgresUploadQueueRepository(store),
             PostgresLocalDataRepository(store),
             PostgresPreferentialOptimizationRepository(store),
+            PostgresLiveShotSessionRepository(store),
         )
     store = SQLiteStore(config.data_dir / "espresso_rl.db")
     return (
@@ -1184,6 +1197,7 @@ def open_repositories(
         SQLiteUploadQueueRepository(store),
         SQLiteLocalDataRepository(store),
         SQLitePreferentialOptimizationRepository(store),
+        SQLiteLiveShotSessionRepository(store),
     )
 
 

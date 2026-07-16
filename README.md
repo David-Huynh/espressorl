@@ -75,6 +75,7 @@ gaggimate/{topic_id}/rl/preference
 gaggimate/{topic_id}/rl/shot/correction
 gaggimate/{topic_id}/rl/recommendation/decision
 gaggimate/{topic_id}/rl/recommendation/apply
+gaggimate/{topic_id}/rl/shot/live
 ```
 
 EspressoRL publishes retained state on:
@@ -93,6 +94,12 @@ gaggimate/{topic_id}/rl/shot/ack
 Gaggimate retains the immutable shot locally until EspressoRL responds with
 `accepted` or `already_processed`. Missing or explicitly transient receipts
 retry with backoff; permanent validation failures do not retry.
+
+During an eligible shot, Gaggimate also publishes non-retained QoS 0 live
+telemetry at 4 Hz. EspressoRL validates and persists the live session for
+real-time consumers, including explicit sequence gaps. The completed QoS 1
+shot remains the authoritative training record and reconciles the temporary
+live samples.
 
 The first valid shot establishes a baseline. CPBO then proposes exactly one
 quantized recipe and identifies its comparison anchor. After the candidate is
