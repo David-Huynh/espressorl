@@ -390,6 +390,78 @@ class CPBOApplicationTests(unittest.TestCase):
             "balanced",
         )
 
+    def test_legacy_profile_hash_fragments_choose_the_newest_run(self) -> None:
+        service, _, older_run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        older_row = self.store.conn.execute(
+            "SELECT payload_json FROM cpbo_runs WHERE run_id=?",
+            (older_run_id,),
+        ).fetchone()
+        older_payload = json.loads(older_row["payload_json"])
+        older_payload["context"]["raw_profile_hash"] = "a" * 64
+        older_fingerprint = hashlib.sha256(
+            json.dumps(
+                older_payload["context"],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self.store.conn.execute(
+            "UPDATE cpbo_runs SET context_fingerprint=?, payload_json=? WHERE run_id=?",
+            (
+                older_fingerprint,
+                json.dumps(older_payload, sort_keys=True, separators=(",", ":")),
+                older_run_id,
+            ),
+        )
+
+        newer_run_id = "run_newer_fragment"
+        newer_payload = dict(older_payload)
+        newer_payload["run_id"] = newer_run_id
+        newer_payload["created_at"] = older_payload["created_at"] + 1
+        newer_payload["context"] = dict(older_payload["context"])
+        newer_payload["context"]["raw_profile_hash"] = "b" * 64
+        newer_fingerprint = hashlib.sha256(
+            json.dumps(
+                newer_payload["context"],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self.store.conn.execute(
+            """
+            INSERT INTO cpbo_runs (
+                run_id, context_fingerprint, install_id, machine_id,
+                active, created_at, payload_json
+            ) VALUES (?, ?, ?, ?, 1, ?, ?)
+            """,
+            (
+                newer_run_id,
+                newer_fingerprint,
+                "install",
+                "machine",
+                newer_payload["created_at"],
+                json.dumps(newer_payload, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+        self.store.conn.commit()
+
+        migrated = self.repository.find_active_run(run_context())
+
+        self.assertEqual(migrated.run_id, newer_run_id)
+        rows = self.store.conn.execute(
+            "SELECT run_id, context_fingerprint, active, payload_json FROM cpbo_runs ORDER BY run_id"
+        ).fetchall()
+        by_id = {row["run_id"]: row for row in rows}
+        self.assertEqual(by_id[older_run_id]["active"], 0)
+        self.assertEqual(by_id[newer_run_id]["active"], 1)
+        self.assertEqual(
+            by_id[newer_run_id]["context_fingerprint"],
+            run_context().fingerprint,
+        )
+        self.assertIsNone(
+            json.loads(by_id[newer_run_id]["payload_json"])["context"]["raw_profile_hash"]
+        )
+
     def test_initialize_does_not_request_an_already_pulled_candidate_again(self) -> None:
         service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
         suggestion = service.suggest_next(run_id)

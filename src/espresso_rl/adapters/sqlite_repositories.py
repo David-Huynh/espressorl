@@ -541,33 +541,44 @@ class SQLitePreferentialOptimizationRepository:
 
     def find_active_run(self, context: OptimizationRunContext) -> OptimizationRun | None:
         with self._lock, self._store.conn:
-            row = self._store.conn.execute(
-                "SELECT payload_json FROM cpbo_runs WHERE context_fingerprint=? AND active=1",
-                (context.fingerprint,),
-            ).fetchone()
-            if row is not None:
-                return run_from_json(row["payload_json"])
-
-            # Pre-taste-goal runs deserialize as the balanced goal. Migrate the
-            # stored lookup key lazily so a firmware update does not discard an
-            # otherwise compatible balanced optimization run.
             rows = self._store.conn.execute(
                 """
-                SELECT run_id, payload_json FROM cpbo_runs
+                SELECT run_id, context_fingerprint, created_at, payload_json
+                FROM cpbo_runs
                 WHERE install_id=? AND machine_id=? AND active=1
+                ORDER BY created_at DESC, run_id DESC
                 """,
                 (context.install_id, context.machine_id),
             ).fetchall()
+            matches: list[tuple[sqlite3.Row, OptimizationRun]] = []
             for candidate in rows:
                 run = run_from_json(candidate["payload_json"])
-                if run.context.fingerprint != context.fingerprint:
+                if run.context.fingerprint == context.fingerprint:
+                    matches.append((candidate, run))
+            if not matches:
+                return None
+
+            selected = next(
+                (
+                    match
+                    for match in matches
+                    if match[0]["context_fingerprint"] == context.fingerprint
+                ),
+                matches[0],
+            )
+            for candidate, run in matches:
+                if candidate["run_id"] == selected[0]["run_id"]:
                     continue
+                inactive = replace(run, active=False)
                 self._store.conn.execute(
-                    "UPDATE cpbo_runs SET context_fingerprint=?, payload_json=? WHERE run_id=?",
-                    (context.fingerprint, run_to_json(run), candidate["run_id"]),
+                    "UPDATE cpbo_runs SET active=0, payload_json=? WHERE run_id=? AND active=1",
+                    (run_to_json(inactive), candidate["run_id"]),
                 )
-                return run
-        return None
+            self._store.conn.execute(
+                "UPDATE cpbo_runs SET context_fingerprint=?, payload_json=? WHERE run_id=?",
+                (context.fingerprint, run_to_json(selected[1]), selected[0]["run_id"]),
+            )
+            return selected[1]
 
     def get_run(self, run_id: str) -> OptimizationRun | None:
         row = self._store.conn.execute(

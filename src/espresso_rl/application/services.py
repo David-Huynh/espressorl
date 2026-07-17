@@ -151,16 +151,16 @@ class EspressoRLService:
         profile_quality = resample_profile_with_quality(event)
         shot_metadata = resample_shot_metadata(event)
         fixed_cadence_sequence = build_fixed_cadence_sequence(event)
-        stable_profile_hash = event.raw_profile_hash or profile_hash(profile_quality.profile)
+        effective_profile_hash = event.raw_profile_hash or profile_hash(profile_quality.profile)
         existing = self._shots.get(event.shot_id)
         if existing is not None:
-            if not _same_immutable_shot_event(existing, event, stable_profile_hash):
+            if not _same_immutable_shot_event(existing, event, effective_profile_hash):
                 raise ValueError(f"shot_id {event.shot_id} conflicts with an existing immutable shot")
             return IngestResult(shot=existing, recommendation=None, replayed=True)
         recommendation = self._recommendation_for_event(
             event,
             now,
-            raw_profile_hash=stable_profile_hash,
+            raw_profile_hash=effective_profile_hash,
         )
         shot = ShotRecord(
             shot_id=event.shot_id,
@@ -202,7 +202,7 @@ class EspressoRLService:
                 else event.recommendation_id
             ),
             raw_profile_available=len(event.time_ms) >= 2,
-            raw_profile_hash=stable_profile_hash,
+            raw_profile_hash=effective_profile_hash,
             shot_type=classification.shot_type,
             exclude_from_local_optimization=classification.exclude_from_local_optimization,
             optimization_weight=classification.optimization_weight,
@@ -782,7 +782,7 @@ def _shot_is_community_uploadable(shot: ShotRecord) -> bool:
 def _same_immutable_shot_event(
     shot: ShotRecord,
     event: ShotProfileEvent,
-    stable_profile_hash: str,
+    effective_profile_hash: str,
 ) -> bool:
     exact_pairs = (
         (shot.shot_id, event.shot_id),
@@ -790,7 +790,7 @@ def _same_immutable_shot_event(
         (shot.install_id, event.install_id),
         (shot.machine_id, event.machine_id),
         (shot.machine_adapter, event.machine_adapter),
-        (shot.raw_profile_hash, stable_profile_hash),
+        (shot.raw_profile_hash, effective_profile_hash),
         (shot.bean_context_id, event.bean_context_id),
         (shot.grinder_context_id, event.grinder_context_id),
         (shot.profile_id, event.profile_id),

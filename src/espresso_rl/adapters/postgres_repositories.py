@@ -310,32 +310,47 @@ class PostgresPreferentialOptimizationRepository:
 
     def find_active_run(self, context: OptimizationRunContext) -> OptimizationRun | None:
         with self._lock, self._store.conn.transaction():
-            row = self._store.conn.execute(
-                "SELECT payload_json FROM cpbo_runs WHERE context_fingerprint=%s AND active=TRUE",
-                (context.fingerprint,),
-            ).fetchone()
-            if row is not None:
-                return run_from_json(row["payload_json"])
-
-            # Pre-taste-goal runs deserialize as the balanced goal. Migrate the
-            # stored lookup key lazily so compatible local progress is retained.
             rows = self._store.conn.execute(
                 """
-                SELECT run_id, payload_json FROM cpbo_runs
+                SELECT run_id, context_fingerprint, created_at, payload_json
+                FROM cpbo_runs
                 WHERE install_id=%s AND machine_id=%s AND active=TRUE
+                ORDER BY created_at DESC, run_id DESC
                 """,
                 (context.install_id, context.machine_id),
             ).fetchall()
+            matches: list[tuple[Any, OptimizationRun]] = []
             for candidate in rows:
                 run = run_from_json(candidate["payload_json"])
-                if run.context.fingerprint != context.fingerprint:
+                if run.context.fingerprint == context.fingerprint:
+                    matches.append((candidate, run))
+            if not matches:
+                return None
+
+            selected = next(
+                (
+                    match
+                    for match in matches
+                    if match[0]["context_fingerprint"] == context.fingerprint
+                ),
+                matches[0],
+            )
+            for candidate, run in matches:
+                if candidate["run_id"] == selected[0]["run_id"]:
                     continue
+                inactive = replace(run, active=False)
                 self._store.conn.execute(
-                    "UPDATE cpbo_runs SET context_fingerprint=%s, payload_json=%s WHERE run_id=%s",
-                    (context.fingerprint, run_to_json(run), candidate["run_id"]),
+                    """
+                    UPDATE cpbo_runs SET active=FALSE, payload_json=%s
+                    WHERE run_id=%s AND active=TRUE
+                    """,
+                    (run_to_json(inactive), candidate["run_id"]),
                 )
-                return run
-        return None
+            self._store.conn.execute(
+                "UPDATE cpbo_runs SET context_fingerprint=%s, payload_json=%s WHERE run_id=%s",
+                (context.fingerprint, run_to_json(selected[1]), selected[0]["run_id"]),
+            )
+            return selected[1]
 
     def get_run(self, run_id: str) -> OptimizationRun | None:
         row = self._store.conn.execute(

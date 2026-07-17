@@ -295,7 +295,8 @@ def strict_context_from_shot(shot: ShotRecord) -> OptimizationRunContext:
     if not shot.grinder_context_id:
         raise ValueError("CPBO requires a grinder context")
     profile_id = shot.profile_id or shot.profile_label
-    if not profile_id:
+    raw_profile_hash = None if profile_id else shot.raw_profile_hash
+    if not profile_id and not raw_profile_hash:
         raise ValueError("CPBO requires a stable profile context")
     return OptimizationRunContext(
         install_id=shot.install_id,
@@ -303,7 +304,7 @@ def strict_context_from_shot(shot: ShotRecord) -> OptimizationRunContext:
         bean_context_id=shot.bean_context_id,
         grinder_context_id=shot.grinder_context_id,
         profile_id=profile_id,
-        raw_profile_hash=shot.raw_profile_hash,
+        raw_profile_hash=raw_profile_hash,
         basket_id=f"basket_ml:{shot.basket_size_ml:.6g}",
         user_id=shot.user_id or None,
         taste_goal=shot.taste_goal,

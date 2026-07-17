@@ -74,10 +74,13 @@ The prediction never overwrites the observation, and neither local ingestion
 nor community validation rejects a shot merely because measured cutoff output
 differs from the configured or predicted target.
 
-Run context includes install, machine, bean, grinder, profile ID, raw profile
-hash, basket, water, user identifiers, and the selected taste goal when
-available. Missing identifiers are not fabricated. Materially different
-contexts are not mixed.
+Run context includes install, machine, bean, grinder, profile identity, basket,
+water, user identifiers, and the selected taste goal when available. A stable
+profile ID is authoritative when present. A profile hash is a fallback only
+when no stable ID is available, and adapters using that fallback must provide a
+stable configuration hash rather than an observed shot-trajectory hash.
+Missing identifiers are not fabricated. Materially different contexts are not
+mixed.
 
 ### Taste goal context
 
@@ -311,9 +314,10 @@ unchanged, the active run retains compatible evidence across configuration
 changes, including comparisons collected with the other anchor policy. Each
 stored comparison retains the policy under which its anchor was selected.
 Switching away from a bean/grinder context and later returning to the same
-context resumes its active run and current recommendation. A different recipe
-profile or taste goal is a different optimization context and retains its own
-independent run.
+context resumes its active run and current recommendation. A different stable
+recipe-profile identity or taste goal is a different optimization context and
+retains its own independent run. Normal shot-to-shot trajectory variation under
+the same profile ID does not create a new run.
 
 The recipe domain is CPBO's configurable physical search space, not a set of
 machine-safety limits. The default relative grind domain is the baseline plus

@@ -385,6 +385,8 @@ class OptimizationRunContext:
     def __post_init__(self) -> None:
         if not self.install_id.strip() or not self.machine_id.strip():
             raise ValueError("run context requires install_id and machine_id")
+        if self.profile_id is not None and self.raw_profile_hash is not None:
+            object.__setattr__(self, "raw_profile_hash", None)
         for field_name in (
             "install_id",
             "machine_id",

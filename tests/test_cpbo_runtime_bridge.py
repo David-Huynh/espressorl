@@ -352,9 +352,28 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         self.assertEqual(state.pending_shot_id, "candidate")
         self.assertEqual(state.previous_valid_shot_id, "baseline")
 
-    def test_profile_content_hash_is_part_of_run_context(self) -> None:
+    def test_profile_content_hash_does_not_split_a_stable_profile_id(self) -> None:
         first = _shot("first", grind=5.0, raw_profile_hash="a" * 64)
         changed = _shot("changed", grind=5.0, raw_profile_hash="b" * 64)
+        self.assertEqual(
+            strict_context_from_shot(first).fingerprint,
+            strict_context_from_shot(changed).fingerprint,
+        )
+        self.assertIsNone(strict_context_from_shot(first).raw_profile_hash)
+
+    def test_profile_content_hash_separates_hash_only_profile_contexts(self) -> None:
+        first = _shot(
+            "first",
+            grind=5.0,
+            raw_profile_hash="a" * 64,
+            profile_id=None,
+        )
+        changed = _shot(
+            "changed",
+            grind=5.0,
+            raw_profile_hash="b" * 64,
+            profile_id=None,
+        )
         self.assertNotEqual(
             strict_context_from_shot(first).fingerprint,
             strict_context_from_shot(changed).fingerprint,
@@ -546,6 +565,7 @@ def _shot(
     grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED,
     current_absolute_step: float | None = None,
     absolute_reference_step: float | None = None,
+    profile_id: str | None = "profile",
 ) -> ShotRecord:
     return ShotRecord(
         shot_id=shot_id,
@@ -568,7 +588,7 @@ def _shot(
         bean_context_id="bean",
         grinder_context_id="grinder",
         taste_goal=taste_goal or TasteGoal.balanced(),
-        profile_id="profile",
+        profile_id=profile_id,
         raw_profile_hash=raw_profile_hash,
         grinder_step_direction=GrinderStepDirection.HIGHER_IS_FINER,
         grinder_calibration_mode=grinder_calibration_mode,
