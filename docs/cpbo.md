@@ -334,10 +334,20 @@ optimizer's active search region or machine-safety claims. Upload adapters
 validate any supplied ratio against output divided by dose instead of imposing
 a separate ratio range.
 
-Each run snapshots and fingerprints its recipe domain. A changed domain ends
-the incompatible active run before a new normalized model is initialized.
-Canonical events and offline datasets retain physical units; normalized
-coordinates are derived only at the CPBO model boundary.
+Each run snapshots and fingerprints its recipe domain. When the domain changes,
+an active run with physical-shot evidence is migrated in place. Physical
+recipes, shot IDs, comparisons, and the incumbent are preserved; observation
+coordinates are recomputed against the new domain and may fall outside
+`[0, 1]`. Model checkpoints and an unbrewed suggestion are invalidated, the
+trust-region state is rebuilt from comparison history, and a new bounded
+suggestion is fitted immediately. Resolved suggestion rows remain available as
+audit history. If a shot is still awaiting preference feedback, migration waits
+for that answer instead of discarding the comparison.
+
+An active run with no physical shots may be retired and initialized again from
+the next canonical machine recipe. Canonical events and offline datasets retain
+physical units; normalized coordinates are derived only at the CPBO model
+boundary.
 
 ### Historical recipe corrections
 
@@ -366,10 +376,11 @@ history. A stale unbrewed suggestion is replaced with a newly fitted bounded
 recommendation. No additional comparison is requested for comparisons already
 recorded.
 
-Changing the configured recipe domain still starts a new compatible run. The
-system does not silently widen an existing run or renormalize its recipe IDs.
-Corrected physical shots and comparison rows remain available in canonical and
-offline storage for replay and future cross-run training.
+Changing the configured recipe domain uses the same observation rule for every
+shot in the active run: physical values are unchanged, recipe IDs and
+normalized coordinates are regenerated for the new domain, and all existing
+comparisons remain optimizer evidence. Acquisition and emitted recommendations
+remain bounded to the new search space.
 
 ## Operational Loop
 

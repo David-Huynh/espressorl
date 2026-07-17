@@ -76,6 +76,15 @@ class PreferentialOptimizationRepository(Protocol):
     ) -> None:
         ...
 
+    def migrate_run_recipe_space(
+        self,
+        run: OptimizationRun,
+        recipes: Sequence[RecipePoint],
+        shots: Sequence[PreferenceShot],
+        state: OptimizerState,
+    ) -> None:
+        ...
+
     def get_recipe(self, recipe_id: str) -> RecipePoint | None:
         ...
 

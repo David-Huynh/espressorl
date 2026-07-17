@@ -88,6 +88,38 @@ class RecipeSpaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "shot request recipe must be inside"):
             ShotRequest("run", observed, None, ComparisonMode.BEST_INCUMBENT, True)
 
+    def test_recipe_space_domain_change_preserves_physical_observations(self) -> None:
+        original = recipe_space(GrinderStepDirection.HIGHER_IS_FINER)
+        domain = RecipeDomain(
+            grind_radius_steps=2.0,
+            dose_min_g=18.0,
+            dose_max_g=23.0,
+            target_output_min_g=30.0,
+            target_output_max_g=50.0,
+        )
+
+        changed = original.with_domain(domain)
+        observed = RecipePoint.observe(
+            "run",
+            changed,
+            2.0,
+            17.0,
+            25.0,
+            created_at=1,
+        )
+
+        self.assertEqual(changed.grind.physical_min, 3.0)
+        self.assertEqual(changed.grind.physical_max, 7.0)
+        self.assertEqual(changed.grind.resolution, original.grind.resolution)
+        self.assertEqual(changed.version, domain.effective_version)
+        self.assertEqual(observed.grind_size, 2.0)
+        self.assertEqual(observed.dose_g, 17.0)
+        self.assertEqual(observed.target_output_g, 25.0)
+        self.assertEqual(observed.normalized_x, (-0.25, -0.2, -0.25))
+        self.assertFalse(observed.inside_search_space)
+        with self.assertRaisesRegex(ValueError, "outside physical bounds"):
+            RecipePoint.create("run", changed, 2.0, 17.0, 25.0, created_at=1)
+
     def test_in_space_observation_has_same_identity_as_candidate(self) -> None:
         space = recipe_space(GrinderStepDirection.HIGHER_IS_FINER)
         candidate = RecipePoint.create("run", space, 4.49, 18.04, 35.96, created_at=1)

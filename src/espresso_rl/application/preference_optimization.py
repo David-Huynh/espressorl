@@ -508,15 +508,23 @@ class ConsecutivePreferenceOptimizationService:
         run = self._repository.find_active_run(context)
         if run is None:
             return None
+        state = self._require_state(run.run_id)
+        desired_mode = (
+            run.comparison_mode
+            if comparison_mode is None
+            else ComparisonMode(comparison_mode)
+        )
         if run.recipe_space.version != self._recipe_domain.effective_version:
-            self._repository.deactivate_run(run.run_id)
-            return None
+            if state.pending_shot_id is not None:
+                return run
+            if not self._repository.list_shots(run.run_id):
+                self._repository.deactivate_run(run.run_id)
+                return None
+            return self._migrate_run_recipe_space(run, state, desired_mode)
         if self.run_matches_configuration(run, comparison_mode=comparison_mode):
             return run
-        state = self._require_state(run.run_id)
         if state.pending_shot_id is not None:
             return run
-        desired_mode = run.comparison_mode if comparison_mode is None else ComparisonMode(comparison_mode)
         anchor_id = (
             state.previous_valid_shot_id
             if desired_mode == ComparisonMode.GLOBAL_PREVIOUS
@@ -540,7 +548,7 @@ class ConsecutivePreferenceOptimizationService:
         updated_state = replace(
             state,
             trust_region_state=TrustRegionState(
-                center=center,
+                center=self._bounded_center(center),
                 length=self._initial_trust_region_length,
             ),
             model_checkpoint=None,
@@ -644,6 +652,72 @@ class ConsecutivePreferenceOptimizationService:
     def configure_recipe_domain(self, recipe_domain: RecipeDomain) -> None:
         self._recipe_domain = recipe_domain
 
+    def _migrate_run_recipe_space(
+        self,
+        run: OptimizationRun,
+        state: OptimizerState,
+        comparison_mode: ComparisonMode,
+    ) -> OptimizationRun:
+        replacement_space = run.recipe_space.with_domain(self._recipe_domain)
+        replacement_run = replace(
+            run,
+            comparison_mode=comparison_mode,
+            recipe_space=replacement_space,
+            configuration_version=self._configuration_version,
+        )
+        replacement_recipes: dict[str, RecipePoint] = {}
+        replacement_shots: list[PreferenceShot] = []
+        for shot in self._repository.list_shots(run.run_id):
+            stored_recipe = self._repository.get_recipe(shot.recipe_id)
+            if stored_recipe is None:
+                raise ValueError("CPBO recipe-space migration found a missing recipe")
+            observed = shot.observed_recipe or ObservedRecipe(
+                grind_size=stored_recipe.grind_size,
+                dose_g=stored_recipe.dose_g,
+                target_output_g=stored_recipe.target_output_g,
+            )
+            replacement_recipe = RecipePoint.observe(
+                run.run_id,
+                replacement_space,
+                observed.grind_size,
+                observed.dose_g,
+                observed.target_output_g,
+                created_at=stored_recipe.created_at,
+            )
+            replacement_recipes[replacement_recipe.recipe_id] = replacement_recipe
+            replacement_shots.append(
+                replace(
+                    shot,
+                    recipe_id=replacement_recipe.recipe_id,
+                    observed_recipe=observed,
+                )
+            )
+
+        rebuilt_state = self._rebuild_state_from_history(
+            replacement_run,
+            state,
+            replacement_shots,
+            replacement_recipes,
+            preserve_pending=False,
+        )
+        replacement_state = replace(
+            rebuilt_state,
+            random_seed=self._random_seed,
+            configuration_version=self._configuration_version,
+            pending_recipe_id=None,
+            pending_anchor_shot_id=None,
+            pending_shot_id=None,
+            pending_suggestion_json=None,
+            updated_at=self._clock(),
+        )
+        self._repository.migrate_run_recipe_space(
+            replacement_run,
+            tuple(replacement_recipes.values()),
+            tuple(replacement_shots),
+            replacement_state,
+        )
+        return replacement_run
+
     def _rebuild_state_after_recipe_change(
         self,
         run: OptimizationRun,
@@ -655,6 +729,31 @@ class ConsecutivePreferenceOptimizationService:
             corrected_shot if shot.shot_id == corrected_shot.shot_id else shot
             for shot in self._repository.list_shots(run.run_id)
         ]
+        recipes: dict[str, RecipePoint] = {corrected_recipe.recipe_id: corrected_recipe}
+        for shot in shots:
+            if shot.shot_id == corrected_shot.shot_id:
+                continue
+            stored_recipe = self._repository.get_recipe(shot.recipe_id)
+            if stored_recipe is None:
+                raise ValueError("CPBO shot references a missing recipe")
+            recipes[stored_recipe.recipe_id] = stored_recipe
+        return self._rebuild_state_from_history(
+            run,
+            state,
+            shots,
+            recipes,
+            preserve_pending=True,
+        )
+
+    def _rebuild_state_from_history(
+        self,
+        run: OptimizationRun,
+        state: OptimizerState,
+        shots: list[PreferenceShot],
+        recipes: Mapping[str, RecipePoint],
+        *,
+        preserve_pending: bool,
+    ) -> OptimizerState:
         valid_shots = sorted(
             (
                 shot
@@ -665,9 +764,7 @@ class ConsecutivePreferenceOptimizationService:
         )
 
         def recipe_for(shot: PreferenceShot) -> RecipePoint:
-            if shot.shot_id == corrected_shot.shot_id:
-                return corrected_recipe
-            stored_recipe = self._repository.get_recipe(shot.recipe_id)
+            stored_recipe = recipes.get(shot.recipe_id)
             if stored_recipe is None:
                 raise ValueError("CPBO shot references a missing recipe")
             return stored_recipe
@@ -710,7 +807,7 @@ class ConsecutivePreferenceOptimizationService:
                 length=self._initial_trust_region_length,
             )
 
-        awaiting_preference = (
+        awaiting_preference = preserve_pending and (
             state.pending_shot_id in shots_by_id
             and state.pending_anchor_shot_id in shots_by_id
         )

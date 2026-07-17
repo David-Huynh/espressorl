@@ -5,7 +5,11 @@ from collections.abc import Callable
 
 from espresso_rl.application.live_telemetry import LiveShotTelemetryService
 from espresso_rl.application.services import EspressoRLService, IngestResult
-from espresso_rl.domain.events import MachineStateEvent, ShotProfileEvent
+from espresso_rl.domain.events import (
+    MachineStateEvent,
+    OptimizerSettingsEvent,
+    ShotProfileEvent,
+)
 from espresso_rl.domain.models import Recommendation, ShotRecord
 from espresso_rl.ports.runtime import AutoTuningRuntimePublisher
 
@@ -132,6 +136,28 @@ class AutoTuningRuntimeCoordinator:
         if shot.profile_id is None and event.raw_profile_hash != shot.raw_profile_hash:
             return None
         if event.taste_goal.fingerprint != shot.taste_goal.fingerprint:
+            return None
+        return event
+
+    def latest_machine_state_for_optimizer_settings(
+        self,
+        settings: OptimizerSettingsEvent,
+    ) -> MachineStateEvent | None:
+        event = self._latest_machine_states.get(
+            (settings.install_id, settings.machine_id.casefold())
+        )
+        if event is None:
+            return None
+        if (
+            event.bean_context_id != settings.bean_context_id
+            or event.grinder_context_id != settings.grinder_context_id
+        ):
+            return None
+        if (event.profile_id or event.profile_label) != (
+            settings.profile_id or settings.profile_label
+        ):
+            return None
+        if event.taste_goal.fingerprint != settings.taste_goal.fingerprint:
             return None
         return event
 

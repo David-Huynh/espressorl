@@ -22,6 +22,7 @@ from espresso_rl.domain.cpbo import (
     OptimizationRunContext,
     PhysicalShotStatus,
     PreferenceLabel,
+    RecipeDomain,
     RecipeParameter,
     RecipePoint,
     RecipeSpace,
@@ -520,6 +521,179 @@ class CPBOApplicationTests(unittest.TestCase):
             self.repository.get_run(second.optimization_run_id).configuration_version,
             "config:v2",
         )
+
+    def test_recipe_domain_change_migrates_active_evidence_in_place(self) -> None:
+        service, _, run_id = self.service(
+            ComparisonMode.BEST_INCUMBENT,
+            RecordingEngine([6.0, 7.0]),
+        )
+        first = service.suggest_next(run_id)
+        service.record_shot(
+            run_id,
+            first.recipe,
+            PhysicalShotStatus.VALID,
+            shot_id="winner",
+            started_at=3,
+            completed_at=4,
+        )
+        service.record_preference(
+            run_id,
+            "winner",
+            "baseline",
+            PreferenceLabel.NEW_BETTER,
+        )
+        stale = service.suggest_next(run_id)
+        original_shots = self.repository.list_shots(run_id)
+        original_comparisons = self.repository.list_comparisons(run_id)
+        original_recipe_ids = {shot.recipe_id for shot in original_shots}
+        original_state = self.repository.get_state(run_id)
+        new_domain = RecipeDomain(
+            grind_radius_steps=2.0,
+            dose_min_g=19.0,
+            dose_max_g=23.0,
+            target_output_min_g=40.0,
+            target_output_max_g=60.0,
+        )
+        replacement = ConsecutivePreferenceOptimizationService(
+            self.repository,
+            RecordingEngine([6.5]),
+            recipe_space_factory,
+            random_seed=19,
+            configuration_version="config:v2",
+            recipe_domain=new_domain,
+            clock=self.clock,
+        )
+
+        migrated = replacement.active_run(
+            run_context(),
+            comparison_mode=ComparisonMode.BEST_INCUMBENT,
+        )
+
+        self.assertEqual(migrated.run_id, run_id)
+        self.assertTrue(migrated.active)
+        self.assertEqual(migrated.recipe_space.version, new_domain.effective_version)
+        self.assertEqual(migrated.configuration_version, "config:v2")
+        migrated_shots = self.repository.list_shots(run_id)
+        self.assertEqual(
+            [shot.shot_id for shot in migrated_shots],
+            [shot.shot_id for shot in original_shots],
+        )
+        self.assertTrue(all(shot.observed_recipe is not None for shot in migrated_shots))
+        self.assertTrue(
+            original_recipe_ids.isdisjoint({shot.recipe_id for shot in migrated_shots})
+        )
+        self.assertEqual(self.repository.list_comparisons(run_id), original_comparisons)
+        winner = self.repository.get_shot("winner")
+        winner_recipe = self.repository.get_recipe(winner.recipe_id)
+        self.assertEqual(
+            (
+                winner_recipe.grind_size,
+                winner_recipe.dose_g,
+                winner_recipe.target_output_g,
+            ),
+            (6.0, 18.0, 36.0),
+        )
+        self.assertEqual(winner_recipe.normalized_x, (0.75, -0.25, -0.2))
+        self.assertFalse(winner_recipe.inside_search_space)
+        state = self.repository.get_state(run_id)
+        self.assertEqual(state.previous_valid_shot_id, "winner")
+        self.assertEqual(state.incumbent_shot_id, "winner")
+        self.assertEqual(state.iteration, original_state.iteration)
+        self.assertEqual(state.trust_region_state.center, (0.75, 0.0, 0.0))
+        self.assertEqual(state.random_seed, 19)
+        self.assertEqual(state.configuration_version, "config:v2")
+        self.assertIsNone(state.pending_recipe_id)
+        self.assertIsNone(state.model_checkpoint)
+        stale_status = self.store.conn.execute(
+            "SELECT status FROM cpbo_suggestions WHERE suggestion_id=?",
+            (stale.suggestion_id,),
+        ).fetchone()["status"]
+        self.assertEqual(stale_status, "superseded")
+        stored_recipe_ids = {
+            recipe.recipe_id for recipe in self.repository.list_recipes(run_id)
+        }
+        self.assertTrue(original_recipe_ids.issubset(stored_recipe_ids))
+
+    def test_recipe_domain_change_waits_for_pending_preference(self) -> None:
+        service, _, run_id = self.service(
+            ComparisonMode.BEST_INCUMBENT,
+            RecordingEngine([6.0]),
+        )
+        suggestion = service.suggest_next(run_id)
+        service.record_shot(
+            run_id,
+            suggestion.recipe,
+            PhysicalShotStatus.VALID,
+            shot_id="pending_candidate",
+            started_at=3,
+            completed_at=4,
+        )
+        old_version = self.repository.get_run(run_id).recipe_space.version
+        new_domain = RecipeDomain(
+            grind_radius_steps=3.0,
+            dose_min_g=16.0,
+            dose_max_g=24.0,
+            target_output_min_g=30.0,
+            target_output_max_g=70.0,
+        )
+        replacement = ConsecutivePreferenceOptimizationService(
+            self.repository,
+            RecordingEngine([7.0]),
+            recipe_space_factory,
+            random_seed=11,
+            recipe_domain=new_domain,
+            clock=self.clock,
+        )
+
+        deferred = replacement.active_run(run_context())
+
+        self.assertEqual(deferred.recipe_space.version, old_version)
+        self.assertEqual(
+            self.repository.get_state(run_id).pending_shot_id,
+            "pending_candidate",
+        )
+        replacement.record_preference(
+            run_id,
+            "pending_candidate",
+            "baseline",
+            PreferenceLabel.TIE,
+        )
+        migrated = replacement.active_run(run_context())
+        self.assertEqual(migrated.run_id, run_id)
+        self.assertEqual(migrated.recipe_space.version, new_domain.effective_version)
+        self.assertEqual(len(self.repository.list_comparisons(run_id)), 1)
+        self.assertEqual(
+            self.repository.list_comparisons(run_id)[0].label,
+            PreferenceLabel.TIE,
+        )
+
+    def test_repository_rejects_partial_recipe_space_migration_atomically(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        original_run = self.repository.get_run(run_id)
+        original_state = self.repository.get_state(run_id)
+        replacement_run = replace(
+            original_run,
+            recipe_space=original_run.recipe_space.with_domain(
+                RecipeDomain(
+                    grind_radius_steps=3.0,
+                    dose_min_g=16.0,
+                    dose_max_g=24.0,
+                    target_output_min_g=30.0,
+                    target_output_max_g=70.0,
+                )
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires physical shots"):
+            self.repository.migrate_run_recipe_space(
+                replacement_run,
+                (),
+                (),
+                original_state,
+            )
+
+        self.assertEqual(self.repository.get_run(run_id), original_run)
+        self.assertEqual(self.repository.get_state(run_id), original_state)
 
     def test_state_survives_repository_reconstruction(self) -> None:
         service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)

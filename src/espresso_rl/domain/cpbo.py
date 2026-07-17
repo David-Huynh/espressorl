@@ -5,7 +5,7 @@ import json
 import math
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
@@ -344,6 +344,35 @@ class RecipeSpace:
         except ValueError:
             return False
         return True
+
+    def with_domain(self, recipe_domain: RecipeDomain) -> "RecipeSpace":
+        """Return this space rebased onto new physical bounds.
+
+        The original grind midpoint and all parameter resolutions remain fixed.
+        Historical observations can then be renormalized without changing their
+        physical values, while candidate generation uses the new bounds.
+        """
+
+        grind_midpoint = (self.grind.physical_min + self.grind.physical_max) / 2.0
+        return RecipeSpace(
+            grind=replace(
+                self.grind,
+                physical_min=grind_midpoint - recipe_domain.grind_radius_steps,
+                physical_max=grind_midpoint + recipe_domain.grind_radius_steps,
+            ),
+            dose=replace(
+                self.dose,
+                physical_min=recipe_domain.dose_min_g,
+                physical_max=recipe_domain.dose_max_g,
+            ),
+            target_output=replace(
+                self.target_output,
+                physical_min=recipe_domain.target_output_min_g,
+                physical_max=recipe_domain.target_output_max_g,
+            ),
+            grinder_step_direction=self.grinder_step_direction,
+            version=recipe_domain.effective_version,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

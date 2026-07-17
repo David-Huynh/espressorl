@@ -21,6 +21,7 @@ from espresso_rl.domain.cpbo import (
     ComparisonMode,
     ModelRecommendation,
     PreferenceLabel,
+    RecipeDomain,
     RecipeParameter,
     RecipePoint,
     RecipeSpace,
@@ -28,7 +29,11 @@ from espresso_rl.domain.cpbo import (
     SuggestionComputation,
     TrustRegionDiagnostics,
 )
-from espresso_rl.domain.events import MachineStateEvent, PreferenceFeedbackEvent
+from espresso_rl.domain.events import (
+    MachineStateEvent,
+    OptimizerSettingsEvent,
+    PreferenceFeedbackEvent,
+)
 from espresso_rl.domain.models import (
     GrinderCalibrationMode,
     GrinderStepDirection,
@@ -47,6 +52,24 @@ class _ShotRepository:
 
     def get(self, shot_id: str) -> ShotRecord | None:
         return self.rows.get(shot_id)
+
+    def list_recent(
+        self,
+        install_id: str,
+        machine_id: str,
+        bean_context_id: str | None = None,
+        limit: int = 200,
+        grinder_context_id: str | None = None,
+    ) -> list[ShotRecord]:
+        matching = [
+            shot
+            for shot in self.rows.values()
+            if shot.install_id == install_id
+            and shot.machine_id == machine_id
+            and shot.bean_context_id == bean_context_id
+            and shot.grinder_context_id == grinder_context_id
+        ]
+        return sorted(matching, key=lambda shot: (shot.timestamp, shot.shot_id))[-limit:]
 
 
 class _Engine:
@@ -541,6 +564,66 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         state = self.repository.get_state(first.optimization_run_id)
         self.assertEqual(state.previous_valid_shot_id, "baseline")
         self.assertEqual(state.incumbent_shot_id, "baseline")
+
+    def test_optimizer_settings_refresh_reuses_run_and_replaces_pending_candidate(self) -> None:
+        bridge = self.bridge([6.0])
+        baseline = _shot("baseline", grind=5.0)
+        self.shots.rows[baseline.shot_id] = baseline
+        first = bridge.handle_shot(baseline).recommendation
+        new_domain = RecipeDomain(
+            grind_radius_steps=3.0,
+            dose_min_g=16.0,
+            dose_max_g=22.0,
+            target_output_min_g=34.0,
+            target_output_max_g=50.0,
+        )
+        replacement = ConsecutivePreferenceOptimizationService(
+            self.repository,
+            _Engine([7.0]),
+            _recipe_space,
+            random_seed=7,
+            recipe_domain=new_domain,
+            clock=self.clock,
+        )
+        bridge.configure_optimizer(
+            replacement,
+            comparison_mode=ComparisonMode.BEST_INCUMBENT,
+        )
+
+        outcome = bridge.refresh_after_optimizer_settings(
+            OptimizerSettingsEvent(
+                install_id="install",
+                machine_id="gaggimate:AA_BB",
+                timestamp=200,
+                bean_context_id="bean",
+                grinder_context_id="grinder",
+                profile_id="profile",
+                taste_goal=TasteGoal.balanced(),
+                recipe_domain=new_domain,
+            )
+        )
+
+        self.assertEqual(outcome.optimization_run_id, first.optimization_run_id)
+        self.assertIsNotNone(outcome.recommendation)
+        self.assertNotEqual(
+            outcome.recommendation.recommendation_id,
+            first.recommendation_id,
+        )
+        self.assertEqual(
+            outcome.recommendation.projected_relative_step_from_reference,
+            7.0,
+        )
+        self.assertEqual(outcome.recommendation.target_yield_g, 36.0)
+        self.assertEqual(len(self.recommendations), 2)
+        run = self.repository.get_run(first.optimization_run_id)
+        self.assertEqual(run.recipe_space.version, new_domain.effective_version)
+        self.assertEqual(run.recipe_space.target_output.physical_min, 34.0)
+        pending = self.repository.get_pending_suggestion(first.optimization_run_id)
+        self.assertEqual(
+            pending.suggestion_id,
+            outcome.recommendation.recommendation_id,
+        )
+        self.assertTrue(pending.recipe.inside_search_space)
 
 
 def _recipe_space(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:

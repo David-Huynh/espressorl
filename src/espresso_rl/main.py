@@ -449,6 +449,23 @@ def run_public(config: Config) -> None:
                 profile_id=event.profile_id,
                 taste_goal_fingerprint=event.taste_goal.fingerprint,
             )
+            refresh_outcome = cpbo_runtime.refresh_after_optimizer_settings(
+                event,
+                current_machine_state=(
+                    runtime_coordinator.latest_machine_state_for_optimizer_settings(event)
+                ),
+            )
+            if refresh_outcome.recommendation is not None:
+                logger.info(
+                    "CPBO configuration retained run=%s and generated recommendation=%s",
+                    refresh_outcome.optimization_run_id,
+                    refresh_outcome.recommendation.recommendation_id,
+                )
+            elif refresh_outcome.skipped_reason != "no_matching_optimization_history":
+                logger.info(
+                    "CPBO configuration refresh deferred reason=%s",
+                    refresh_outcome.skipped_reason,
+                )
         current_recommendation = service.get_current_recommendation(
             install_id=event.install_id,
             machine_id=event.machine_id,

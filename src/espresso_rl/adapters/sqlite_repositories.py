@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -655,6 +656,82 @@ class SQLitePreferentialOptimizationRepository:
             )
             if cursor.rowcount != 1:
                 raise ValueError("active CPBO run could not be reconfigured")
+            self._store.conn.execute(
+                """
+                UPDATE cpbo_suggestions SET status='superseded'
+                WHERE run_id=? AND status IN ('pending', 'awaiting_preference')
+                """,
+                (run.run_id,),
+            )
+            self._upsert_state(state)
+
+    def migrate_run_recipe_space(
+        self,
+        run: OptimizationRun,
+        recipes: Sequence[RecipePoint],
+        shots: Sequence[PreferenceShot],
+        state: OptimizerState,
+    ) -> None:
+        if run.run_id != state.optimization_run_id:
+            raise ValueError("run and optimizer state identifiers disagree")
+        if not run.active:
+            raise ValueError("cannot migrate an inactive CPBO run")
+        if state.pending_recipe_id is not None or state.pending_shot_id is not None:
+            raise ValueError("recipe-space migration must clear pending work")
+        recipe_by_id = {recipe.recipe_id: recipe for recipe in recipes}
+        shot_by_id = {shot.shot_id: shot for shot in shots}
+        if len(recipe_by_id) != len(recipes) or len(shot_by_id) != len(shots):
+            raise ValueError("recipe-space migration contains duplicate identifiers")
+        if not shots:
+            raise ValueError("recipe-space migration requires physical shots")
+        if any(recipe.optimization_run_id != run.run_id for recipe in recipes):
+            raise ValueError("recipe-space migration contains a recipe from another run")
+        if any(
+            shot.optimization_run_id != run.run_id or shot.recipe_id not in recipe_by_id
+            for shot in shots
+        ):
+            raise ValueError("recipe-space migration contains an invalid physical shot")
+
+        with self._lock, self._store.conn:
+            active = self._store.conn.execute(
+                "SELECT run_id FROM cpbo_runs WHERE run_id=? AND active=1",
+                (run.run_id,),
+            ).fetchone()
+            if active is None:
+                raise ValueError("active CPBO run could not be migrated")
+            existing_shot_ids = {
+                row["shot_id"]
+                for row in self._store.conn.execute(
+                    "SELECT shot_id FROM cpbo_shots WHERE run_id=?",
+                    (run.run_id,),
+                ).fetchall()
+            }
+            if existing_shot_ids != set(shot_by_id):
+                raise ValueError("recipe-space migration must replace every physical shot")
+
+            self._store.conn.execute(
+                "UPDATE cpbo_runs SET payload_json=? WHERE run_id=? AND active=1",
+                (run_to_json(run), run.run_id),
+            )
+            for recipe in recipes:
+                self._insert_recipe(recipe)
+            for shot in shots:
+                cursor = self._store.conn.execute(
+                    """
+                    UPDATE cpbo_shots
+                    SET recipe_id=?, status=?, payload_json=?
+                    WHERE shot_id=? AND run_id=?
+                    """,
+                    (
+                        shot.recipe_id,
+                        shot.status.value,
+                        shot_to_json(shot),
+                        shot.shot_id,
+                        run.run_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("CPBO physical shot migration was not applied")
             self._store.conn.execute(
                 """
                 UPDATE cpbo_suggestions SET status='superseded'

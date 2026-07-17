@@ -15,7 +15,11 @@ from espresso_rl.domain.cpbo import (
     RecipeDomain,
     Suggestion,
 )
-from espresso_rl.domain.events import MachineStateEvent, PreferenceFeedbackEvent
+from espresso_rl.domain.events import (
+    MachineStateEvent,
+    OptimizerSettingsEvent,
+    PreferenceFeedbackEvent,
+)
 from espresso_rl.domain.community import PairwiseShotComparison
 from espresso_rl.domain.models import Recipe, Recommendation, ShotRecord, ShotType
 from espresso_rl.ports.repositories import ShotRepository
@@ -65,6 +69,65 @@ class CPBORuntimeBridge:
     ) -> None:
         self._optimizer = optimizer
         self._comparison_mode = ComparisonMode(comparison_mode)
+
+    def refresh_after_optimizer_settings(
+        self,
+        event: OptimizerSettingsEvent,
+        current_machine_state: MachineStateEvent | None = None,
+    ) -> CPBOShotOutcome:
+        recent = self._shots.list_recent(
+            event.install_id,
+            event.machine_id,
+            event.bean_context_id,
+            limit=200,
+            grinder_context_id=event.grinder_context_id,
+        )
+        for shot in reversed(recent):
+            if not _shot_matches_optimizer_settings(shot, event):
+                continue
+            current_recipe = _known_recipe(shot)
+            if current_recipe is None:
+                continue
+            try:
+                context = self._context_factory(shot)
+            except ValueError:
+                continue
+            run = self._optimizer.active_run(
+                context,
+                comparison_mode=self._comparison_mode,
+            )
+            if run is None:
+                continue
+            state = self._optimizer.get_state(run.run_id)
+            if state.pending_shot_id is not None:
+                return CPBOShotOutcome(
+                    run.run_id,
+                    None,
+                    True,
+                    "existing_preference_feedback_pending",
+                )
+            if state.previous_valid_shot_id is None:
+                return CPBOShotOutcome(
+                    run.run_id,
+                    None,
+                    False,
+                    "optimization_run_has_no_valid_shot",
+                )
+            suggestion = self._optimizer.suggest_next(run.run_id)
+            recommendation = self._machine_recommendation(
+                suggestion,
+                shot,
+                current_recipe,
+                current_machine_state=current_machine_state,
+            )
+            self._recommendation_sink(recommendation)
+            return CPBOShotOutcome(run.run_id, recommendation, False)
+        return CPBOShotOutcome(
+            None,
+            None,
+            False,
+            "no_matching_optimization_history",
+        )
 
     def handle_shot(self, shot: ShotRecord) -> CPBOShotOutcome:
         if shot.shot_type != ShotType.ESPRESSO or shot.exclude_from_local_optimization:
@@ -320,6 +383,24 @@ def _machine_state_matches_shot(event: MachineStateEvent, shot: ShotRecord) -> b
         and event.profile_id == shot.profile_id
         and (shot.profile_id is not None or event.raw_profile_hash == shot.raw_profile_hash)
         and event.taste_goal.fingerprint == shot.taste_goal.fingerprint
+    )
+
+
+def _shot_matches_optimizer_settings(
+    shot: ShotRecord,
+    event: OptimizerSettingsEvent,
+) -> bool:
+    shot_profile = shot.profile_id or shot.profile_label
+    event_profile = event.profile_id or event.profile_label
+    return (
+        shot.install_id == event.install_id
+        and _same_machine_id(shot.machine_id, event.machine_id)
+        and shot.bean_context_id == event.bean_context_id
+        and shot.grinder_context_id == event.grinder_context_id
+        and shot_profile == event_profile
+        and shot.taste_goal.fingerprint == event.taste_goal.fingerprint
+        and shot.shot_type == ShotType.ESPRESSO
+        and not shot.exclude_from_local_optimization
     )
 
 
