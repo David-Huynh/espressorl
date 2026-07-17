@@ -28,10 +28,11 @@ from espresso_rl.domain.cpbo import (
     SuggestionComputation,
     TrustRegionDiagnostics,
 )
-from espresso_rl.domain.events import PreferenceFeedbackEvent
+from espresso_rl.domain.events import MachineStateEvent, PreferenceFeedbackEvent
 from espresso_rl.domain.models import (
     GrinderCalibrationMode,
     GrinderStepDirection,
+    MachineState,
     Recipe,
     ShotRecord,
 )
@@ -382,10 +383,33 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         corrected = _shot("baseline", grind=4.0)
         self.shots.rows[corrected.shot_id] = corrected
 
-        outcome = bridge.handle_shot_correction(corrected)
+        active_state = MachineStateEvent(
+            install_id="install",
+            machine_id="gaggimate:AA_BB",
+            machine_adapter="gaggimate",
+            timestamp=300,
+            state=MachineState.IDLE,
+            bean_context_id="bean",
+            grinder_context_id="grinder",
+            taste_goal=TasteGoal.balanced(),
+            grinder_calibration_mode=GrinderCalibrationMode.ABSOLUTE_DISPLAY_CALIBRATED,
+            grinder_step_direction=GrinderStepDirection.HIGHER_IS_FINER,
+            relative_grind_steps_from_reference=0.0,
+            microns_per_step=10.0,
+            current_absolute_step=19.0,
+            absolute_reference_step=19.0,
+            dose_in_g=18.0,
+            target_yield_g=36.0,
+            profile_id="profile",
+        )
+
+        outcome = bridge.handle_shot_correction(corrected, active_state)
 
         self.assertIsNotNone(outcome.recommendation)
         self.assertEqual(outcome.recommendation.projected_relative_step_from_reference, 8.0)
+        self.assertEqual(outcome.recommendation.grind_delta_steps_from_current, 8.0)
+        self.assertEqual(outcome.recommendation.current_absolute_step, 19.0)
+        self.assertEqual(outcome.recommendation.projected_absolute_step, 27.0)
         comparisons = self.repository.list_comparisons(first.optimization_run_id)
         self.assertEqual(len(comparisons), 1)
         self.assertEqual(comparisons[0].label, PreferenceLabel.ANCHOR_BETTER)

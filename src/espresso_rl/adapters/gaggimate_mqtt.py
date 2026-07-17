@@ -673,6 +673,7 @@ class GaggimateMQTTClient:
             bean_context_id=payload.get("bean_context_id", self._config.bean_context_id),
             bean_context_name=_optional_string(payload.get("bean_context_name")),
             grinder_context_id=payload.get("grinder_context_id", self._config.grinder_context_id),
+            taste_goal=TasteGoal.from_dict(payload.get("taste_goal")),
             grinder_calibration_mode=payload.get("grinder_calibration_mode", "relative_calibrated"),
             grinder_step_direction=payload.get("step_direction", "higher_is_finer"),
             grinder_adjustment_mode=payload.get("grinder_adjustment_mode", "stepped"),

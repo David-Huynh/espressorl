@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from espresso_rl.adapters.gaggimate_mqtt import (
     APPLY_TOPIC,
@@ -27,6 +28,7 @@ from espresso_rl.domain.models import (
     RecommendationMode,
     RecommendationStatus,
 )
+from espresso_rl.main import maybe_publish_startup_recommendation
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "gaggimate_shot_profile.json"
@@ -147,6 +149,46 @@ class GaggimateAdapterTests(unittest.TestCase):
                 {**payload, "machine_id": "gaggimate:CC_DD"},
                 "AA_BB",
             )
+
+    def test_machine_state_preserves_taste_goal(self) -> None:
+        event = self.client.translate_machine_state_payload(
+            {
+                "event_type": "machine_state",
+                "schema_version": 1,
+                "machine_id": "gaggimate:AA_BB",
+                "timestamp": 100,
+                "state": "idle",
+                "taste_goal": {
+                    "schema_version": 1,
+                    "mode": "custom",
+                    "targets": {"sweet": "high", "nutty_cocoa": "high", "roasted": "medium"},
+                },
+            },
+            "AA_BB",
+        )
+
+        self.assertEqual(event.taste_goal.mode.value, "custom")
+        self.assertEqual(dict(event.taste_goal.targets)["sweet"].value, "high")
+
+    def test_startup_without_scope_does_not_clear_retained_recommendation(self) -> None:
+        mqtt = SimpleNamespace(
+            published=[],
+            cleared=[],
+            publish_recommendation=lambda recommendation: mqtt.published.append(recommendation),
+            clear_recommendation=lambda machine_id: mqtt.cleared.append(machine_id),
+            publish_status=lambda machine_id, status: mqtt.published.append((machine_id, status)),
+        )
+        config = SimpleNamespace(
+            machine_id="gaggimate:AA_BB",
+            install_id="install_1",
+            bean_context_id=None,
+            grinder_context_id=None,
+        )
+
+        with patch("espresso_rl.main.build_status_payload", return_value={}):
+            maybe_publish_startup_recommendation(config, SimpleNamespace(), mqtt)
+
+        self.assertEqual(mqtt.cleared, [])
 
     def test_shot_payload_preserves_observed_recipe_and_telemetry(self) -> None:
         payload = json.loads(FIXTURE.read_text(encoding="utf-8"))

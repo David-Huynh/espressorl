@@ -324,7 +324,10 @@ def run_public(config: Config) -> None:
 
     def on_correction(event: ShotCorrectionEvent) -> None:
         shot = service.record_shot_correction(event)
-        cpbo_outcome = cpbo_runtime.handle_shot_correction(shot)
+        cpbo_outcome = cpbo_runtime.handle_shot_correction(
+            shot,
+            current_machine_state=runtime_coordinator.latest_machine_state_for(shot),
+        )
         logger.info(
             "Correction stored shot=%s excluded=%s followed=%s attribution=%.2f cpbo=%s",
             shot.shot_id,
@@ -585,8 +588,6 @@ def maybe_publish_startup_recommendation(
         )
     if current is not None:
         mqtt_client.publish_recommendation(current)
-    else:
-        mqtt_client.clear_recommendation(config.machine_id)
     mqtt_client.publish_status(
         config.machine_id,
         build_status_payload(

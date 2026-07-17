@@ -15,7 +15,7 @@ from espresso_rl.domain.cpbo import (
     RecipeDomain,
     Suggestion,
 )
-from espresso_rl.domain.events import PreferenceFeedbackEvent
+from espresso_rl.domain.events import MachineStateEvent, PreferenceFeedbackEvent
 from espresso_rl.domain.community import PairwiseShotComparison
 from espresso_rl.domain.models import Recipe, Recommendation, ShotRecord, ShotType
 from espresso_rl.ports.repositories import ShotRepository
@@ -192,7 +192,11 @@ class CPBORuntimeBridge:
         self._recommendation_sink(recommendation)
         return recommendation
 
-    def handle_shot_correction(self, shot: ShotRecord) -> CPBOShotOutcome:
+    def handle_shot_correction(
+        self,
+        shot: ShotRecord,
+        current_machine_state: MachineStateEvent | None = None,
+    ) -> CPBOShotOutcome:
         preference_shot = self._optimizer.find_shot(shot.shot_id)
         if preference_shot is None:
             return CPBOShotOutcome(None, None, False, "shot_not_processed_by_cpbo")
@@ -232,7 +236,12 @@ class CPBORuntimeBridge:
         if current_recipe is None:
             raise ValueError("canonical current shot no longer has complete recipe controls")
         suggestion = self._optimizer.suggest_next(preference_shot.optimization_run_id)
-        recommendation = self._machine_recommendation(suggestion, current_shot, current_recipe)
+        recommendation = self._machine_recommendation(
+            suggestion,
+            current_shot,
+            current_recipe,
+            current_machine_state=current_machine_state,
+        )
         self._recommendation_sink(recommendation)
         return CPBOShotOutcome(
             preference_shot.optimization_run_id,
@@ -248,20 +257,35 @@ class CPBORuntimeBridge:
         suggestion: Suggestion,
         shot: ShotRecord,
         current_recipe: Recipe,
+        *,
+        current_machine_state: MachineStateEvent | None = None,
     ) -> Recommendation:
+        projection_recipe = current_recipe
+        grinder_calibration_mode = shot.grinder_calibration_mode
+        grinder_reference_label = shot.grinder_reference_label
+        current_absolute_step = shot.current_absolute_step
+        absolute_reference_step = shot.absolute_reference_step
+        if current_machine_state is not None and _machine_state_matches_shot(current_machine_state, shot):
+            active_recipe = current_machine_state.current_recipe()
+            if active_recipe is not None:
+                projection_recipe = active_recipe
+                grinder_calibration_mode = current_machine_state.grinder_calibration_mode
+                grinder_reference_label = current_machine_state.grinder_reference_label
+                current_absolute_step = current_machine_state.current_absolute_step
+                absolute_reference_step = current_machine_state.absolute_reference_step
         return self._optimizer.suggestion_to_machine_recommendation(
             suggestion,
-            current_recipe=current_recipe,
+            current_recipe=projection_recipe,
             install_id=shot.install_id,
             machine_id=shot.machine_id,
             bean_context_id=shot.bean_context_id,
             grinder_context_id=shot.grinder_context_id,
             profile_id=shot.profile_id,
             raw_profile_hash=(shot.raw_profile_hash if shot.profile_id is None else None),
-            grinder_calibration_mode=shot.grinder_calibration_mode,
-            grinder_reference_label=shot.grinder_reference_label,
-            current_absolute_step=shot.current_absolute_step,
-            absolute_reference_step=shot.absolute_reference_step,
+            grinder_calibration_mode=grinder_calibration_mode,
+            grinder_reference_label=grinder_reference_label,
+            current_absolute_step=current_absolute_step,
+            absolute_reference_step=absolute_reference_step,
         )
 
 
@@ -283,6 +307,18 @@ def strict_context_from_shot(shot: ShotRecord) -> OptimizationRunContext:
         basket_id=f"basket_ml:{shot.basket_size_ml:.6g}",
         user_id=shot.user_id or None,
         taste_goal=shot.taste_goal,
+    )
+
+
+def _machine_state_matches_shot(event: MachineStateEvent, shot: ShotRecord) -> bool:
+    return (
+        event.install_id == shot.install_id
+        and _same_machine_id(event.machine_id, shot.machine_id)
+        and event.bean_context_id == shot.bean_context_id
+        and event.grinder_context_id == shot.grinder_context_id
+        and event.profile_id == shot.profile_id
+        and (shot.profile_id is not None or event.raw_profile_hash == shot.raw_profile_hash)
+        and event.taste_goal.fingerprint == shot.taste_goal.fingerprint
     )
 
 

@@ -31,6 +31,7 @@ class AutoTuningRuntimeCoordinator:
         self._outcome_observer = outcome_observer
         self._post_shot_recommendation = post_shot_recommendation
         self._live_telemetry = live_telemetry
+        self._latest_machine_states: dict[tuple[str, str], MachineStateEvent] = {}
 
     def handle_shot(self, event: ShotProfileEvent) -> IngestResult:
         result = self._service.ingest_shot_profile(event)
@@ -96,6 +97,7 @@ class AutoTuningRuntimeCoordinator:
         return result
 
     def handle_machine_state(self, event: MachineStateEvent) -> Recommendation | None:
+        self._latest_machine_states[(event.install_id, event.machine_id.casefold())] = event
         recommendation = self._service.handle_machine_state(event)
         if recommendation is not None:
             logger.info(
@@ -118,6 +120,20 @@ class AutoTuningRuntimeCoordinator:
             taste_goal=event.taste_goal,
         )
         return recommendation
+
+    def latest_machine_state_for(self, shot: ShotRecord) -> MachineStateEvent | None:
+        event = self._latest_machine_states.get((shot.install_id, shot.machine_id.casefold()))
+        if event is None:
+            return None
+        if event.bean_context_id != shot.bean_context_id or event.grinder_context_id != shot.grinder_context_id:
+            return None
+        if event.profile_id != shot.profile_id:
+            return None
+        if shot.profile_id is None and event.raw_profile_hash != shot.raw_profile_hash:
+            return None
+        if event.taste_goal.fingerprint != shot.taste_goal.fingerprint:
+            return None
+        return event
 
     def _observe(self, shot: ShotRecord, recommendation: Recommendation | None) -> None:
         if self._outcome_observer is not None:
