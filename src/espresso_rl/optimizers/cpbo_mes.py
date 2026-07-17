@@ -37,6 +37,7 @@ def evaluate_cpbo_mes(
     posterior_mean: Tensor,
     posterior_covariance: Tensor,
     candidate_indices: tuple[int, ...],
+    maximum_indices: tuple[int, ...] | None = None,
     anchor_index: int,
     gamma: float,
     sigma_pref: float,
@@ -47,10 +48,21 @@ def evaluate_cpbo_mes(
     mean = torch.as_tensor(posterior_mean, dtype=torch.float64).reshape(-1)
     covariance = torch.as_tensor(posterior_covariance, dtype=torch.float64)
     _validate_posterior(mean, covariance, candidate_indices, anchor_index)
+    feasible_maximum_indices = (
+        tuple(range(len(mean))) if maximum_indices is None else maximum_indices
+    )
+    if not feasible_maximum_indices:
+        raise ValueError("CPBO MES maximum support cannot be empty")
+    if len(set(feasible_maximum_indices)) != len(feasible_maximum_indices):
+        raise ValueError("CPBO MES maximum indices must be unique")
+    if any(index < 0 or index >= len(mean) for index in feasible_maximum_indices):
+        raise ValueError("CPBO MES maximum index is out of range")
     centered_mean, centered_covariance = centered_posterior_moments(mean, covariance)
+    maximum_index_tensor = torch.tensor(feasible_maximum_indices, dtype=torch.long)
+    anchor_is_feasible = anchor_index in feasible_maximum_indices
     maximum_distribution = approximate_maximum_distribution(
-        centered_mean,
-        centered_covariance,
+        centered_mean[maximum_index_tensor],
+        centered_covariance[maximum_index_tensor][:, maximum_index_tensor],
         config=config,
         seed=seed,
         jitter=covariance_jitter,
@@ -91,7 +103,14 @@ def evaluate_cpbo_mes(
                 samples, diagnostics = sample_upper_truncated_bivariate_gaussian(
                     mean=pair_mean,
                     covariance=pair_covariance,
-                    upper=maximum_value,
+                    upper=torch.stack(
+                        (
+                            maximum_value,
+                            maximum_value
+                            if anchor_is_feasible
+                            else torch.tensor(float("inf"), dtype=torch.float64),
+                        )
+                    ),
                     sample_count=config.truncated_samples_per_bin,
                     seed=seed + candidate_index * 100_003 + maximum_index * 997,
                     rejection_batch_size=config.rejection_batch_size,

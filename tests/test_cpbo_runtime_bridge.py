@@ -29,7 +29,12 @@ from espresso_rl.domain.cpbo import (
     TrustRegionDiagnostics,
 )
 from espresso_rl.domain.events import PreferenceFeedbackEvent
-from espresso_rl.domain.models import GrinderStepDirection, Recipe, ShotRecord
+from espresso_rl.domain.models import (
+    GrinderCalibrationMode,
+    GrinderStepDirection,
+    Recipe,
+    ShotRecord,
+)
 from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.optimizers.cpbo_config import TrustRegionConfig
 from espresso_rl.optimizers.cpbo_trust_region import update_trust_region
@@ -192,6 +197,28 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         self.assertEqual(next_recommendation.comparison_anchor_shot_id, "baseline")
         self.assertEqual(next_recommendation.projected_relative_step_from_reference, 7.0)
 
+    def test_recommendation_includes_absolute_grinder_transition(self) -> None:
+        bridge = self.bridge([6.0])
+        baseline = _shot(
+            "baseline",
+            grind=5.0,
+            grinder_calibration_mode=GrinderCalibrationMode.ABSOLUTE_DISPLAY_CALIBRATED,
+            current_absolute_step=42.0,
+            absolute_reference_step=37.0,
+        )
+        self.shots.rows[baseline.shot_id] = baseline
+
+        recommendation = bridge.handle_shot(baseline).recommendation
+
+        self.assertIsNotNone(recommendation)
+        self.assertEqual(recommendation.current_absolute_step, 42.0)
+        self.assertEqual(recommendation.absolute_reference_step, 37.0)
+        self.assertEqual(recommendation.projected_absolute_step, 43.0)
+        self.assertEqual(
+            recommendation.grinder_calibration_mode,
+            GrinderCalibrationMode.ABSOLUTE_DISPLAY_CALIBRATED,
+        )
+
     def test_preference_cannot_cross_taste_goal_contexts(self) -> None:
         goal = TasteGoal.custom({"sweet": "high", "bitter": "low"})
         bridge = self.bridge([6.0, 7.0])
@@ -322,6 +349,7 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         self.assertIsNone(self.repository.get_shot("extra"))
         state = self.repository.get_state(first.optimization_run_id)
         self.assertEqual(state.pending_shot_id, "candidate")
+        self.assertEqual(state.previous_valid_shot_id, "baseline")
 
     def test_profile_content_hash_is_part_of_run_context(self) -> None:
         first = _shot("first", grind=5.0, raw_profile_hash="a" * 64)
@@ -330,6 +358,146 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
             strict_context_from_shot(first).fingerprint,
             strict_context_from_shot(changed).fingerprint,
         )
+
+    def test_corrected_compared_recipe_preserves_label_and_replaces_recommendation(self) -> None:
+        bridge = self.bridge([6.0, 7.0, 8.0])
+        baseline = _shot("baseline", grind=5.0)
+        self.shots.rows[baseline.shot_id] = baseline
+        first = bridge.handle_shot(baseline).recommendation
+        candidate = _shot("candidate", grind=6.0)
+        self.shots.rows[candidate.shot_id] = candidate
+        bridge.handle_shot(candidate)
+        bridge.handle_preference(
+            PreferenceFeedbackEvent(
+                optimization_run_id=first.optimization_run_id,
+                new_shot_id="candidate",
+                anchor_shot_id="baseline",
+                label=PreferenceLabel.ANCHOR_BETTER,
+                comparison_mode=ComparisonMode.BEST_INCUMBENT,
+                install_id="install",
+                machine_id="gaggimate:AA_BB",
+                timestamp=200,
+            )
+        )
+        corrected = _shot("baseline", grind=4.0)
+        self.shots.rows[corrected.shot_id] = corrected
+
+        outcome = bridge.handle_shot_correction(corrected)
+
+        self.assertIsNotNone(outcome.recommendation)
+        self.assertEqual(outcome.recommendation.projected_relative_step_from_reference, 8.0)
+        comparisons = self.repository.list_comparisons(first.optimization_run_id)
+        self.assertEqual(len(comparisons), 1)
+        self.assertEqual(comparisons[0].label, PreferenceLabel.ANCHOR_BETTER)
+        stored_shot = self.repository.get_shot("baseline")
+        stored_recipe = self.repository.get_recipe(stored_shot.recipe_id)
+        self.assertEqual(stored_recipe.grind_size, 4.0)
+
+    def test_correcting_unanswered_candidate_keeps_single_pending_comparison(self) -> None:
+        bridge = self.bridge([6.0, 8.0])
+        baseline = _shot("baseline", grind=5.0)
+        self.shots.rows[baseline.shot_id] = baseline
+        first = bridge.handle_shot(baseline).recommendation
+        candidate = _shot("candidate", grind=6.0)
+        self.shots.rows[candidate.shot_id] = candidate
+        bridge.handle_shot(candidate)
+        corrected = _shot("candidate", grind=7.0)
+        self.shots.rows[corrected.shot_id] = corrected
+
+        outcome = bridge.handle_shot_correction(corrected)
+
+        self.assertTrue(outcome.awaiting_preference)
+        self.assertEqual(outcome.skipped_reason, "existing_preference_feedback_pending")
+        self.assertIsNone(outcome.recommendation)
+        self.assertEqual(self.repository.list_comparisons(first.optimization_run_id), [])
+        state = self.repository.get_state(first.optimization_run_id)
+        self.assertEqual(state.pending_shot_id, "candidate")
+        self.assertEqual(len(self.recommendations), 1)
+
+    def test_out_of_space_correction_remains_active_without_losing_comparison(self) -> None:
+        bridge = self.bridge([6.0, 7.0, 8.0])
+        baseline = _shot("baseline", grind=5.0)
+        self.shots.rows[baseline.shot_id] = baseline
+        first = bridge.handle_shot(baseline).recommendation
+        candidate = _shot("candidate", grind=6.0)
+        self.shots.rows[candidate.shot_id] = candidate
+        bridge.handle_shot(candidate)
+        bridge.handle_preference(
+            PreferenceFeedbackEvent(
+                optimization_run_id=first.optimization_run_id,
+                new_shot_id="candidate",
+                anchor_shot_id="baseline",
+                label=PreferenceLabel.ANCHOR_BETTER,
+                comparison_mode=ComparisonMode.BEST_INCUMBENT,
+                install_id="install",
+                machine_id="gaggimate:AA_BB",
+                timestamp=200,
+            )
+        )
+        corrected = _shot("baseline", grind=20.0)
+        self.shots.rows[corrected.shot_id] = corrected
+
+        outcome = bridge.handle_shot_correction(corrected)
+
+        stored_shot = self.repository.get_shot("baseline")
+        self.assertEqual(stored_shot.observed_recipe.grind_size, 20.0)
+        stored_recipe = self.repository.get_recipe(stored_shot.recipe_id)
+        self.assertEqual(stored_recipe.normalized_x[0], 2.0)
+        self.assertFalse(stored_recipe.inside_search_space)
+        self.assertEqual(len(self.repository.list_comparisons(first.optimization_run_id)), 1)
+        self.assertEqual(
+            self.repository.list_comparisons(first.optimization_run_id)[0].label,
+            PreferenceLabel.ANCHOR_BETTER,
+        )
+        self.assertIsNotNone(outcome.recommendation)
+        self.assertEqual(outcome.recommendation.projected_relative_step_from_reference, 8.0)
+        state = self.repository.get_state(first.optimization_run_id)
+        self.assertEqual(state.previous_valid_shot_id, "candidate")
+        self.assertEqual(state.incumbent_shot_id, "baseline")
+
+    def test_out_of_space_unanswered_candidate_keeps_comparison_prompt(self) -> None:
+        bridge = self.bridge([6.0, 7.0])
+        baseline = _shot("baseline", grind=5.0)
+        self.shots.rows[baseline.shot_id] = baseline
+        first = bridge.handle_shot(baseline).recommendation
+        candidate = _shot("candidate", grind=6.0)
+        self.shots.rows[candidate.shot_id] = candidate
+        bridge.handle_shot(candidate)
+        corrected = _shot("candidate", grind=20.0)
+        self.shots.rows[corrected.shot_id] = corrected
+
+        outcome = bridge.handle_shot_correction(corrected)
+
+        self.assertTrue(outcome.awaiting_preference)
+        self.assertIsNone(outcome.recommendation)
+        self.assertEqual(outcome.skipped_reason, "existing_preference_feedback_pending")
+        self.assertEqual(self.repository.list_comparisons(first.optimization_run_id), [])
+        stored = self.repository.get_shot("candidate")
+        self.assertEqual(stored.observed_recipe.grind_size, 20.0)
+        self.assertFalse(self.repository.get_recipe(stored.recipe_id).inside_search_space)
+        state = self.repository.get_state(first.optimization_run_id)
+        self.assertEqual(state.pending_shot_id, "candidate")
+
+    def test_out_of_space_only_observation_replaces_unbrewed_candidate(self) -> None:
+        bridge = self.bridge([6.0, 7.0])
+        baseline = _shot("baseline", grind=5.0)
+        self.shots.rows[baseline.shot_id] = baseline
+        first = bridge.handle_shot(baseline).recommendation
+        corrected = _shot("baseline", grind=20.0)
+        self.shots.rows[corrected.shot_id] = corrected
+
+        outcome = bridge.handle_shot_correction(corrected)
+
+        self.assertIsNotNone(outcome.recommendation)
+        self.assertEqual(outcome.recommendation.projected_relative_step_from_reference, 7.0)
+        self.assertFalse(outcome.awaiting_preference)
+        self.assertIsNone(outcome.skipped_reason)
+        pending = self.repository.get_pending_suggestion(first.optimization_run_id)
+        self.assertIsNotNone(pending)
+        self.assertTrue(pending.recipe.inside_search_space)
+        state = self.repository.get_state(first.optimization_run_id)
+        self.assertEqual(state.previous_valid_shot_id, "baseline")
+        self.assertEqual(state.incumbent_shot_id, "baseline")
 
 
 def _recipe_space(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:
@@ -351,6 +519,9 @@ def _shot(
     dose_observed: bool = True,
     dose_target_g: float | None = None,
     dose_target_confirmed: bool = False,
+    grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED,
+    current_absolute_step: float | None = None,
+    absolute_reference_step: float | None = None,
 ) -> ShotRecord:
     return ShotRecord(
         shot_id=shot_id,
@@ -376,6 +547,9 @@ def _shot(
         profile_id="profile",
         raw_profile_hash=raw_profile_hash,
         grinder_step_direction=GrinderStepDirection.HIGHER_IS_FINER,
+        grinder_calibration_mode=grinder_calibration_mode,
+        current_absolute_step=current_absolute_step,
+        absolute_reference_step=absolute_reference_step,
         shot_end_state=shot_end_state,
     )
 

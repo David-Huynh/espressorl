@@ -180,6 +180,12 @@ class RecipeParameter:
         value = self.validate_physical(value)
         return (value - self.physical_min) / (self.physical_max - self.physical_min)
 
+    def normalize_observation(self, value: float) -> float:
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f"{self.name} observation must be finite")
+        return (value - self.physical_min) / (self.physical_max - self.physical_min)
+
     def inverse(self, normalized: float) -> float:
         normalized = _normalized_scalar(normalized, self.name)
         return self.physical_min + normalized * (self.physical_max - self.physical_min)
@@ -192,6 +198,16 @@ class RecipeParameter:
         )
         quantized = self.physical_min + step_index * self.resolution
         quantized = min(self.physical_max, max(self.physical_min, quantized))
+        return float(round(quantized, _decimal_places(self.resolution) + 2))
+
+    def quantize_observation(self, value: float) -> float:
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f"{self.name} observation must be finite")
+        step_index = math.floor(
+            ((value - self.physical_min) / self.resolution) + 0.5 + 1e-12
+        )
+        quantized = self.physical_min + step_index * self.resolution
         return float(round(quantized, _decimal_places(self.resolution) + 2))
 
     def validate_physical(self, value: float, *, allow_roundoff: bool = False) -> float:
@@ -241,6 +257,18 @@ class RecipeSpace:
         self.validate_recipe(*recipe)
         return recipe
 
+    def quantize_observation(
+        self,
+        grind_size: float,
+        dose_g: float,
+        target_output_g: float,
+    ) -> tuple[float, float, float]:
+        return (
+            self.grind.quantize_observation(grind_size),
+            self.dose.quantize_observation(dose_g),
+            self.target_output.quantize_observation(target_output_g),
+        )
+
     def validate_recipe(
         self,
         grind_size: float,
@@ -268,6 +296,24 @@ class RecipeSpace:
             float(fineness),
             float(self.dose.normalize(dose_g)),
             float(self.target_output.normalize(target_output_g)),
+        )
+
+    def normalize_observation(
+        self,
+        grind_size: float,
+        dose_g: float,
+        target_output_g: float,
+    ) -> tuple[float, float, float]:
+        physical_grind = self.grind.normalize_observation(grind_size)
+        fineness = (
+            physical_grind
+            if self.grinder_step_direction == GrinderStepDirection.HIGHER_IS_FINER
+            else 1.0 - physical_grind
+        )
+        return (
+            float(fineness),
+            float(self.dose.normalize_observation(dose_g)),
+            float(self.target_output.normalize_observation(target_output_g)),
         )
 
     def inverse_recipe(
@@ -413,6 +459,33 @@ class OptimizationRun:
 
 
 @dataclass(frozen=True)
+class ObservedRecipe:
+    """Physical recipe observed for a shot, independent of optimizer policy bounds."""
+
+    grind_size: float
+    dose_g: float
+    target_output_g: float
+
+    def __post_init__(self) -> None:
+        values = (float(self.grind_size), float(self.dose_g), float(self.target_output_g))
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("observed recipe values must be finite")
+        if abs(values[0]) > RECIPE_DOMAIN_GRIND_RADIUS_MAX_STEPS:
+            raise ValueError("observed grind is outside the integrity envelope")
+        if not RECIPE_DOMAIN_DOSE_MIN_G <= values[1] <= RECIPE_DOMAIN_DOSE_MAX_G:
+            raise ValueError("observed dose is outside the integrity envelope")
+        if not RECIPE_DOMAIN_OUTPUT_MIN_G <= values[2] <= RECIPE_DOMAIN_OUTPUT_MAX_G:
+            raise ValueError("observed output is outside the integrity envelope")
+        object.__setattr__(self, "grind_size", values[0])
+        object.__setattr__(self, "dose_g", values[1])
+        object.__setattr__(self, "target_output_g", values[2])
+
+    @property
+    def brew_ratio(self) -> float:
+        return self.target_output_g / self.dose_g
+
+
+@dataclass(frozen=True)
 class RecipePoint:
     recipe_id: str
     optimization_run_id: str
@@ -440,7 +513,14 @@ class RecipePoint:
             abs_tol=1e-9,
         ):
             raise ValueError("brew_ratio must be derived from target_output_g / dose_g")
-        object.__setattr__(self, "normalized_x", normalized_recipe(self.normalized_x))
+        object.__setattr__(self, "normalized_x", recipe_coordinates(self.normalized_x))
+
+    @property
+    def inside_search_space(self) -> bool:
+        return all(
+            -_FLOAT_TOLERANCE <= value <= 1.0 + _FLOAT_TOLERANCE
+            for value in self.normalized_x
+        )
 
     @classmethod
     def create(
@@ -471,6 +551,40 @@ class RecipePoint:
             created_at=_now() if created_at is None else int(created_at),
         )
 
+    @classmethod
+    def observe(
+        cls,
+        run_id: str,
+        recipe_space: RecipeSpace,
+        grind_size: float,
+        dose_g: float,
+        target_output_g: float,
+        *,
+        created_at: int | None = None,
+    ) -> "RecipePoint":
+        observation = ObservedRecipe(grind_size, dose_g, target_output_g)
+        quantized = recipe_space.quantize_observation(
+            observation.grind_size,
+            observation.dose_g,
+            observation.target_output_g,
+        )
+        normalized_x = recipe_space.normalize_observation(*quantized)
+        key = json.dumps(
+            [run_id, recipe_space.version, *quantized],
+            separators=(",", ":"),
+        )
+        recipe_id = f"recipe_{hashlib.sha256(key.encode('utf-8')).hexdigest()[:32]}"
+        return cls(
+            recipe_id=recipe_id,
+            optimization_run_id=run_id,
+            grind_size=quantized[0],
+            dose_g=quantized[1],
+            target_output_g=quantized[2],
+            brew_ratio=quantized[2] / quantized[1],
+            normalized_x=normalized_x,
+            created_at=_now() if created_at is None else int(created_at),
+        )
+
 
 @dataclass(frozen=True)
 class PreferenceShot:
@@ -482,6 +596,7 @@ class PreferenceShot:
     completed_at: int | None
     status: PhysicalShotStatus
     telemetry_available: bool
+    observed_recipe: ObservedRecipe | None = None
     raw_telemetry_reference: str | None = None
     trace_feature_names: tuple[str, ...] = ()
     trace_features: tuple[float, ...] | None = None
@@ -495,6 +610,8 @@ class PreferenceShot:
         if self.started_at < 0 or (self.completed_at is not None and self.completed_at < self.started_at):
             raise ValueError("shot timestamps are invalid")
         object.__setattr__(self, "status", PhysicalShotStatus(self.status))
+        if self.observed_recipe is not None and not isinstance(self.observed_recipe, ObservedRecipe):
+            raise ValueError("observed_recipe must be an ObservedRecipe")
         if self.status == PhysicalShotStatus.VALID and self.completed_at is None:
             raise ValueError("valid shot requires completed_at")
         if self.trace_features is not None:
@@ -687,6 +804,8 @@ class Suggestion:
     def __post_init__(self) -> None:
         if self.recipe.optimization_run_id != self.optimization_run_id:
             raise ValueError("suggestion recipe belongs to another optimization run")
+        if not self.recipe.inside_search_space:
+            raise ValueError("suggestion recipe must be inside the search space")
         if not self.anchor_shot_id.strip():
             raise ValueError("suggestion anchor_shot_id is required")
         object.__setattr__(self, "comparison_mode", ComparisonMode(self.comparison_mode))
@@ -710,6 +829,15 @@ class ShotRequest:
     is_baseline: bool
     model_version: str = CPBO_MODEL_VERSION
 
+    def __post_init__(self) -> None:
+        if self.recipe.optimization_run_id != self.optimization_run_id:
+            raise ValueError("shot request recipe belongs to another optimization run")
+        if not self.recipe.inside_search_space:
+            raise ValueError("shot request recipe must be inside the search space")
+        object.__setattr__(self, "comparison_mode", ComparisonMode(self.comparison_mode))
+        if self.is_baseline != (self.anchor_shot_id is None):
+            raise ValueError("only a baseline shot request may omit its anchor")
+
 
 @dataclass(frozen=True)
 class ModelRecommendation:
@@ -720,6 +848,14 @@ class ModelRecommendation:
     incumbent_shot_id: str | None
     model_version: str = CPBO_MODEL_VERSION
 
+    def __post_init__(self) -> None:
+        if self.recipe.optimization_run_id != self.optimization_run_id:
+            raise ValueError("recommended recipe belongs to another optimization run")
+        if not self.recipe.inside_search_space:
+            raise ValueError("recommended recipe must be inside the search space")
+        if not self.source.strip():
+            raise ValueError("recommendation source is required")
+
 
 def new_cpbo_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
@@ -729,6 +865,15 @@ def normalized_recipe(value: Sequence[float]) -> tuple[float, float, float]:
     if len(value) != _NORMALIZED_DIMENSION:
         raise ValueError("normalized recipe must have exactly three dimensions")
     return tuple(_normalized_scalar(item, "normalized recipe") for item in value)  # type: ignore[return-value]
+
+
+def recipe_coordinates(value: Sequence[float]) -> tuple[float, float, float]:
+    if len(value) != _NORMALIZED_DIMENSION:
+        raise ValueError("recipe coordinates must have exactly three dimensions")
+    coordinates = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) for item in coordinates):
+        raise ValueError("recipe coordinates must be finite")
+    return coordinates  # type: ignore[return-value]
 
 
 def _normalized_scalar(value: float, name: str) -> float:

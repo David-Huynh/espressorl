@@ -85,6 +85,12 @@ gaggimate/{topic_id}/rl/recommendation
 gaggimate/{topic_id}/rl/status
 ```
 
+The retained recommendation topic is the recommendation lifecycle authority.
+An accepted recommendation remains there for next-shot attribution without
+remaining actionable; ignored recommendations and recommendations consumed by
+a completed shot are cleared with an empty retained payload. The status topic
+is diagnostic and must not create or clear recommendation state.
+
 It also publishes non-retained QoS 1 delivery receipts on:
 
 ```text

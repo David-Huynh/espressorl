@@ -77,6 +77,9 @@ class AutoTuningRuntimeCoordinator:
             self._observe(result.shot, recommendation)
             self._publisher.publish_recommendation(recommendation)
 
+        if not result.replayed and recommendation is None and result.shot.recommendation_id:
+            self._publisher.clear_recommendation(event.machine_id)
+
         self._publisher.publish_status(
             event.machine_id,
             event.bean_context_id,

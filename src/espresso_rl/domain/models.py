@@ -218,6 +218,57 @@ class Recommendation:
         if not isinstance(self.taste_goal, TasteGoal):
             self.taste_goal = TasteGoal.from_dict(self.taste_goal)
         self.confidence = max(0.0, min(1.0, float(self.confidence)))
+        grinder_projection = (
+            self.grind_delta_steps_from_current,
+            self.grind_delta_um_from_current,
+            self.projected_relative_step_from_reference,
+            self.projected_relative_grind_um_from_reference,
+        )
+        if not all(math.isfinite(value) for value in grinder_projection):
+            raise ValueError("recommendation grinder projection must be finite")
+        for field_name in (
+            "current_absolute_step",
+            "absolute_reference_step",
+            "projected_absolute_step",
+        ):
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError(f"{field_name} must be finite")
+            setattr(self, field_name, value)
+        current_relative_step = (
+            self.projected_relative_step_from_reference - self.grind_delta_steps_from_current
+        )
+        if self.current_absolute_step is not None and self.absolute_reference_step is not None:
+            if not math.isclose(
+                self.current_absolute_step - self.absolute_reference_step,
+                current_relative_step,
+                rel_tol=1e-3,
+                abs_tol=1e-3,
+            ):
+                raise ValueError("current absolute grinder setting is inconsistent")
+        if self.projected_absolute_step is not None:
+            projected_candidates = []
+            if self.current_absolute_step is not None:
+                projected_candidates.append(
+                    self.current_absolute_step + self.grind_delta_steps_from_current
+                )
+            if self.absolute_reference_step is not None:
+                projected_candidates.append(
+                    self.absolute_reference_step + self.projected_relative_step_from_reference
+                )
+            if any(
+                not math.isclose(
+                    self.projected_absolute_step,
+                    expected,
+                    rel_tol=1e-3,
+                    abs_tol=1e-3,
+                )
+                for expected in projected_candidates
+            ):
+                raise ValueError("projected absolute grinder setting is inconsistent")
         targets = (self.next_dose_g, self.target_yield_g, self.target_ratio)
         if not all(math.isfinite(value) and value > 0 for value in targets):
             raise ValueError("recommendation targets must be positive and finite")

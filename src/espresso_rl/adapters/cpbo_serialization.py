@@ -6,6 +6,7 @@ from typing import Any, Mapping
 from espresso_rl.domain.cpbo import (
     AcquisitionDiagnostics,
     ComparisonMode,
+    ObservedRecipe,
     OptimizationRun,
     OptimizationRunContext,
     OptimizerState,
@@ -143,6 +144,15 @@ def shot_to_json(shot: PreferenceShot) -> str:
             "completed_at": shot.completed_at,
             "status": shot.status.value,
             "telemetry_available": shot.telemetry_available,
+            "observed_recipe": (
+                {
+                    "grind_size": shot.observed_recipe.grind_size,
+                    "dose_g": shot.observed_recipe.dose_g,
+                    "target_output_g": shot.observed_recipe.target_output_g,
+                }
+                if shot.observed_recipe is not None
+                else None
+            ),
             "raw_telemetry_reference": shot.raw_telemetry_reference,
             "trace_feature_names": list(shot.trace_feature_names),
             "trace_features": list(shot.trace_features) if shot.trace_features is not None else None,
@@ -153,24 +163,44 @@ def shot_to_json(shot: PreferenceShot) -> str:
 
 def shot_from_json(value: Any) -> PreferenceShot:
     row = decode_cpbo_json(value)
-    _require_keys(
+    required = {
+        "shot_id",
+        "recipe_id",
+        "optimization_run_id",
+        "sequence_number",
+        "started_at",
+        "completed_at",
+        "status",
+        "telemetry_available",
+        "raw_telemetry_reference",
+        "trace_feature_names",
+        "trace_features",
+        "metadata",
+    }
+    optional = {"optimizer_eligible", "observed_recipe"}
+    _require_keys_allowing_optional(
         row,
-        {
-            "shot_id",
-            "recipe_id",
-            "optimization_run_id",
-            "sequence_number",
-            "started_at",
-            "completed_at",
-            "status",
-            "telemetry_available",
-            "raw_telemetry_reference",
-            "trace_feature_names",
-            "trace_features",
-            "metadata",
-        },
+        required,
+        optional,
         "physical shot",
     )
+    observed_recipe_value = row.get("observed_recipe")
+    observed_recipe = None
+    if "optimizer_eligible" in row:
+        _strict_bool(row["optimizer_eligible"], "optimizer_eligible")
+    if observed_recipe_value is not None:
+        if not isinstance(observed_recipe_value, Mapping):
+            raise ValueError("observed_recipe must be an object or null")
+        _require_keys(
+            observed_recipe_value,
+            {"grind_size", "dose_g", "target_output_g"},
+            "observed recipe",
+        )
+        observed_recipe = ObservedRecipe(
+            grind_size=float(observed_recipe_value["grind_size"]),
+            dose_g=float(observed_recipe_value["dose_g"]),
+            target_output_g=float(observed_recipe_value["target_output_g"]),
+        )
     return PreferenceShot(
         shot_id=str(row["shot_id"]),
         recipe_id=str(row["recipe_id"]),
@@ -180,6 +210,7 @@ def shot_from_json(value: Any) -> PreferenceShot:
         completed_at=(int(row["completed_at"]) if row["completed_at"] is not None else None),
         status=PhysicalShotStatus(row["status"]),
         telemetry_available=_strict_bool(row["telemetry_available"], "telemetry_available"),
+        observed_recipe=observed_recipe,
         raw_telemetry_reference=_optional_string(row["raw_telemetry_reference"]),
         trace_feature_names=tuple(str(item) for item in row["trace_feature_names"]),
         trace_features=(
@@ -448,6 +479,24 @@ def _require_keys(value: Mapping[str, Any], expected: set[str], name: str) -> No
     if actual != expected:
         missing = sorted(expected - actual)
         unknown = sorted(actual - expected)
+        details = []
+        if missing:
+            details.append(f"missing={','.join(missing)}")
+        if unknown:
+            details.append(f"unknown={','.join(unknown)}")
+        raise ValueError(f"{name} fields are invalid ({'; '.join(details)})")
+
+
+def _require_keys_allowing_optional(
+    value: Mapping[str, Any],
+    required: set[str],
+    optional: set[str],
+    name: str,
+) -> None:
+    actual = set(value)
+    missing = sorted(required - actual)
+    unknown = sorted(actual - required - optional)
+    if missing or unknown:
         details = []
         if missing:
             details.append(f"missing={','.join(missing)}")

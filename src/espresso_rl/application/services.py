@@ -265,13 +265,17 @@ class EspressoRLService:
         )
         return IngestResult(shot=shot, recommendation=None)
 
-    def record_shot_correction(self, event: ShotCorrectionEvent) -> ShotRecord:
+    def record_shot_correction(
+        self,
+        event: ShotCorrectionEvent,
+    ) -> ShotRecord:
         now = self._clock()
         shot = self._shots.get(event.shot_id)
         if shot is None:
             raise ValueError(f"unknown shot_id {event.shot_id}")
         if shot.install_id != event.install_id or shot.machine_id != event.machine_id:
             raise ValueError("shot correction does not match the stored shot owner")
+        shot = copy.copy(shot)
 
         tags = set(event.correction_tags)
         if event.shot_type is not None:
@@ -333,6 +337,56 @@ class EspressoRLService:
         if "did_not_follow_yield" in tags:
             shot.yield_followed = False
             shot.yield_recommendation_trust = 0.0
+
+        corrected_relative_grind = event.relative_grind_steps_from_reference
+        if event.current_absolute_step is not None:
+            if shot.absolute_reference_step is None:
+                raise ValueError("shot correction requires an absolute grinder reference")
+            derived_relative = event.current_absolute_step - shot.absolute_reference_step
+            if corrected_relative_grind is not None and not math.isclose(
+                corrected_relative_grind,
+                derived_relative,
+                rel_tol=0.0,
+                abs_tol=0.01,
+            ):
+                raise ValueError("absolute and relative grind corrections disagree")
+            corrected_relative_grind = derived_relative
+            shot.current_absolute_step = event.current_absolute_step
+        if corrected_relative_grind is not None:
+            shot.relative_grind_steps_from_reference = corrected_relative_grind
+            shot.relative_grind_um_from_reference = (
+                corrected_relative_grind
+                * shot.microns_per_step
+                * shot.grinder_direction_sign
+            )
+            shot.grind_observed = True
+            if shot.absolute_reference_step is not None:
+                shot.current_absolute_step = (
+                    shot.absolute_reference_step + corrected_relative_grind
+                )
+        if event.dose_in_g is not None:
+            shot.dose_in_g = event.dose_in_g
+            shot.dose_target_g = event.dose_in_g
+            shot.dose_observed = True
+            shot.dose_target_confirmed = False
+        if event.target_yield_g is not None:
+            shot.target_yield_g = event.target_yield_g
+            shot.target_yield_observed = True
+        if event.beverage_out_g is not None:
+            shot.beverage_out_g = event.beverage_out_g
+            shot.beverage_out_observation = "user_corrected"
+
+        ratio_dose = (
+            shot.dose_in_g
+            if shot.dose_observed
+            else shot.dose_target_g if shot.dose_target_confirmed else None
+        )
+        shot.brew_ratio = (
+            shot.beverage_out_g / ratio_dose
+            if shot.beverage_out_g is not None and ratio_dose is not None
+            else None
+        )
+        shot.target_ratio = shot.target_yield_g / (shot.dose_target_g or shot.dose_in_g)
 
         variable_follow = [shot.grind_followed, shot.dose_followed, shot.yield_followed]
         any_not_followed = any(value is False for value in variable_follow)

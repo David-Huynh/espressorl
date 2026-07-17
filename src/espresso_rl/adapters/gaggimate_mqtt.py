@@ -65,6 +65,30 @@ _PREFERENCE_FIELDS = frozenset(
         "taste_goal",
     }
 )
+_CORRECTION_REQUIRED_FIELDS = frozenset(
+    {
+        "event_type",
+        "schema_version",
+        "shot_id",
+        "machine_id",
+        "timestamp",
+        "source",
+        "correction_tags",
+    }
+)
+_CORRECTION_FIELDS = _CORRECTION_REQUIRED_FIELDS | {
+    "install_id",
+    "exclude_from_local_optimization",
+    "shot_type",
+    "grind_followed",
+    "dose_followed",
+    "yield_followed",
+    "relative_grind_steps_from_reference",
+    "current_absolute_step",
+    "dose_in_g",
+    "target_yield_g",
+    "beverage_out_g",
+}
 
 class GaggimateMQTTClient:
     """Gaggimate MQTT adapter. Machine-specific topics stay out of core."""
@@ -555,18 +579,45 @@ class GaggimateMQTTClient:
         )
 
     def translate_correction_payload(self, payload: dict[str, Any], mac: str) -> ShotCorrectionEvent:
+        if not isinstance(payload, dict):
+            raise ValueError("shot correction must be an object")
+        unknown = set(payload) - _CORRECTION_FIELDS
+        missing = _CORRECTION_REQUIRED_FIELDS - set(payload)
+        if unknown or missing:
+            raise ValueError("shot correction fields are invalid")
+        if payload.get("event_type") != "shot_correction":
+            raise ValueError("shot correction event_type is invalid")
+        schema_version = _strict_non_negative_int(payload.get("schema_version"), "schema_version")
+        if schema_version != 1:
+            raise ValueError("shot correction schema_version is unsupported")
+        topic_machine_id = f"gaggimate:{mac}"
+        machine_id = _required_bounded_string(payload.get("machine_id"), "machine_id", maximum=160)
+        if not _same_gaggimate_machine_id(topic_machine_id, machine_id):
+            raise ValueError("shot correction machine_id does not match topic")
         return ShotCorrectionEvent(
-            shot_id=str(payload.get("shot_id") or ""),
-            install_id=str(payload.get("install_id") or self._config.install_id),
-            machine_id=str(payload.get("machine_id") or f"gaggimate:{mac}"),
-            timestamp=int(payload.get("timestamp", self._config.now())),
+            shot_id=_required_bounded_string(payload.get("shot_id"), "shot_id", maximum=256),
+            install_id=_required_bounded_string(
+                payload.get("install_id", self._config.install_id),
+                "install_id",
+                maximum=160,
+            ),
+            machine_id=machine_id,
+            timestamp=_strict_non_negative_int(payload.get("timestamp"), "timestamp"),
             exclude_from_local_optimization=_optional_bool(payload.get("exclude_from_local_optimization")),
             shot_type=payload.get("shot_type"),
             grind_followed=_optional_bool(payload.get("grind_followed")),
             dose_followed=_optional_bool(payload.get("dose_followed")),
             yield_followed=_optional_bool(payload.get("yield_followed")),
+            relative_grind_steps_from_reference=_optional_float(
+                payload.get("relative_grind_steps_from_reference")
+            ),
+            current_absolute_step=_optional_float(payload.get("current_absolute_step")),
+            dose_in_g=_optional_float(payload.get("dose_in_g")),
+            target_yield_g=_optional_float(payload.get("target_yield_g")),
+            beverage_out_g=_optional_float(payload.get("beverage_out_g")),
             correction_tags=list(payload.get("correction_tags", [])),
-            source=payload.get("source", "gaggimate_mqtt"),
+            source=_required_bounded_string(payload.get("source"), "source", maximum=80),
+            schema_version=schema_version,
         )
 
     def translate_upload_maintenance_payload(

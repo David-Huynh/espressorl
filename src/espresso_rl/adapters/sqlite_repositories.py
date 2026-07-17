@@ -852,6 +852,54 @@ class SQLitePreferentialOptimizationRepository:
                 raise ValueError("comparison has no awaiting suggestion")
             self._upsert_state(state)
 
+    def replace_shot_observation(
+        self,
+        recipe: RecipePoint,
+        shot: PreferenceShot,
+        state: OptimizerState,
+        *,
+        invalidate_pending_suggestion: bool,
+    ) -> None:
+        if shot.optimization_run_id != state.optimization_run_id:
+            raise ValueError("shot and optimizer state belong to different runs")
+        if recipe.recipe_id != shot.recipe_id or recipe.optimization_run_id != shot.optimization_run_id:
+            raise ValueError("physical shot and replacement recipe identifiers disagree")
+        if invalidate_pending_suggestion and state.pending_recipe_id is not None:
+            raise ValueError("invalidated suggestion must be cleared from optimizer state")
+        with self._lock, self._store.conn:
+            existing = self._store.conn.execute(
+                "SELECT run_id FROM cpbo_shots WHERE shot_id=?",
+                (shot.shot_id,),
+            ).fetchone()
+            if existing is None or existing["run_id"] != shot.optimization_run_id:
+                raise ValueError("CPBO correction references an unknown physical shot")
+            self._insert_recipe(recipe)
+            cursor = self._store.conn.execute(
+                """
+                UPDATE cpbo_shots
+                SET recipe_id=?, status=?, payload_json=?
+                WHERE shot_id=? AND run_id=?
+                """,
+                (
+                    shot.recipe_id,
+                    shot.status.value,
+                    shot_to_json(shot),
+                    shot.shot_id,
+                    shot.optimization_run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("CPBO physical shot correction was not applied")
+            if invalidate_pending_suggestion:
+                self._store.conn.execute(
+                    """
+                    UPDATE cpbo_suggestions SET status='superseded'
+                    WHERE run_id=? AND status IN ('pending', 'awaiting_preference')
+                    """,
+                    (shot.optimization_run_id,),
+                )
+            self._upsert_state(state)
+
     def reset_owner(self, install_id: str, machine_id: str) -> dict[str, int]:
         with self._lock, self._store.conn:
             run_rows = self._store.conn.execute(

@@ -6,6 +6,7 @@ import unittest
 import torch
 
 from espresso_rl.domain.cpbo import (
+    ComparisonMode,
     OptimizationRunContext,
     PhysicalShotStatus,
     PreferenceComparison,
@@ -15,6 +16,7 @@ from espresso_rl.domain.cpbo import (
     RecipeParameter,
     RecipePoint,
     RecipeSpace,
+    ShotRequest,
 )
 from espresso_rl.domain.models import GrinderStepDirection
 from espresso_rl.domain.taste_goal import TasteGoal
@@ -73,6 +75,26 @@ class RecipeSpaceTests(unittest.TestCase):
         self.assertEqual(first.dose_g, 18.0)
         self.assertEqual(first.target_output_g, 36.0)
         self.assertAlmostEqual(first.brew_ratio, 2.0)
+
+    def test_observation_coordinates_can_extend_beyond_candidate_domain(self) -> None:
+        space = recipe_space(GrinderStepDirection.HIGHER_IS_FINER)
+        with self.assertRaisesRegex(ValueError, "outside physical bounds"):
+            RecipePoint.create("run", space, 20.0, 18.0, 36.0, created_at=1)
+
+        observed = RecipePoint.observe("run", space, 20.0, 18.0, 36.0, created_at=1)
+
+        self.assertEqual(observed.normalized_x, (2.0, 0.5, 0.4))
+        self.assertFalse(observed.inside_search_space)
+        with self.assertRaisesRegex(ValueError, "shot request recipe must be inside"):
+            ShotRequest("run", observed, None, ComparisonMode.BEST_INCUMBENT, True)
+
+    def test_in_space_observation_has_same_identity_as_candidate(self) -> None:
+        space = recipe_space(GrinderStepDirection.HIGHER_IS_FINER)
+        candidate = RecipePoint.create("run", space, 4.49, 18.04, 35.96, created_at=1)
+        observed = RecipePoint.observe("run", space, 4.49, 18.04, 35.96, created_at=2)
+
+        self.assertEqual(observed.recipe_id, candidate.recipe_id)
+        self.assertEqual(observed.normalized_x, candidate.normalized_x)
 
     def test_brew_ratio_is_derived_without_an_independent_ratio_bound(self) -> None:
         space = recipe_space(GrinderStepDirection.HIGHER_IS_FINER)

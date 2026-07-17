@@ -335,6 +335,38 @@ the incompatible active run before a new normalized model is initialized.
 Canonical events and offline datasets retain physical units; normalized
 coordinates are derived only at the CPBO model boundary.
 
+### Historical recipe corrections
+
+The active recipe domain constrains executable recommendations, not historical
+observations. A shot-history correction is accepted when its physical values
+pass the broad integrity envelope, even when the corrected recipe is outside
+the run's frozen search space. The canonical shot and any enabled community
+replacement upload are persisted before CPBO reprocessing.
+
+CPBO stores the corrected physical values as an `ObservedRecipe` and creates a
+quantized observation `RecipePoint` without clipping it to the run's bounds.
+Its normalized coordinates may therefore be below zero or above one. Every
+physically valid shot and its pairwise comparison remains active GP evidence,
+including observations outside the frozen search space.
+
+The distinction is enforced at acquisition time. Candidate generation, MES
+maximum support, and emitted recommendations stay inside the frozen normalized
+domain. An out-of-space observation may remain the comparison anchor or
+incumbent, but a reconstructed trust-region center is projected to the nearest
+domain boundary; the stored observation itself is never projected or changed.
+An unanswered comparison remains pending after either shot is corrected.
+
+Rebuilding after a recipe correction clears model checkpoints and recomputes
+the previous shot, incumbent, and trust-region state from the complete valid
+history. A stale unbrewed suggestion is replaced with a newly fitted bounded
+recommendation. No additional comparison is requested for comparisons already
+recorded.
+
+Changing the configured recipe domain still starts a new compatible run. The
+system does not silently widen an existing run or renormalize its recipe IDs.
+Corrected physical shots and comparison rows remain available in canonical and
+offline storage for replay and future cross-run training.
+
 ## Operational Loop
 
 1. A first valid baseline shot initializes previous and incumbent state.

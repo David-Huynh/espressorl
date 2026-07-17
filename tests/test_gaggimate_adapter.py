@@ -119,6 +119,35 @@ class GaggimateAdapterTests(unittest.TestCase):
                 "AA_BB",
             )
 
+    def test_correction_payload_validates_numeric_fields_and_topic_owner(self) -> None:
+        payload = {
+            "event_type": "shot_correction",
+            "schema_version": 1,
+            "shot_id": "shot_1",
+            "machine_id": "gaggimate:AA_BB",
+            "timestamp": 100,
+            "source": "gaggimate_shot_history",
+            "correction_tags": [],
+            "dose_in_g": 17.5,
+            "target_yield_g": 42.0,
+            "beverage_out_g": 41.5,
+            "relative_grind_steps_from_reference": 3.0,
+        }
+
+        event = self.client.translate_correction_payload(payload, "AA_BB")
+
+        self.assertEqual(event.dose_in_g, 17.5)
+        self.assertEqual(event.relative_grind_steps_from_reference, 3.0)
+        with self.assertRaises(ValueError):
+            self.client.translate_correction_payload({**payload, "dose_in_g": True}, "AA_BB")
+        with self.assertRaises(ValueError):
+            self.client.translate_correction_payload({**payload, "unexpected": 1}, "AA_BB")
+        with self.assertRaises(ValueError):
+            self.client.translate_correction_payload(
+                {**payload, "machine_id": "gaggimate:CC_DD"},
+                "AA_BB",
+            )
+
     def test_shot_payload_preserves_observed_recipe_and_telemetry(self) -> None:
         payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
         event = self.client.translate_shot_payload(payload, "AA_BB")

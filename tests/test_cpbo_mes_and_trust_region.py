@@ -89,6 +89,24 @@ class MESAcquisitionTests(unittest.TestCase):
         self.assertTrue(torch.all(samples[:, 1] <= -0.1 + 1e-10))
         self.assertIn(diagnostics.method, {"rejection", "gibbs", "rejection_then_gibbs"})
 
+    def test_one_sided_truncation_leaves_out_of_domain_anchor_unbounded(self) -> None:
+        samples, _ = sample_upper_truncated_bivariate_gaussian(
+            mean=torch.tensor([0.0, 2.0], dtype=torch.float64),
+            covariance=torch.tensor([[1.0, 0.2], [0.2, 1.0]], dtype=torch.float64),
+            upper=torch.tensor([0.1, float("inf")], dtype=torch.float64),
+            sample_count=400,
+            seed=7,
+            rejection_batch_size=512,
+            rejection_max_batches=4,
+            rejection_min_acceptance=0.01,
+            gibbs_burn_in=30,
+            gibbs_thinning=2,
+            jitter=1e-8,
+        )
+
+        self.assertTrue(torch.all(samples[:, 0] <= 0.1 + 1e-10))
+        self.assertTrue(torch.any(samples[:, 1] > 0.1))
+
     def test_direct_and_gumbel_maximum_strategies_agree_qualitatively(self) -> None:
         mean, covariance = posterior_fixture()
         direct_config = replace(
@@ -144,6 +162,30 @@ class MESAcquisitionTests(unittest.TestCase):
         self.assertNotIn(anchor.recipe_id, ids)
         self.assertNotIn(observed.recipe_id, ids)
         self.assertTrue(all(recipe.grind_size.is_integer() for recipe in domain.proposal_recipes))
+
+    def test_out_of_space_anchor_is_not_part_of_maximum_support(self) -> None:
+        space = recipe_space()
+        bounded = RecipePoint.create("run", space, 6.0, 18.0, 36.0, created_at=1)
+        anchor = RecipePoint.observe("run", space, 20.0, 18.0, 36.0, created_at=2)
+
+        domain = build_candidate_domain(
+            run_id="run",
+            recipe_space=space,
+            evaluated_recipes=(bounded, anchor),
+            anchor_recipe=anchor,
+            config=fast_mes_config(),
+            seed=5,
+            created_at=3,
+        )
+
+        self.assertNotIn(domain.anchor_index, domain.maximum_indices)
+        self.assertTrue(
+            all(
+                domain.discretization_recipes[index].inside_search_space
+                for index in domain.maximum_indices
+            )
+        )
+        self.assertTrue(all(recipe.inside_search_space for recipe in domain.proposal_recipes))
 
 
 class TrustRegionTests(unittest.TestCase):

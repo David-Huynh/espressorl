@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ from espresso_rl.adapters.sqlite_repositories import (
     SQLiteUploadQueueRepository,
 )
 from espresso_rl.application.services import EspressoRLService
-from espresso_rl.domain.events import RecommendationApplyEvent, ShotProfileEvent
+from espresso_rl.domain.events import RecommendationApplyEvent, ShotCorrectionEvent, ShotProfileEvent
 from espresso_rl.domain.models import (
     Recommendation,
     RecommendationApplyStatus,
@@ -160,6 +161,106 @@ class ApplicationServiceTests(unittest.TestCase):
                             machine_id="machine_other",
                         )
                     )
+
+    def test_shot_parameter_correction_recomputes_recipe_and_replaces_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                queue = SQLiteUploadQueueRepository(store)
+                service = EspressoRLService(
+                    shots,
+                    SQLiteRecommendationRepository(store),
+                    upload_queue=queue,
+                    clock=lambda: 250,
+                )
+                service.ingest_shot_profile(_shot_event(community_upload_enabled=True))
+                original_upload = queue.list_by_status(UploadQueueStatus.PENDING)[0]
+                queue.update_status(
+                    original_upload.upload_id,
+                    UploadQueueStatus.UPLOADED,
+                    now=210,
+                )
+
+                corrected = service.record_shot_correction(
+                    ShotCorrectionEvent(
+                        shot_id="shot_1",
+                        install_id="install_1",
+                        machine_id="machine_1",
+                        timestamp=240,
+                        relative_grind_steps_from_reference=3.0,
+                        dose_in_g=17.5,
+                        target_yield_g=42.0,
+                        beverage_out_g=41.5,
+                        source="gaggimate_shot_history",
+                    )
+                )
+
+                self.assertEqual(corrected.relative_grind_steps_from_reference, 3.0)
+                self.assertEqual(corrected.relative_grind_um_from_reference, 37.5)
+                self.assertEqual(corrected.dose_in_g, 17.5)
+                self.assertEqual(corrected.dose_target_g, 17.5)
+                self.assertAlmostEqual(corrected.target_ratio, 42.0 / 17.5)
+                self.assertAlmostEqual(corrected.brew_ratio, 41.5 / 17.5)
+                self.assertEqual(corrected.beverage_out_observation, "user_corrected")
+                pending = queue.list_by_status(UploadQueueStatus.PENDING)
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(
+                    len(queue.list_by_status(UploadQueueStatus.UPLOADED)),
+                    1,
+                )
+                payload = json.loads(pending[0].payload_json)
+                self.assertEqual(payload["dose_in_g"], 17.5)
+                self.assertEqual(payload["target_yield_g"], 42.0)
+
+    def test_cross_owner_correction_does_not_mutate_canonical_shot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                service = EspressoRLService(
+                    shots,
+                    SQLiteRecommendationRepository(store),
+                    clock=lambda: 250,
+                )
+                service.ingest_shot_profile(_shot_event())
+                with self.assertRaisesRegex(ValueError, "owner"):
+                    service.record_shot_correction(
+                        ShotCorrectionEvent(
+                            shot_id="shot_1",
+                            install_id="other_install",
+                            machine_id="machine_1",
+                            timestamp=240,
+                            dose_in_g=17.5,
+                            source="test",
+                        )
+                    )
+                self.assertEqual(shots.get("shot_1").dose_in_g, 18.0)  # type: ignore[union-attr]
+
+    def test_correction_inside_integrity_envelope_is_not_limited_by_optimizer_space(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                service = EspressoRLService(
+                    shots,
+                    SQLiteRecommendationRepository(store),
+                    clock=lambda: 250,
+                )
+                service.ingest_shot_profile(_shot_event())
+
+                corrected = service.record_shot_correction(
+                    ShotCorrectionEvent(
+                        shot_id="shot_1",
+                        install_id="install_1",
+                        machine_id="machine_1",
+                        timestamp=240,
+                        dose_in_g=80.0,
+                        target_yield_g=300.0,
+                        source="test",
+                    )
+                )
+
+                self.assertEqual(corrected.dose_in_g, 80.0)
+                self.assertEqual(corrected.target_yield_g, 300.0)
+                self.assertEqual(shots.get("shot_1").dose_in_g, 80.0)  # type: ignore[union-attr]
 
 
 def _shot_event(**overrides: object) -> ShotProfileEvent:

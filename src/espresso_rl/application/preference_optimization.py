@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping
 
 from espresso_rl.domain.cpbo import (
     CPBO_CONFIGURATION_VERSION,
     ComparisonMode,
     ModelRecommendation,
+    ObservedRecipe,
     OptimizationRun,
     OptimizationRunContext,
     OptimizerState,
@@ -23,7 +24,13 @@ from espresso_rl.domain.cpbo import (
     TrustRegionState,
     new_cpbo_id,
 )
-from espresso_rl.domain.models import Recipe, Recommendation, RecommendationMode, RecommendationStatus
+from espresso_rl.domain.models import (
+    GrinderCalibrationMode,
+    Recipe,
+    Recommendation,
+    RecommendationMode,
+    RecommendationStatus,
+)
 from espresso_rl.ports.preference_optimization import (
     PreferentialOptimizationRepository,
     PreferentialOptimizerEngine,
@@ -32,6 +39,14 @@ from espresso_rl.ports.preference_optimization import (
 
 RecipeSpaceFactory = Callable[[Recipe, RecipeDomain], RecipeSpace]
 TraceFeatureExtractor = Callable[[Any], tuple[tuple[str, ...], tuple[float, ...] | None]]
+
+
+@dataclass(frozen=True)
+class PreferenceShotCorrectionResult:
+    shot: PreferenceShot
+    recipe_changed: bool
+    awaiting_preference: bool
+    suggestion_invalidated: bool
 
 
 class ConsecutivePreferenceOptimizationService:
@@ -209,7 +224,9 @@ class ConsecutivePreferenceOptimizationService:
         status = PhysicalShotStatus(status)
         recipe_point = self._canonical_recipe(run, recipe)
         existing_shots = self._repository.list_shots(run_id)
-        has_valid_baseline = any(shot.status == PhysicalShotStatus.VALID for shot in existing_shots)
+        has_valid_baseline = any(
+            shot.status == PhysicalShotStatus.VALID for shot in existing_shots
+        )
         if has_valid_baseline:
             if state.pending_recipe_id is None:
                 raise ValueError("a non-baseline shot requires a pending CPBO suggestion")
@@ -240,6 +257,11 @@ class ConsecutivePreferenceOptimizationService:
             completed_at=completed,
             status=status,
             telemetry_available=trace_values is not None,
+            observed_recipe=ObservedRecipe(
+                grind_size=recipe_point.grind_size,
+                dose_g=recipe_point.dose_g,
+                target_output_g=recipe_point.target_output_g,
+            ),
             raw_telemetry_reference=raw_telemetry_reference,
             trace_feature_names=trace_names,
             trace_features=trace_values,
@@ -324,7 +346,7 @@ class ConsecutivePreferenceOptimizationService:
             trust_region_state = self._optimizer.update_trust_region_state(
                 trust_region_state,
                 label,
-                candidate_center=recipe.normalized_x,
+                candidate_center=self._bounded_center(recipe.normalized_x),
             )
         if label == PreferenceLabel.NEW_BETTER and anchor_shot_id == incumbent_shot_id:
             incumbent_shot_id = new_shot_id
@@ -341,6 +363,74 @@ class ConsecutivePreferenceOptimizationService:
         )
         self._repository.record_comparison(comparison, updated_state)
         return updated_state
+
+    def correct_shot_recipe(
+        self,
+        shot_id: str,
+        recipe: Recipe,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> PreferenceShotCorrectionResult:
+        stored_shot = self.get_shot(shot_id)
+        run = self._require_run(stored_shot.optimization_run_id)
+        state = self._require_state(run.run_id)
+        stored_recipe = self._repository.get_recipe(stored_shot.recipe_id)
+        if stored_recipe is None:
+            raise ValueError("CPBO correction references a missing recipe")
+        observed_recipe = ObservedRecipe(
+            grind_size=recipe.relative_grind_steps_from_reference,
+            dose_g=recipe.dose_g,
+            target_output_g=recipe.target_yield_g,
+        )
+        corrected_recipe = self._observation_recipe(
+            run,
+            recipe,
+            created_at=stored_recipe.created_at,
+        )
+        corrected_metadata = dict(stored_shot.metadata)
+        corrected_metadata.update(dict(metadata or {}))
+        corrected_shot = replace(
+            stored_shot,
+            recipe_id=corrected_recipe.recipe_id,
+            observed_recipe=observed_recipe,
+            metadata=corrected_metadata,
+        )
+        model_changed = corrected_recipe.recipe_id != stored_shot.recipe_id
+        if not model_changed:
+            self._repository.replace_shot_observation(
+                corrected_recipe,
+                corrected_shot,
+                state,
+                invalidate_pending_suggestion=False,
+            )
+            return PreferenceShotCorrectionResult(
+                corrected_shot,
+                recipe_changed=False,
+                awaiting_preference=state.pending_shot_id is not None,
+                suggestion_invalidated=False,
+            )
+
+        rebuilt_state = self._rebuild_state_after_recipe_change(
+            run,
+            state,
+            corrected_shot,
+            corrected_recipe,
+        )
+        invalidate_pending = (
+            state.pending_recipe_id is not None and rebuilt_state.pending_recipe_id is None
+        )
+        self._repository.replace_shot_observation(
+            corrected_recipe,
+            corrected_shot,
+            rebuilt_state,
+            invalidate_pending_suggestion=invalidate_pending,
+        )
+        return PreferenceShotCorrectionResult(
+            corrected_shot,
+            recipe_changed=True,
+            awaiting_preference=rebuilt_state.pending_shot_id is not None,
+            suggestion_invalidated=invalidate_pending,
+        )
 
     def get_state(self, run_id: str) -> OptimizerState:
         return self._require_state(run_id)
@@ -477,6 +567,10 @@ class ConsecutivePreferenceOptimizationService:
         grinder_context_id: str | None,
         profile_id: str | None,
         raw_profile_hash: str | None = None,
+        grinder_calibration_mode: GrinderCalibrationMode = GrinderCalibrationMode.RELATIVE_CALIBRATED,
+        grinder_reference_label: str = "reference",
+        current_absolute_step: float | None = None,
+        absolute_reference_step: float | None = None,
         now: int | None = None,
     ) -> Recommendation:
         timestamp = self._clock() if now is None else int(now)
@@ -488,6 +582,16 @@ class ConsecutivePreferenceOptimizationService:
             candidate.target_output_g,
         )
         grind_delta = candidate.grind_size - current_recipe.relative_grind_steps_from_reference
+        resolved_current_absolute_step = current_absolute_step
+        if resolved_current_absolute_step is None and absolute_reference_step is not None:
+            resolved_current_absolute_step = (
+                absolute_reference_step + current_recipe.relative_grind_steps_from_reference
+            )
+        projected_absolute_step = (
+            resolved_current_absolute_step + grind_delta
+            if resolved_current_absolute_step is not None
+            else None
+        )
         mode = (
             RecommendationMode.CPBO_GLOBAL_PREVIOUS
             if suggestion.comparison_mode == ComparisonMode.GLOBAL_PREVIOUS
@@ -527,13 +631,126 @@ class ConsecutivePreferenceOptimizationService:
             comparison_mode=suggestion.comparison_mode.value,
             preference_feedback_required=True,
             taste_goal=run.context.taste_goal,
+            grinder_calibration_mode=grinder_calibration_mode,
             grinder_step_direction=current_recipe.grinder_step_direction,
             grinder_adjustment_mode=current_recipe.grinder_adjustment_mode,
+            grinder_reference_label=grinder_reference_label,
+            current_absolute_step=resolved_current_absolute_step,
+            absolute_reference_step=absolute_reference_step,
+            projected_absolute_step=projected_absolute_step,
         )
         return recommendation
 
     def configure_recipe_domain(self, recipe_domain: RecipeDomain) -> None:
         self._recipe_domain = recipe_domain
+
+    def _rebuild_state_after_recipe_change(
+        self,
+        run: OptimizationRun,
+        state: OptimizerState,
+        corrected_shot: PreferenceShot,
+        corrected_recipe: RecipePoint,
+    ) -> OptimizerState:
+        shots = [
+            corrected_shot if shot.shot_id == corrected_shot.shot_id else shot
+            for shot in self._repository.list_shots(run.run_id)
+        ]
+        valid_shots = sorted(
+            (
+                shot
+                for shot in shots
+                if shot.status == PhysicalShotStatus.VALID
+            ),
+            key=lambda shot: (shot.sequence_number, shot.shot_id),
+        )
+
+        def recipe_for(shot: PreferenceShot) -> RecipePoint:
+            if shot.shot_id == corrected_shot.shot_id:
+                return corrected_recipe
+            stored_recipe = self._repository.get_recipe(shot.recipe_id)
+            if stored_recipe is None:
+                raise ValueError("CPBO shot references a missing recipe")
+            return stored_recipe
+
+        shots_by_id = {shot.shot_id: shot for shot in valid_shots}
+        if valid_shots:
+            baseline_shot = valid_shots[0]
+            incumbent_shot_id: str | None = baseline_shot.shot_id
+            previous_valid_shot_id: str | None = baseline_shot.shot_id
+            trust_region_state = TrustRegionState(
+                center=self._bounded_center(recipe_for(baseline_shot).normalized_x),
+                length=self._initial_trust_region_length,
+            )
+            comparisons = sorted(
+                self._repository.list_comparisons(run.run_id),
+                key=lambda comparison: (comparison.created_at, comparison.comparison_id),
+            )
+            for comparison in comparisons:
+                new_shot = shots_by_id.get(comparison.new_shot_id)
+                anchor_shot = shots_by_id.get(comparison.anchor_shot_id)
+                if new_shot is None or anchor_shot is None:
+                    raise ValueError("CPBO comparison references a missing valid shot")
+                if comparison.comparison_mode == ComparisonMode.BEST_INCUMBENT:
+                    trust_region_state = self._optimizer.update_trust_region_state(
+                        trust_region_state,
+                        comparison.label,
+                        candidate_center=self._bounded_center(recipe_for(new_shot).normalized_x),
+                    )
+                if (
+                    comparison.label == PreferenceLabel.NEW_BETTER
+                    and comparison.anchor_shot_id == incumbent_shot_id
+                ):
+                    incumbent_shot_id = comparison.new_shot_id
+                previous_valid_shot_id = comparison.new_shot_id
+        else:
+            incumbent_shot_id = None
+            previous_valid_shot_id = None
+            trust_region_state = TrustRegionState(
+                center=state.trust_region_state.center,
+                length=self._initial_trust_region_length,
+            )
+
+        awaiting_preference = (
+            state.pending_shot_id in shots_by_id
+            and state.pending_anchor_shot_id in shots_by_id
+        )
+        return replace(
+            state,
+            previous_valid_shot_id=previous_valid_shot_id,
+            incumbent_shot_id=incumbent_shot_id,
+            trust_region_state=trust_region_state,
+            model_checkpoint=None,
+            trace_model_checkpoint=None,
+            pending_recipe_id=state.pending_recipe_id if awaiting_preference else None,
+            pending_anchor_shot_id=state.pending_anchor_shot_id if awaiting_preference else None,
+            pending_shot_id=state.pending_shot_id if awaiting_preference else None,
+            pending_suggestion_json=state.pending_suggestion_json if awaiting_preference else None,
+            updated_at=self._clock(),
+        )
+
+    @staticmethod
+    def _observation_recipe(
+        run: OptimizationRun,
+        recipe: Recipe,
+        *,
+        created_at: int,
+    ) -> RecipePoint:
+        if recipe.grinder_step_direction != run.recipe_space.grinder_step_direction:
+            raise ValueError("recipe grinder direction differs from the optimization run")
+        return RecipePoint.observe(
+            run.run_id,
+            run.recipe_space,
+            recipe.relative_grind_steps_from_reference,
+            recipe.dose_g,
+            recipe.target_yield_g,
+            created_at=created_at,
+        )
+
+    @staticmethod
+    def _bounded_center(
+        coordinates: tuple[float, float, float],
+    ) -> tuple[float, float, float]:
+        return tuple(min(1.0, max(0.0, value)) for value in coordinates)  # type: ignore[return-value]
 
     def _canonical_recipe(self, run: OptimizationRun, recipe: Recipe | RecipePoint) -> RecipePoint:
         if isinstance(recipe, RecipePoint):

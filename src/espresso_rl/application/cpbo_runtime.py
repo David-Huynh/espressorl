@@ -192,6 +192,54 @@ class CPBORuntimeBridge:
         self._recommendation_sink(recommendation)
         return recommendation
 
+    def handle_shot_correction(self, shot: ShotRecord) -> CPBOShotOutcome:
+        preference_shot = self._optimizer.find_shot(shot.shot_id)
+        if preference_shot is None:
+            return CPBOShotOutcome(None, None, False, "shot_not_processed_by_cpbo")
+        corrected_recipe = _known_recipe(shot)
+        if corrected_recipe is None:
+            return CPBOShotOutcome(
+                preference_shot.optimization_run_id,
+                None,
+                False,
+                "corrected_recipe_controls_not_fully_known",
+            )
+        correction = self._optimizer.correct_shot_recipe(
+            shot.shot_id,
+            corrected_recipe,
+            metadata=_shot_metadata(shot),
+        )
+        if not correction.recipe_changed:
+            return CPBOShotOutcome(
+                preference_shot.optimization_run_id,
+                None,
+                correction.awaiting_preference,
+                "recipe_unchanged_after_quantization",
+            )
+        if correction.awaiting_preference:
+            return CPBOShotOutcome(
+                preference_shot.optimization_run_id,
+                None,
+                True,
+                "existing_preference_feedback_pending",
+            )
+        state = self._optimizer.get_state(preference_shot.optimization_run_id)
+        current_shot_id = state.previous_valid_shot_id
+        current_shot = self._shots.get(current_shot_id) if current_shot_id else None
+        if current_shot is None:
+            raise ValueError("canonical current shot for corrected CPBO run is missing")
+        current_recipe = _known_recipe(current_shot)
+        if current_recipe is None:
+            raise ValueError("canonical current shot no longer has complete recipe controls")
+        suggestion = self._optimizer.suggest_next(preference_shot.optimization_run_id)
+        recommendation = self._machine_recommendation(suggestion, current_shot, current_recipe)
+        self._recommendation_sink(recommendation)
+        return CPBOShotOutcome(
+            preference_shot.optimization_run_id,
+            recommendation,
+            False,
+        )
+
     def reset_owner(self, install_id: str, machine_id: str) -> dict[str, int]:
         return self._optimizer.reset_owner(install_id, machine_id)
 
@@ -210,6 +258,10 @@ class CPBORuntimeBridge:
             grinder_context_id=shot.grinder_context_id,
             profile_id=shot.profile_id,
             raw_profile_hash=(shot.raw_profile_hash if shot.profile_id is None else None),
+            grinder_calibration_mode=shot.grinder_calibration_mode,
+            grinder_reference_label=shot.grinder_reference_label,
+            current_absolute_step=shot.current_absolute_step,
+            absolute_reference_step=shot.absolute_reference_step,
         )
 
 

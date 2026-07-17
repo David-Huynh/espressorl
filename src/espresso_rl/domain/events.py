@@ -16,6 +16,13 @@ from .models import (
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
 from .cpbo import CPBOProfile, ComparisonMode, PreferenceLabel, RecipeDomain
+from .recipe_limits import (
+    RECIPE_DOMAIN_DOSE_MAX_G,
+    RECIPE_DOMAIN_DOSE_MIN_G,
+    RECIPE_DOMAIN_GRIND_RADIUS_MAX_STEPS,
+    RECIPE_DOMAIN_OUTPUT_MAX_G,
+    RECIPE_DOMAIN_OUTPUT_MIN_G,
+)
 from .taste_goal import TasteGoal
 
 VALID_CORRECTION_TAGS = {
@@ -454,6 +461,11 @@ class ShotCorrectionEvent:
     grind_followed: bool | None = None
     dose_followed: bool | None = None
     yield_followed: bool | None = None
+    relative_grind_steps_from_reference: float | None = None
+    current_absolute_step: float | None = None
+    dose_in_g: float | None = None
+    target_yield_g: float | None = None
+    beverage_out_g: float | None = None
     correction_tags: list[str] = field(default_factory=list)
     source: str = "unknown"
     schema_version: int = 1
@@ -463,13 +475,64 @@ class ShotCorrectionEvent:
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ValueError("unsupported correction schema_version")
-        if not self.shot_id:
-            raise ValueError("shot_id is required")
+        for field_name in ("shot_id", "install_id", "machine_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip() or len(value) > 256:
+                raise ValueError(f"{field_name} is invalid")
+        if isinstance(self.timestamp, bool) or not isinstance(self.timestamp, int) or self.timestamp < 0:
+            raise ValueError("shot correction timestamp must be a nonnegative integer")
+        for field_name in (
+            "exclude_from_local_optimization",
+            "grind_followed",
+            "dose_followed",
+            "yield_followed",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, bool):
+                raise ValueError(f"{field_name} must be boolean")
         if self.shot_type is not None:
             object.__setattr__(self, "shot_type", ShotType(self.shot_type))
+        numeric_limits = {
+            "relative_grind_steps_from_reference": (
+                -RECIPE_DOMAIN_GRIND_RADIUS_MAX_STEPS,
+                RECIPE_DOMAIN_GRIND_RADIUS_MAX_STEPS,
+            ),
+            "current_absolute_step": (-1_000_000.0, 1_000_000.0),
+            "dose_in_g": (RECIPE_DOMAIN_DOSE_MIN_G, RECIPE_DOMAIN_DOSE_MAX_G),
+            "target_yield_g": (RECIPE_DOMAIN_OUTPUT_MIN_G, RECIPE_DOMAIN_OUTPUT_MAX_G),
+            "beverage_out_g": (RECIPE_DOMAIN_OUTPUT_MIN_G, RECIPE_DOMAIN_OUTPUT_MAX_G),
+        }
+        for field_name, (minimum, maximum) in numeric_limits.items():
+            value = getattr(self, field_name)
+            if value is None:
+                continue
+            parsed = _number(value, field_name)
+            if not minimum <= parsed <= maximum:
+                raise ValueError(f"{field_name} is outside the integrity envelope")
+            object.__setattr__(self, field_name, parsed)
+        if not isinstance(self.correction_tags, list) or any(
+            not isinstance(tag, str) for tag in self.correction_tags
+        ):
+            raise ValueError("correction_tags must be a string array")
         invalid_tags = set(self.correction_tags) - VALID_CORRECTION_TAGS
         if invalid_tags:
             raise ValueError(f"invalid correction tags: {sorted(invalid_tags)}")
+        if not isinstance(self.source, str) or not self.source.strip() or len(self.source) > 80:
+            raise ValueError("shot correction source is invalid")
+        mutable_fields = (
+            self.exclude_from_local_optimization,
+            self.shot_type,
+            self.grind_followed,
+            self.dose_followed,
+            self.yield_followed,
+            self.relative_grind_steps_from_reference,
+            self.current_absolute_step,
+            self.dose_in_g,
+            self.target_yield_g,
+            self.beverage_out_g,
+        )
+        if not any(value is not None for value in mutable_fields) and not self.correction_tags:
+            raise ValueError("shot correction contains no changes")
 
 
 @dataclass(frozen=True)

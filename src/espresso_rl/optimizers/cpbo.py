@@ -157,6 +157,7 @@ class ConsecutivePreferentialBayesianOptimizer:
             posterior_mean=posterior.mean,
             posterior_covariance=posterior.covariance_matrix,
             candidate_indices=candidate_domain.proposal_indices,
+            maximum_indices=candidate_domain.maximum_indices,
             anchor_index=candidate_domain.anchor_index,
             gamma=float(fit.likelihood.gamma.detach()),
             sigma_pref=self.config.model.sigma_pref,
@@ -243,13 +244,15 @@ class ConsecutivePreferentialBayesianOptimizer:
             if state.incumbent_shot_id is None:
                 raise ValueError("best-incumbent run has no incumbent")
             incumbent = shot_by_id[state.incumbent_shot_id]
-            return ModelRecommendation(
-                optimization_run_id=run.run_id,
-                recipe=recipe_by_id[incumbent.recipe_id],
-                source="direct_incumbent",
-                directly_established=True,
-                incumbent_shot_id=incumbent.shot_id,
-            )
+            incumbent_recipe = recipe_by_id[incumbent.recipe_id]
+            if incumbent_recipe.inside_search_space:
+                return ModelRecommendation(
+                    optimization_run_id=run.run_id,
+                    recipe=incumbent_recipe,
+                    source="direct_incumbent",
+                    directly_established=True,
+                    incumbent_shot_id=incumbent.shot_id,
+                )
 
         training_recipes = _unique_valid_recipes(valid_shots, recipe_by_id)
         physics_scaler, _ = _fit_physics_scaler(run, training_recipes, self.config)
@@ -287,7 +290,12 @@ class ConsecutivePreferentialBayesianOptimizer:
             train_inputs,
             jitter=self.config.model.covariance_jitter,
         )
-        best_index = int(torch.argmax(posterior.mean))
+        feasible_indices = [
+            index for index, recipe in enumerate(training_recipes) if recipe.inside_search_space
+        ]
+        if not feasible_indices:
+            raise ValueError("optimization run has no evaluated recipe inside the search space")
+        best_index = max(feasible_indices, key=lambda index: float(posterior.mean[index]))
         return ModelRecommendation(
             optimization_run_id=run.run_id,
             recipe=training_recipes[best_index],
@@ -415,6 +423,22 @@ def _validate_run_data(
         raise ValueError("shot belongs to another optimization run")
     if any(shot.recipe_id not in recipe_by_id for shot in shots):
         raise ValueError("shot references an unknown recipe")
+    for shot in shots:
+        observed = shot.observed_recipe
+        if observed is None:
+            if not recipe_by_id[shot.recipe_id].inside_search_space:
+                raise ValueError("out-of-space shot is missing its observed recipe")
+            continue
+        canonical = RecipePoint.observe(
+            run.run_id,
+            run.recipe_space,
+            observed.grind_size,
+            observed.dose_g,
+            observed.target_output_g,
+            created_at=recipe_by_id[shot.recipe_id].created_at,
+        )
+        if canonical.recipe_id != shot.recipe_id:
+            raise ValueError("shot recipe differs from its observed recipe")
     valid_shots = sorted(
         (shot for shot in shots if shot.status == PhysicalShotStatus.VALID),
         key=lambda shot: shot.sequence_number,
@@ -426,7 +450,8 @@ def _validate_run_data(
     _validate_comparison_history(run, valid_shots, comparisons, shot_by_id)
     for identifier in (state.previous_valid_shot_id, state.incumbent_shot_id):
         if identifier is not None and (
-            identifier not in shot_by_id or shot_by_id[identifier].status != PhysicalShotStatus.VALID
+            identifier not in shot_by_id
+            or shot_by_id[identifier].status != PhysicalShotStatus.VALID
         ):
             raise ValueError("optimizer state references a missing or invalid shot")
     return valid_shots, recipe_by_id, shot_by_id

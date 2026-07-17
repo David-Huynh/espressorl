@@ -113,6 +113,16 @@ class PreferentialOptimizationRepository(Protocol):
     ) -> None:
         ...
 
+    def replace_shot_observation(
+        self,
+        recipe: RecipePoint,
+        shot: PreferenceShot,
+        state: OptimizerState,
+        *,
+        invalidate_pending_suggestion: bool,
+    ) -> None:
+        ...
+
     def record_comparison(
         self,
         comparison: PreferenceComparison,

@@ -16,6 +16,7 @@ class CandidateDomain:
     proposal_recipes: tuple[RecipePoint, ...]
     discretization_recipes: tuple[RecipePoint, ...]
     proposal_indices: tuple[int, ...]
+    maximum_indices: tuple[int, ...]
     anchor_index: int
     lower_bounds: tuple[float, float, float]
     upper_bounds: tuple[float, float, float]
@@ -103,14 +104,24 @@ def build_candidate_domain(
 
     discretization: list[RecipePoint] = []
     index_by_id: dict[str, int] = {}
-    for recipe in [*candidates, *evaluated_recipes, anchor_recipe]:
+    feasible_evaluated = [
+        recipe for recipe in evaluated_recipes if recipe.inside_search_space
+    ]
+    for recipe in [*candidates, *feasible_evaluated, anchor_recipe]:
         if recipe.recipe_id not in index_by_id:
             index_by_id[recipe.recipe_id] = len(discretization)
             discretization.append(recipe)
+    maximum_indices = tuple(
+        dict.fromkeys(
+            index_by_id[recipe.recipe_id]
+            for recipe in [*candidates, *feasible_evaluated]
+        )
+    )
     return CandidateDomain(
         proposal_recipes=tuple(candidates),
         discretization_recipes=tuple(discretization),
         proposal_indices=tuple(index_by_id[recipe.recipe_id] for recipe in candidates),
+        maximum_indices=maximum_indices,
         anchor_index=index_by_id[anchor_recipe.recipe_id],
         lower_bounds=tuple(float(value) for value in lower),
         upper_bounds=tuple(float(value) for value in upper),

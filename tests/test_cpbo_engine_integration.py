@@ -80,6 +80,68 @@ class RealCPBOEngineIntegrationTests(unittest.TestCase):
                 self.assertEqual([row.label for row in comparisons], [PreferenceLabel.TIE])
                 self.assertIsNone(repository.list_shots(request.optimization_run_id)[0].metadata.get("rating"))
 
+    def test_real_engine_trains_on_out_of_space_correction_but_proposes_in_space(self) -> None:
+        config = fast_cpbo_config()
+        clock = CounterClock()
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "cpbo.db") as store:
+                repository = SQLitePreferentialOptimizationRepository(store)
+                service = ConsecutivePreferenceOptimizationService(
+                    repository,
+                    ConsecutivePreferentialBayesianOptimizer(config),
+                    recipe_space_factory,
+                    random_seed=config.random_seed,
+                    configuration_version=config.effective_configuration_version,
+                    clock=clock,
+                )
+                request = service.initialize(
+                    OptimizationRunContext("install", "machine", "bean", "grinder", "profile"),
+                    baseline_recipe(),
+                    comparison_mode=ComparisonMode.BEST_INCUMBENT,
+                )
+                service.record_shot(
+                    request.optimization_run_id,
+                    request.recipe,
+                    PhysicalShotStatus.VALID,
+                    shot_id="baseline",
+                    started_at=1,
+                    completed_at=2,
+                )
+                first = service.suggest_next(request.optimization_run_id)
+                service.record_shot(
+                    request.optimization_run_id,
+                    first.recipe,
+                    PhysicalShotStatus.VALID,
+                    shot_id="candidate",
+                    started_at=3,
+                    completed_at=4,
+                )
+                service.record_preference(
+                    request.optimization_run_id,
+                    "candidate",
+                    "baseline",
+                    PreferenceLabel.ANCHOR_BETTER,
+                )
+
+                correction = service.correct_shot_recipe(
+                    "baseline",
+                    Recipe(
+                        relative_grind_steps_from_reference=20.0,
+                        microns_per_step=10.0,
+                        dose_g=18.0,
+                        target_yield_g=36.0,
+                        grinder_step_direction=GrinderStepDirection.HIGHER_IS_FINER,
+                    ),
+                )
+                next_suggestion = service.suggest_next(request.optimization_run_id)
+
+                corrected_recipe = repository.get_recipe(correction.shot.recipe_id)
+                self.assertFalse(corrected_recipe.inside_search_space)
+                self.assertEqual(corrected_recipe.normalized_x[0], 2.0)
+                self.assertEqual(len(repository.list_comparisons(request.optimization_run_id)), 1)
+                self.assertTrue(next_suggestion.recipe.inside_search_space)
+                self.assertTrue(all(0.0 <= value <= 1.0 for value in next_suggestion.recipe.normalized_x))
+
     def test_seeded_synthetic_jnd_trials_improve_over_corner_baseline(self) -> None:
         for seed in (3, 7):
             with self.subTest(seed=seed), tempfile.TemporaryDirectory() as tmp:

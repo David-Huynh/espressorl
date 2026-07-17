@@ -79,6 +79,7 @@ from espresso_rl.domain.models import (
     GrinderAdjustmentMode,
     Recipe,
     Recommendation,
+    RecommendationStatus,
     UploadQueueStatus,
 )
 from espresso_rl.domain.optimization import DEFAULT_OPTIMIZER_MODE, OPTIMIZER_MODE_CPBO
@@ -265,6 +266,9 @@ def run_public(config: Config) -> None:
         def publish_recommendation(self, recommendation: Recommendation) -> None:
             mqtt_client.publish_recommendation(recommendation)
 
+        def clear_recommendation(self, machine_id: str) -> None:
+            mqtt_client.clear_recommendation(machine_id)
+
         def publish_status(
             self,
             machine_id: str,
@@ -320,13 +324,17 @@ def run_public(config: Config) -> None:
 
     def on_correction(event: ShotCorrectionEvent) -> None:
         shot = service.record_shot_correction(event)
+        cpbo_outcome = cpbo_runtime.handle_shot_correction(shot)
         logger.info(
-            "Correction stored shot=%s excluded=%s followed=%s attribution=%.2f",
+            "Correction stored shot=%s excluded=%s followed=%s attribution=%.2f cpbo=%s",
             shot.shot_id,
             shot.exclude_from_local_optimization,
             shot.recommendation_followed.value,
             shot.recommendation_attribution_weight,
+            cpbo_outcome.skipped_reason or "reprocessed",
         )
+        if cpbo_outcome.recommendation is not None:
+            mqtt_client.publish_recommendation(cpbo_outcome.recommendation)
         publish_status(
             shot.machine_id,
             shot.bean_context_id,
@@ -335,6 +343,21 @@ def run_public(config: Config) -> None:
             profile_label=shot.profile_label,
             last_shot_id=shot.shot_id,
             last_shot_at=shot.timestamp,
+            last_recommendation_id=(
+                cpbo_outcome.recommendation.recommendation_id
+                if cpbo_outcome.recommendation is not None
+                else None
+            ),
+            last_recommendation_at=(
+                cpbo_outcome.recommendation.updated_at
+                if cpbo_outcome.recommendation is not None
+                else None
+            ),
+            mode=(
+                cpbo_outcome.recommendation.mode.value
+                if cpbo_outcome.recommendation is not None
+                else None
+            ),
             taste_goal=shot.taste_goal,
         )
 
@@ -352,6 +375,10 @@ def run_public(config: Config) -> None:
 
     def on_decision(event: RecommendationDecisionEvent) -> None:
         recommendation = service.record_recommendation_decision(event)
+        if recommendation.status in {RecommendationStatus.ACCEPTED, RecommendationStatus.EDITED}:
+            mqtt_client.publish_recommendation(recommendation)
+        else:
+            mqtt_client.clear_recommendation(recommendation.machine_id)
         publish_status(
             recommendation.machine_id,
             recommendation.bean_context_id,
@@ -365,6 +392,8 @@ def run_public(config: Config) -> None:
 
     def on_apply(event: RecommendationApplyEvent) -> None:
         recommendation = service.record_recommendation_apply(event)
+        if recommendation.status in {RecommendationStatus.ACCEPTED, RecommendationStatus.EDITED}:
+            mqtt_client.publish_recommendation(recommendation)
         publish_status(
             recommendation.machine_id,
             recommendation.bean_context_id,

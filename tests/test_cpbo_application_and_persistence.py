@@ -11,6 +11,7 @@ from espresso_rl.adapters.sqlite_repositories import (
     SQLitePreferentialOptimizationRepository,
     SQLiteStore,
 )
+from espresso_rl.adapters.cpbo_serialization import shot_from_json
 from espresso_rl.application.preference_optimization import (
     ConsecutivePreferenceOptimizationService,
 )
@@ -454,6 +455,28 @@ class CPBOApplicationTests(unittest.TestCase):
         reconstructed = SQLitePreferentialOptimizationRepository(self.store)
         self.assertEqual(reconstructed.get_state(run_id).pending_recipe_id, suggestion.recipe.recipe_id)
         self.assertEqual(reconstructed.get_pending_suggestion(run_id).suggestion_id, suggestion.suggestion_id)
+
+    def test_shot_payload_without_observed_recipe_remains_readable(self) -> None:
+        shot = shot_from_json(
+            json.dumps(
+                {
+                    "shot_id": "legacy-shot",
+                    "recipe_id": "legacy-recipe",
+                    "optimization_run_id": "legacy-run",
+                    "sequence_number": 1,
+                    "started_at": 10,
+                    "completed_at": 20,
+                    "status": "valid",
+                    "telemetry_available": False,
+                    "raw_telemetry_reference": None,
+                    "trace_feature_names": [],
+                    "trace_features": None,
+                    "metadata": {},
+                }
+            )
+        )
+
+        self.assertIsNone(shot.observed_recipe)
 
     def test_reset_owner_removes_cpbo_records(self) -> None:
         _, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)

@@ -45,10 +45,10 @@ def sample_upper_truncated_bivariate_gaussian(
         raise ValueError("Gibbs burn-in and thinning are invalid")
     if not 0 < rejection_min_acceptance <= 1:
         raise ValueError("minimum rejection acceptance is invalid")
-    if torch.any(~torch.isfinite(mean)) or torch.any(~torch.isfinite(covariance)) or torch.any(
-        ~torch.isfinite(upper)
-    ):
-        raise ValueError("truncated Gaussian parameters must be finite")
+    if torch.any(~torch.isfinite(mean)) or torch.any(~torch.isfinite(covariance)):
+        raise ValueError("truncated Gaussian mean and covariance must be finite")
+    if torch.any(torch.isnan(upper)) or torch.any(torch.isneginf(upper)):
+        raise ValueError("truncation upper bounds must be finite or positive infinity")
     if not torch.allclose(covariance, covariance.T, atol=1e-10, rtol=1e-10):
         raise ValueError("truncated Gaussian covariance must be symmetric")
 

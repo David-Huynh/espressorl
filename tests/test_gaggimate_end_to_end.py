@@ -164,6 +164,9 @@ class GaggimateEndToEndTests(unittest.TestCase):
                     def publish_recommendation(self, recommendation: Recommendation) -> None:
                         client.publish_recommendation(recommendation)
 
+                    def clear_recommendation(self, machine_id: str) -> None:
+                        client.clear_recommendation(machine_id)
+
                     def publish_status(self, machine_id, bean_context_id, grinder_context_id, **kwargs) -> None:
                         client.publish_status(machine_id, {"optimizer_mode": kwargs.get("mode")})
 
@@ -218,6 +221,12 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 candidate["dose_observed"] = False
                 candidate["dose_target_confirmed"] = True
                 _send(client, transport, "gaggimate/AA_BB/shot/profile", candidate)
+                self.assertTrue(
+                    any(
+                        topic.endswith("/rl/recommendation") and payload == "" and retained
+                        for topic, payload, _, retained in transport.published
+                    )
+                )
                 _send(
                     client,
                     transport,
@@ -252,6 +261,17 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 self.assertEqual(len(recommendation_payloads), 2)
                 self.assertEqual(recommendation_payloads[-1]["comparison_anchor_shot_id"], "shot_2")
                 self.assertFalse(any("human_rating" in payload for payload in recommendation_payloads))
+
+                clears_before_replay = sum(
+                    topic.endswith("/rl/recommendation") and payload == ""
+                    for topic, payload, _, _ in transport.published
+                )
+                _send(client, transport, "gaggimate/AA_BB/shot/profile", candidate)
+                clears_after_replay = sum(
+                    topic.endswith("/rl/recommendation") and payload == ""
+                    for topic, payload, _, _ in transport.published
+                )
+                self.assertEqual(clears_after_replay, clears_before_replay)
 
 
 def _recipe_space(recipe: Recipe, _recipe_domain: object) -> RecipeSpace:

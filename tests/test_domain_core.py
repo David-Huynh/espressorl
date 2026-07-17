@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
@@ -119,6 +120,15 @@ class DomainCoreTests(unittest.TestCase):
                 grinder_context_id="grinder",
             ).stale
         )
+
+    def test_recommendation_rejects_inconsistent_absolute_grinder_projection(self) -> None:
+        with self.assertRaisesRegex(ValueError, "projected absolute grinder setting"):
+            replace(
+                _recommendation(),
+                current_absolute_step=42.0,
+                absolute_reference_step=40.0,
+                projected_absolute_step=44.0,
+            )
 
 
 def _event(**overrides: object) -> ShotProfileEvent:

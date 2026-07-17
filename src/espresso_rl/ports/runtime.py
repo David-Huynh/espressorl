@@ -9,6 +9,9 @@ class AutoTuningRuntimePublisher(Protocol):
     def publish_recommendation(self, recommendation: Recommendation) -> None:
         ...
 
+    def clear_recommendation(self, machine_id: str) -> None:
+        ...
+
     def publish_status(
         self,
         machine_id: str,
