@@ -235,6 +235,46 @@ class ApplicationServiceTests(unittest.TestCase):
                     )
                 self.assertEqual(shots.get("shot_1").dose_in_g, 18.0)  # type: ignore[union-attr]
 
+    def test_measured_dose_correction_overrides_stale_followed_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                recommendations = SQLiteRecommendationRepository(store)
+                recommendations.upsert(_recommendation())
+                service = EspressoRLService(
+                    shots,
+                    recommendations,
+                    clock=lambda: 250,
+                )
+                service.ingest_shot_profile(_shot_event(recommendation_id="rec_1"))
+                service.record_shot_correction(
+                    ShotCorrectionEvent(
+                        shot_id="shot_1",
+                        install_id="install_1",
+                        machine_id="machine_1",
+                        timestamp=230,
+                        dose_followed=True,
+                        source="gaggimate_dose_confirmation",
+                    )
+                )
+
+                corrected = service.record_shot_correction(
+                    ShotCorrectionEvent(
+                        shot_id="shot_1",
+                        install_id="install_1",
+                        machine_id="machine_1",
+                        timestamp=240,
+                        dose_in_g=16.3,
+                        source="gaggimate_shot_history",
+                    )
+                )
+
+                self.assertEqual(corrected.dose_in_g, 16.3)
+                self.assertTrue(corrected.dose_observed)
+                self.assertFalse(corrected.dose_target_confirmed)
+                self.assertFalse(corrected.dose_followed)
+                self.assertEqual(corrected.dose_recommendation_trust, 0.0)
+
     def test_correction_inside_integrity_envelope_is_not_limited_by_optimizer_space(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:

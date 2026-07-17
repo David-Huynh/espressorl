@@ -19,7 +19,7 @@ from espresso_rl.domain.events import (
     ShotCorrectionEvent,
     ShotProfileEvent,
 )
-from espresso_rl.domain.follow_through import infer_follow_through
+from espresso_rl.domain.follow_through import FollowThroughTolerances, infer_follow_through
 from espresso_rl.domain.models import (
     FollowThroughState,
     MachineState,
@@ -369,6 +369,12 @@ class EspressoRLService:
             shot.dose_target_g = event.dose_in_g
             shot.dose_observed = True
             shot.dose_target_confirmed = False
+            if shot.recommended_dose_g is not None:
+                shot.dose_followed = (
+                    abs(event.dose_in_g - shot.recommended_dose_g)
+                    <= FollowThroughTolerances().dose_g
+                )
+                shot.dose_recommendation_trust = 1.0 if shot.dose_followed else 0.0
         if event.target_yield_g is not None:
             shot.target_yield_g = event.target_yield_g
             shot.target_yield_observed = True
