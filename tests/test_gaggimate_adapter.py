@@ -18,6 +18,8 @@ from espresso_rl.adapters.gaggimate_mqtt import (
     SHOT_TOPIC,
     SHOT_ACK_EVENT_TYPE,
     SHOT_ACK_TOPIC_SUFFIX,
+    STATUS_PAYLOAD_MAX_BYTES,
+    STATUS_RECENT_SHOTS_MAX_BYTES,
     UPLOAD_REQUEUE_TOPIC,
     GaggimateMQTTClient,
 )
@@ -358,6 +360,56 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.client.publish_status("gaggimate:AA_BB", {"optimizer_mode": "cpbo_best_incumbent"})
         self.client.clear_recommendation("gaggimate:AA_BB")
         self.assertTrue(all(item[3] for item in mqtt.published))
+
+    def test_status_bounds_recent_history_without_losing_newest_shots(self) -> None:
+        mqtt = FakeMQTT()
+        self.client._client = mqtt  # type: ignore[assignment]
+        recent_shots = [
+            {"shot_id": f"shot_{index}", "timestamp": 100 - index, "detail": "x" * 900}
+            for index in range(20)
+        ]
+
+        self.client.publish_status(
+            "gaggimate:AA_BB",
+            {
+                "event_type": "untrusted_override",
+                "machine_id": "untrusted",
+                "timestamp": 100,
+                "recent_shots": recent_shots,
+            },
+        )
+
+        raw = mqtt.published[-1][1]
+        payload = json.loads(raw)
+        self.assertLessEqual(len(raw.encode("utf-8")), STATUS_PAYLOAD_MAX_BYTES)
+        self.assertLessEqual(
+            len(json.dumps(payload["recent_shots"], separators=(",", ":")).encode("utf-8")),
+            STATUS_RECENT_SHOTS_MAX_BYTES,
+        )
+        self.assertEqual(payload["event_type"], "espresso_rl_status")
+        self.assertEqual(payload["machine_id"], "gaggimate:AA_BB")
+        self.assertEqual(payload["recent_shots"][0]["shot_id"], "shot_0")
+        self.assertLess(len(payload["recent_shots"]), len(recent_shots))
+
+    def test_status_uses_bounded_fallback_for_invalid_or_unbounded_details(self) -> None:
+        mqtt = FakeMQTT()
+        self.client._client = mqtt  # type: ignore[assignment]
+
+        self.client.publish_status(
+            "gaggimate:AA_BB",
+            {
+                "timestamp": 100,
+                "runtime_health_summary": "x" * (STATUS_PAYLOAD_MAX_BYTES * 2),
+                "invalid_number": float("nan"),
+                "recent_shots": [{"shot_id": "shot_1"}],
+            },
+        )
+
+        raw = mqtt.published[-1][1]
+        payload = json.loads(raw)
+        self.assertLessEqual(len(raw.encode("utf-8")), STATUS_PAYLOAD_MAX_BYTES)
+        self.assertEqual(payload["runtime_health_status"], "attention")
+        self.assertEqual(payload["recent_shots"], [])
 
     def test_shot_delivery_acknowledges_acceptance_and_duplicate_replay(self) -> None:
         payload = json.loads(FIXTURE.read_text(encoding="utf-8"))

@@ -33,6 +33,14 @@ the MQTT topic. Exception text and infrastructure details are never published.
 The receipt is non-retained, so a lost receipt causes a safe idempotent replay
 rather than accepting stale broker state.
 
+The retained Gaggimate status packet is capped at 7,168 bytes, including at
+most 4,096 bytes of recent-shot summaries. The adapter drops the oldest
+summaries first and keeps the newest entries. This affects only the diagnostic
+UI projection; physical shots, comparisons, recommendations, and CPBO state
+remain in their repositories. If non-history status details cannot be encoded
+within the budget, the adapter publishes a minimal attention status instead of
+an oversized or invalid retained packet.
+
 Live shot telemetry uses non-retained QoS 0 start, sample, and end events at a
 nominal 250 ms cadence. The MQTT adapter validates topic ownership and channel
 bounds before translating these payloads into canonical live-shot events. The

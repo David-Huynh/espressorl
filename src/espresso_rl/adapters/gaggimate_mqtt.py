@@ -46,6 +46,10 @@ LOCAL_RESET_TOPIC = "gaggimate/+/rl/local/reset"
 LIVE_SHOT_TOPIC = "gaggimate/+/rl/shot/live"
 SHOT_ACK_EVENT_TYPE = "shot_delivery_ack"
 SHOT_ACK_TOPIC_SUFFIX = "rl/shot/ack"
+# Older Gaggimate firmware has an 8 KiB MQTT packet buffer. Leave room for
+# MQTT framing/topic bytes, and keep the UI's recent-shot JSON below its 4 KiB cap.
+STATUS_PAYLOAD_MAX_BYTES = 7_168
+STATUS_RECENT_SHOTS_MAX_BYTES = 4_096
 _MACHINE_TOPIC_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _SHOT_FINISH_SETTLE_SAMPLES = 2
 _SHOT_FINISH_SETTLE_MAX_DELTA_G = 1.0
@@ -90,6 +94,61 @@ _CORRECTION_FIELDS = _CORRECTION_REQUIRED_FIELDS | {
     "beverage_out_g",
 }
 
+
+def _encode_status_payload(machine_id: str, status: dict[str, Any]) -> tuple[str, int, bool]:
+    payload = dict(status)
+    recent_value = payload.get("recent_shots")
+    recent_shots = list(recent_value) if isinstance(recent_value, list) else []
+    original_recent_count = len(recent_shots)
+    payload["recent_shots"] = recent_shots
+    payload.update(
+        {
+            "event_type": "espresso_rl_status",
+            "schema_version": 1,
+            "machine_id": machine_id,
+        }
+    )
+
+    while recent_shots and _json_size(recent_shots) > STATUS_RECENT_SHOTS_MAX_BYTES:
+        recent_shots.pop()
+    try:
+        encoded = _compact_json(payload)
+        while recent_shots and len(encoded.encode("utf-8")) > STATUS_PAYLOAD_MAX_BYTES:
+            recent_shots.pop()
+            encoded = _compact_json(payload)
+        if len(encoded.encode("utf-8")) <= STATUS_PAYLOAD_MAX_BYTES:
+            return encoded, original_recent_count - len(recent_shots), False
+    except (TypeError, ValueError):
+        pass
+
+    fallback = {
+        "event_type": "espresso_rl_status",
+        "schema_version": 1,
+        "machine_id": str(machine_id)[:160],
+        "addon_online": bool(status.get("addon_online", True)),
+        "timestamp": status.get("timestamp") if _plain_integer(status.get("timestamp")) else None,
+        "runtime_health_status": "attention",
+        "runtime_health_summary": "Status details exceeded the MQTT transport budget",
+        "recent_shots": [],
+    }
+    return _compact_json(fallback), original_recent_count, True
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, allow_nan=False, separators=(",", ":"))
+
+
+def _json_size(value: Any) -> int:
+    try:
+        return len(_compact_json(value).encode("utf-8"))
+    except (TypeError, ValueError):
+        return STATUS_RECENT_SHOTS_MAX_BYTES + 1
+
+
+def _plain_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 class GaggimateMQTTClient:
     """Gaggimate MQTT adapter. Machine-specific topics stay out of core."""
 
@@ -118,6 +177,7 @@ class GaggimateMQTTClient:
         self._on_optimizer_settings = on_optimizer_settings or (lambda event: None)
         self._on_local_reset = on_local_reset or (lambda event: None)
         self._on_live_shot = on_live_shot or (lambda event: None)
+        self._status_omitted_recent_counts: dict[str, int] = {}
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.mqtt_user:
             self._client.username_pw_set(config.mqtt_user, config.mqtt_password)
@@ -184,13 +244,19 @@ class GaggimateMQTTClient:
     def publish_status(self, machine_id: str, status: dict[str, Any]) -> None:
         machine_topic_id = _machine_topic_id(machine_id)
         topic = f"gaggimate/{machine_topic_id}/rl/status"
-        payload = {
-            "event_type": "espresso_rl_status",
-            "schema_version": 1,
-            "machine_id": machine_id,
-            **status,
-        }
-        self._client.publish(topic, json.dumps(payload), qos=1, retain=True)
+        encoded, omitted_recent_shots, used_fallback = _encode_status_payload(machine_id, status)
+        self._client.publish(topic, encoded, qos=1, retain=True)
+        previous_omitted = self._status_omitted_recent_counts.get(machine_id)
+        self._status_omitted_recent_counts[machine_id] = omitted_recent_shots
+        if omitted_recent_shots and omitted_recent_shots != previous_omitted:
+            logger.warning(
+                "Omitted %d older shot summaries to keep %s within %d bytes",
+                omitted_recent_shots,
+                topic,
+                STATUS_PAYLOAD_MAX_BYTES,
+            )
+        if used_fallback:
+            logger.error("Published minimal status because the full %s payload exceeded its transport budget", topic)
         logger.info("Published EspressoRL status to %s", topic)
 
     def _on_connect(
