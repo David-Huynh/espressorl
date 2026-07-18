@@ -24,12 +24,18 @@ from espresso_rl.adapters.gaggimate_mqtt import (
     GaggimateMQTTClient,
 )
 from espresso_rl.config import Config
-from espresso_rl.domain.cpbo import CPBOProfile, ComparisonMode, PreferenceLabel
+from espresso_rl.domain.cpbo import (
+    CPBOProfile,
+    ComparisonMode,
+    PendingPreferenceRequest,
+    PreferenceLabel,
+)
 from espresso_rl.domain.models import (
     Recommendation,
     RecommendationMode,
     RecommendationStatus,
 )
+from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.main import maybe_publish_startup_recommendation
 
 
@@ -435,6 +441,48 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertFalse(first["retryable"])
         self.assertEqual(second["outcome"], "already_processed")
         self.assertFalse(second["retryable"])
+
+    def test_shot_delivery_ack_includes_canonical_pending_preference(self) -> None:
+        payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        mqtt = FakeMQTT()
+        install_id = self.client._config.install_id
+        request = PendingPreferenceRequest(
+            install_id=install_id,
+            machine_id="gaggimate:AA_BB",
+            optimization_run_id="run_1",
+            new_shot_id=str(payload["shot_id"]),
+            anchor_shot_id="shot_anchor",
+            comparison_mode=ComparisonMode.BEST_INCUMBENT,
+            taste_goal=TasteGoal.custom({"sweet": "high"}),
+        )
+        self.client._client = mqtt  # type: ignore[assignment]
+        self.client._on_shot = lambda event: SimpleNamespace(
+            shot=object(),
+            replayed=True,
+            dropped_reason=None,
+            preference_request=request,
+        )
+
+        self.client._handle_shot_message(payload, "AA_BB")
+
+        ack = json.loads(mqtt.published[-1][1])
+        self.assertEqual(ack["outcome"], "already_processed")
+        self.assertEqual(
+            ack["preference_request"],
+            {
+                "install_id": install_id,
+                "optimization_run_id": "run_1",
+                "new_shot_id": payload["shot_id"],
+                "anchor_shot_id": "shot_anchor",
+                "comparison_mode": "best_incumbent",
+                "taste_goal": {
+                    "schema_version": 1,
+                    "mode": "custom",
+                    "targets": {"sweet": "high"},
+                },
+                "recommendation_id": None,
+            },
+        )
 
     def test_shot_delivery_classifies_permanent_and_transient_failures(self) -> None:
         payload = json.loads(FIXTURE.read_text(encoding="utf-8"))

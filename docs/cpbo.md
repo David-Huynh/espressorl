@@ -376,6 +376,24 @@ history. A stale unbrewed suggestion is replaced with a newly fitted bounded
 recommendation. No additional comparison is requested for comparisons already
 recorded.
 
+Explicitly excluding a historical shot is different from deleting it. The
+canonical shot remains stored for audit, community processing, and offline
+training, while its CPBO physical-shot projection is marked `excluded`.
+Comparisons that depend on the excluded shot are removed, the remaining valid
+comparison chain and optimizer state are rebuilt transactionally, and any
+unanswered suggestion is superseded. The next eligible physical shot can then
+become the pending candidate against the rebuilt previous shot or incumbent.
+Repeated exclusion events are idempotent and do not emit duplicate
+recommendations.
+
+When an accepted or idempotently replayed shot becomes the pending candidate,
+the application result carries a typed `PendingPreferenceRequest`. It contains
+the run, candidate, anchor, comparison mode, and snapshotted taste goal. The
+Gaggimate MQTT adapter may include that canonical request in its shot-delivery
+acknowledgement, allowing a replayed shot to open the required comparison
+without inventing recommendation attribution. MQTT JSON and firmware prompt
+state do not enter CPBO or the optimizer.
+
 Changing the configured recipe domain uses the same observation rule for every
 shot in the active run: physical values are unchanged, recipe IDs and
 normalized coordinates are regenerated for the new domain, and all existing

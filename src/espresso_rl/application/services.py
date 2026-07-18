@@ -12,6 +12,7 @@ from espresso_rl.application.upload_payloads import (
     make_shot_upload_item,
 )
 from espresso_rl.domain.community import PairwiseShotComparison
+from espresso_rl.domain.cpbo import PendingPreferenceRequest
 from espresso_rl.domain.events import (
     MachineStateEvent,
     RecommendationApplyEvent,
@@ -55,6 +56,7 @@ class IngestResult:
     recommendation: Recommendation | None
     dropped_reason: str | None = None
     replayed: bool = False
+    preference_request: PendingPreferenceRequest | None = None
 
     @property
     def stored(self) -> bool:

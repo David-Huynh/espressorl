@@ -132,6 +132,14 @@ class PreferentialOptimizationRepository(Protocol):
     ) -> None:
         ...
 
+    def replace_history_after_shot_exclusion(
+        self,
+        shot: PreferenceShot,
+        comparisons: Sequence[PreferenceComparison],
+        state: OptimizerState,
+    ) -> None:
+        ...
+
     def record_comparison(
         self,
         comparison: PreferenceComparison,

@@ -51,6 +51,7 @@ class PhysicalShotStatus(str, Enum):
     VALID = "valid"
     MACHINE_FAILURE = "machine_failure"
     ABORTED = "aborted"
+    EXCLUDED = "excluded"
 
 
 @dataclass(frozen=True)
@@ -688,6 +689,43 @@ class PreferenceComparison:
             object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
         if self.created_at < 0:
             raise ValueError("comparison created_at must be nonnegative")
+
+
+@dataclass(frozen=True)
+class PendingPreferenceRequest:
+    """Canonical request to compare one observed shot with its CPBO anchor."""
+
+    install_id: str
+    machine_id: str
+    optimization_run_id: str
+    new_shot_id: str
+    anchor_shot_id: str
+    comparison_mode: ComparisonMode
+    taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
+    recommendation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        identifiers = {
+            "install_id": (self.install_id, 160),
+            "machine_id": (self.machine_id, 160),
+            "optimization_run_id": (self.optimization_run_id, 256),
+            "new_shot_id": (self.new_shot_id, 256),
+            "anchor_shot_id": (self.anchor_shot_id, 256),
+        }
+        for name, (value, maximum) in identifiers.items():
+            if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+                raise ValueError(f"pending preference {name} is invalid")
+        if self.new_shot_id == self.anchor_shot_id:
+            raise ValueError("pending preference requires two distinct physical shots")
+        object.__setattr__(self, "comparison_mode", ComparisonMode(self.comparison_mode))
+        if not isinstance(self.taste_goal, TasteGoal):
+            object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
+        if self.recommendation_id is not None and (
+            not isinstance(self.recommendation_id, str)
+            or not self.recommendation_id.strip()
+            or len(self.recommendation_id) > 256
+        ):
+            raise ValueError("pending preference recommendation_id is invalid")
 
 
 @dataclass(frozen=True)

@@ -27,7 +27,7 @@ from espresso_rl.domain.live_telemetry import (
     LiveShotSampleEvent,
     LiveShotStartedEvent,
 )
-from espresso_rl.domain.cpbo import RecipeDomain
+from espresso_rl.domain.cpbo import PendingPreferenceRequest, RecipeDomain
 from espresso_rl.domain.models import Recommendation
 from espresso_rl.domain.models import new_id
 from espresso_rl.domain.taste_goal import TasteGoal
@@ -353,7 +353,9 @@ class GaggimateMQTTClient:
             return
 
         try:
-            outcome, reason = _shot_delivery_outcome(self._on_shot(event))
+            result = self._on_shot(event)
+            outcome, reason = _shot_delivery_outcome(result)
+            preference_request = _shot_delivery_preference_request(result, event)
         except ValueError:
             self._publish_shot_ack(
                 mac,
@@ -381,6 +383,7 @@ class GaggimateMQTTClient:
             event.machine_id,
             outcome=outcome,
             reason=reason,
+            preference_request=preference_request,
         )
 
     def _publish_shot_ack(
@@ -391,6 +394,7 @@ class GaggimateMQTTClient:
         *,
         outcome: str,
         reason: str,
+        preference_request: PendingPreferenceRequest | None = None,
     ) -> None:
         if not _MACHINE_TOPIC_ID.fullmatch(mac):
             logger.warning("Refusing to publish shot acknowledgement for invalid machine topic")
@@ -406,6 +410,16 @@ class GaggimateMQTTClient:
             "reason": reason,
             "timestamp": int(self._config.now()),
         }
+        if preference_request is not None:
+            payload["preference_request"] = {
+                "install_id": preference_request.install_id,
+                "optimization_run_id": preference_request.optimization_run_id,
+                "new_shot_id": preference_request.new_shot_id,
+                "anchor_shot_id": preference_request.anchor_shot_id,
+                "comparison_mode": preference_request.comparison_mode.value,
+                "taste_goal": preference_request.taste_goal.to_dict(),
+                "recommendation_id": preference_request.recommendation_id,
+            }
         topic = f"gaggimate/{mac}/{SHOT_ACK_TOPIC_SUFFIX}"
         self._client.publish(topic, json.dumps(payload), qos=1, retain=False)
         logger.info("Acknowledged shot %s outcome=%s on %s", shot_id, outcome, topic)
@@ -1023,6 +1037,24 @@ def _shot_delivery_outcome(result: object | None) -> tuple[str, str]:
         )
         return "permanent_rejection", reason
     return "accepted", "stored"
+
+
+def _shot_delivery_preference_request(
+    result: object | None,
+    event: ShotProfileEvent,
+) -> PendingPreferenceRequest | None:
+    request = getattr(result, "preference_request", None)
+    if request is None:
+        return None
+    if not isinstance(request, PendingPreferenceRequest):
+        raise TypeError("shot result preference_request is not canonical")
+    if (
+        request.new_shot_id != event.shot_id
+        or request.install_id != event.install_id
+        or not _same_gaggimate_machine_id(request.machine_id, event.machine_id)
+    ):
+        raise RuntimeError("shot result preference_request owner does not match delivery")
+    return request
 
 
 def _machine_topic_id(machine_id: str) -> str:

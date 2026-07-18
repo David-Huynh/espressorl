@@ -15,7 +15,10 @@ from espresso_rl.adapters.sqlite_repositories import (
 )
 from espresso_rl.application.cpbo_runtime import CPBORuntimeBridge, strict_context_from_shot
 from espresso_rl.application.preference_optimization import ConsecutivePreferenceOptimizationService
-from espresso_rl.application.runtime_coordinator import AutoTuningRuntimeCoordinator
+from espresso_rl.application.runtime_coordinator import (
+    AutoTuningRuntimeCoordinator,
+    PostShotOptimizationResult,
+)
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.config import Config
 from espresso_rl.domain.cpbo import (
@@ -170,10 +173,17 @@ class GaggimateEndToEndTests(unittest.TestCase):
                     def publish_status(self, machine_id, bean_context_id, grinder_context_id, **kwargs) -> None:
                         client.publish_status(machine_id, {"optimizer_mode": kwargs.get("mode")})
 
+                def optimize_after_shot(shot) -> PostShotOptimizationResult:
+                    outcome = bridge.handle_shot(shot)
+                    return PostShotOptimizationResult(
+                        recommendation=outcome.recommendation,
+                        preference_request=outcome.preference_request,
+                    )
+
                 coordinator = AutoTuningRuntimeCoordinator(
                     service,
                     Publisher(),
-                    post_shot_recommendation=lambda shot: bridge.handle_shot(shot).recommendation,
+                    post_shot_recommendation=optimize_after_shot,
                 )
 
                 def on_preference(event) -> None:
@@ -221,11 +231,40 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 candidate["dose_observed"] = False
                 candidate["dose_target_confirmed"] = True
                 _send(client, transport, "gaggimate/AA_BB/shot/profile", candidate)
+                candidate_ack = json.loads(transport.published[-1][1])
+                self.assertEqual(candidate_ack["outcome"], "accepted")
+                self.assertEqual(
+                    candidate_ack["preference_request"]["new_shot_id"],
+                    "shot_2",
+                )
+                self.assertEqual(
+                    candidate_ack["preference_request"]["anchor_shot_id"],
+                    "shot_1",
+                )
                 self.assertTrue(
                     any(
                         topic.endswith("/rl/recommendation") and payload == "" and retained
                         for topic, payload, _, retained in transport.published
                     )
+                )
+                clears_before_pending_replay = sum(
+                    topic.endswith("/rl/recommendation") and payload == ""
+                    for topic, payload, _, _ in transport.published
+                )
+                _send(client, transport, "gaggimate/AA_BB/shot/profile", candidate)
+                pending_replay_ack = json.loads(transport.published[-1][1])
+                self.assertEqual(pending_replay_ack["outcome"], "already_processed")
+                self.assertEqual(
+                    pending_replay_ack["preference_request"],
+                    candidate_ack["preference_request"],
+                )
+                clears_after_pending_replay = sum(
+                    topic.endswith("/rl/recommendation") and payload == ""
+                    for topic, payload, _, _ in transport.published
+                )
+                self.assertGreater(
+                    clears_after_pending_replay,
+                    clears_before_pending_replay,
                 )
                 _send(
                     client,

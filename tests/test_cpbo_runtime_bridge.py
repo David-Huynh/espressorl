@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ from espresso_rl.domain.cpbo import (
     AcquisitionDiagnostics,
     ComparisonMode,
     ModelRecommendation,
+    PhysicalShotStatus,
     PreferenceLabel,
     RecipeDomain,
     RecipeParameter,
@@ -197,6 +199,19 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         candidate_outcome = bridge.handle_shot(candidate)
         self.assertTrue(candidate_outcome.awaiting_preference)
         self.assertIsNone(candidate_outcome.recommendation)
+        self.assertIsNotNone(candidate_outcome.preference_request)
+        self.assertEqual(candidate_outcome.preference_request.new_shot_id, "candidate")
+        self.assertEqual(candidate_outcome.preference_request.anchor_shot_id, "baseline")
+        self.assertEqual(
+            candidate_outcome.preference_request.comparison_mode,
+            ComparisonMode.BEST_INCUMBENT,
+        )
+        replayed_candidate = bridge.handle_shot(candidate)
+        self.assertEqual(replayed_candidate.skipped_reason, "shot_already_processed")
+        self.assertEqual(
+            replayed_candidate.preference_request,
+            candidate_outcome.preference_request,
+        )
 
         next_recommendation = bridge.handle_preference(
             PreferenceFeedbackEvent(
@@ -479,6 +494,77 @@ class CPBORuntimeBridgeTests(unittest.TestCase):
         state = self.repository.get_state(first.optimization_run_id)
         self.assertEqual(state.pending_shot_id, "candidate")
         self.assertEqual(len(self.recommendations), 1)
+
+    def test_excluding_unanswered_candidate_preserves_history_and_accepts_next_shot(
+        self,
+    ) -> None:
+        bridge = self.bridge([6.0, 7.0, 8.0])
+        baseline = _shot("baseline", grind=5.0)
+        self.shots.rows[baseline.shot_id] = baseline
+        first = bridge.handle_shot(baseline).recommendation
+        candidate = _shot("candidate", grind=6.0)
+        self.shots.rows[candidate.shot_id] = candidate
+        bridge.handle_shot(candidate)
+        bridge.handle_preference(
+            PreferenceFeedbackEvent(
+                optimization_run_id=first.optimization_run_id,
+                new_shot_id="candidate",
+                anchor_shot_id="baseline",
+                label=PreferenceLabel.NEW_BETTER,
+                comparison_mode=ComparisonMode.BEST_INCUMBENT,
+                install_id="install",
+                machine_id="gaggimate:AA_BB",
+                timestamp=200,
+            )
+        )
+        unwanted = _shot("unwanted", grind=7.0)
+        self.shots.rows[unwanted.shot_id] = unwanted
+        self.assertTrue(bridge.handle_shot(unwanted).awaiting_preference)
+
+        excluded = replace(unwanted, exclude_from_local_optimization=True)
+        self.shots.rows[excluded.shot_id] = excluded
+        exclusion = bridge.handle_shot_correction(excluded)
+
+        self.assertIsNotNone(exclusion.recommendation)
+        self.assertEqual(
+            exclusion.recommendation.comparison_anchor_shot_id,
+            "candidate",
+        )
+        self.assertEqual(
+            exclusion.recommendation.projected_relative_step_from_reference,
+            8.0,
+        )
+        self.assertEqual(
+            self.repository.get_shot("unwanted").status,
+            PhysicalShotStatus.EXCLUDED,
+        )
+        comparisons = self.repository.list_comparisons(first.optimization_run_id)
+        self.assertEqual(len(comparisons), 1)
+        self.assertEqual(comparisons[0].new_shot_id, "candidate")
+        state = self.repository.get_state(first.optimization_run_id)
+        self.assertEqual(state.previous_valid_shot_id, "candidate")
+        self.assertEqual(state.incumbent_shot_id, "candidate")
+        self.assertIsNone(state.pending_shot_id)
+
+        intended = _shot("intended", grind=7.5)
+        self.shots.rows[intended.shot_id] = intended
+        intended_outcome = bridge.handle_shot(intended)
+
+        self.assertTrue(intended_outcome.awaiting_preference)
+        state = self.repository.get_state(first.optimization_run_id)
+        self.assertEqual(state.pending_shot_id, "intended")
+        self.assertEqual(state.pending_anchor_shot_id, "candidate")
+
+        recommendation_count = len(self.recommendations)
+        duplicate = bridge.handle_shot_correction(excluded)
+
+        self.assertEqual(duplicate.skipped_reason, "shot_already_excluded")
+        self.assertIsNone(duplicate.recommendation)
+        self.assertEqual(len(self.recommendations), recommendation_count)
+        self.assertEqual(
+            self.repository.get_state(first.optimization_run_id).pending_shot_id,
+            "intended",
+        )
 
     def test_out_of_space_correction_remains_active_without_losing_comparison(self) -> None:
         bridge = self.bridge([6.0, 7.0, 8.0])

@@ -53,7 +53,10 @@ from espresso_rl.application.offline_dataset_export import OfflineDatasetExportS
 from espresso_rl.application.preference_optimization import (
     ConsecutivePreferenceOptimizationService,
 )
-from espresso_rl.application.runtime_coordinator import AutoTuningRuntimeCoordinator
+from espresso_rl.application.runtime_coordinator import (
+    AutoTuningRuntimeCoordinator,
+    PostShotOptimizationResult,
+)
 from espresso_rl.application.services import EspressoRLService
 from espresso_rl.application.upload_maintenance import UploadQueueMaintenanceService
 from espresso_rl.config import Config
@@ -278,7 +281,7 @@ def run_public(config: Config) -> None:
         ) -> None:
             publish_status(machine_id, bean_context_id, grinder_context_id, **kwargs)
 
-    def cpbo_recommendation_after_shot(shot) -> Recommendation | None:
+    def cpbo_recommendation_after_shot(shot) -> PostShotOptimizationResult:
         outcome = cpbo_runtime.handle_shot(shot)
         if outcome.skipped_reason == "shot_already_processed":
             logger.info("CPBO ignored idempotent replay of shot %s", shot.shot_id)
@@ -290,7 +293,10 @@ def run_public(config: Config) -> None:
                 shot.shot_id,
                 outcome.optimization_run_id,
             )
-        return outcome.recommendation
+        return PostShotOptimizationResult(
+            recommendation=outcome.recommendation,
+            preference_request=outcome.preference_request,
+        )
 
     runtime_coordinator = AutoTuningRuntimeCoordinator(
         service=service,

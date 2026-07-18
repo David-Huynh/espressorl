@@ -10,6 +10,7 @@ from espresso_rl.application.preference_optimization import (
 from espresso_rl.domain.cpbo import (
     ComparisonMode,
     OptimizationRunContext,
+    PendingPreferenceRequest,
     PhysicalShotStatus,
     PreferenceLabel,
     RecipeDomain,
@@ -36,6 +37,7 @@ class CPBOShotOutcome:
     recommendation: Recommendation | None
     awaiting_preference: bool
     skipped_reason: str | None = None
+    preference_request: PendingPreferenceRequest | None = None
 
 
 class CPBORuntimeBridge:
@@ -135,11 +137,17 @@ class CPBORuntimeBridge:
         existing_preference_shot = self._optimizer.find_shot(shot.shot_id)
         if existing_preference_shot is not None:
             state = self._optimizer.get_state(existing_preference_shot.optimization_run_id)
+            preference_request = self._pending_preference_request(
+                existing_preference_shot.optimization_run_id,
+                shot.shot_id,
+                shot.recommendation_id,
+            )
             return CPBOShotOutcome(
                 existing_preference_shot.optimization_run_id,
                 None,
                 state.pending_shot_id == shot.shot_id,
                 "shot_already_processed",
+                preference_request,
             )
         current_recipe = _known_recipe(shot)
         if current_recipe is None:
@@ -190,7 +198,16 @@ class CPBORuntimeBridge:
         )
 
         if status == PhysicalShotStatus.VALID and has_valid_baseline:
-            return CPBOShotOutcome(run_id, None, True)
+            return CPBOShotOutcome(
+                run_id,
+                None,
+                True,
+                preference_request=self._pending_preference_request(
+                    run_id,
+                    shot.shot_id,
+                    shot.recommendation_id,
+                ),
+            )
         if status != PhysicalShotStatus.VALID and not has_valid_baseline:
             return CPBOShotOutcome(run_id, None, False, status.value)
 
@@ -198,6 +215,27 @@ class CPBORuntimeBridge:
         recommendation = self._machine_recommendation(suggestion, shot, current_recipe)
         self._recommendation_sink(recommendation)
         return CPBOShotOutcome(run_id, recommendation, False)
+
+    def _pending_preference_request(
+        self,
+        run_id: str,
+        shot_id: str,
+        recommendation_id: str | None = None,
+    ) -> PendingPreferenceRequest | None:
+        run = self._optimizer.get_run(run_id)
+        state = self._optimizer.get_state(run_id)
+        if state.pending_shot_id != shot_id or state.pending_anchor_shot_id is None:
+            return None
+        return PendingPreferenceRequest(
+            install_id=run.context.install_id,
+            machine_id=run.context.machine_id,
+            optimization_run_id=run_id,
+            new_shot_id=shot_id,
+            anchor_shot_id=state.pending_anchor_shot_id,
+            comparison_mode=run.comparison_mode,
+            taste_goal=run.context.taste_goal,
+            recommendation_id=recommendation_id,
+        )
 
     def handle_preference(self, event: PreferenceFeedbackEvent) -> Recommendation:
         run = self._optimizer.get_run(event.optimization_run_id)
@@ -263,6 +301,45 @@ class CPBORuntimeBridge:
         preference_shot = self._optimizer.find_shot(shot.shot_id)
         if preference_shot is None:
             return CPBOShotOutcome(None, None, False, "shot_not_processed_by_cpbo")
+        if shot.exclude_from_local_optimization:
+            if preference_shot.status == PhysicalShotStatus.EXCLUDED:
+                return CPBOShotOutcome(
+                    preference_shot.optimization_run_id,
+                    None,
+                    False,
+                    "shot_already_excluded",
+                )
+            self._optimizer.exclude_shot(shot.shot_id)
+            state = self._optimizer.get_state(preference_shot.optimization_run_id)
+            current_shot_id = state.previous_valid_shot_id
+            if current_shot_id is None:
+                return CPBOShotOutcome(
+                    preference_shot.optimization_run_id,
+                    None,
+                    False,
+                    "optimization_run_has_no_valid_shot",
+                )
+            current_shot = self._shots.get(current_shot_id)
+            if current_shot is None:
+                raise ValueError("canonical current shot for rebuilt CPBO run is missing")
+            current_recipe = _known_recipe(current_shot)
+            if current_recipe is None:
+                raise ValueError("canonical current shot no longer has complete recipe controls")
+            suggestion = self._optimizer.suggest_next(
+                preference_shot.optimization_run_id
+            )
+            recommendation = self._machine_recommendation(
+                suggestion,
+                current_shot,
+                current_recipe,
+                current_machine_state=current_machine_state,
+            )
+            self._recommendation_sink(recommendation)
+            return CPBOShotOutcome(
+                preference_shot.optimization_run_id,
+                recommendation,
+                False,
+            )
         corrected_recipe = _known_recipe(shot)
         if corrected_recipe is None:
             return CPBOShotOutcome(

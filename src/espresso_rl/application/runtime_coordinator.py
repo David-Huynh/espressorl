@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 from espresso_rl.application.live_telemetry import LiveShotTelemetryService
 from espresso_rl.application.services import EspressoRLService, IngestResult
+from espresso_rl.domain.cpbo import PendingPreferenceRequest
 from espresso_rl.domain.events import (
     MachineStateEvent,
     OptimizerSettingsEvent,
@@ -16,7 +18,15 @@ from espresso_rl.ports.runtime import AutoTuningRuntimePublisher
 logger = logging.getLogger(__name__)
 
 OutcomeObserver = Callable[[ShotRecord, Recommendation | None], None]
-PostShotRecommendation = Callable[[ShotRecord], Recommendation | None]
+
+
+@dataclass(frozen=True)
+class PostShotOptimizationResult:
+    recommendation: Recommendation | None = None
+    preference_request: PendingPreferenceRequest | None = None
+
+
+PostShotRecommendation = Callable[[ShotRecord], PostShotOptimizationResult]
 
 
 class AutoTuningRuntimeCoordinator:
@@ -60,8 +70,16 @@ class AutoTuningRuntimeCoordinator:
                 )
 
         recommendation = result.recommendation
+        preference_request = result.preference_request
         if recommendation is None and self._post_shot_recommendation is not None:
-            recommendation = self._post_shot_recommendation(result.shot)
+            optimization_result = self._post_shot_recommendation(result.shot)
+            recommendation = optimization_result.recommendation
+            preference_request = optimization_result.preference_request
+        result = replace(
+            result,
+            recommendation=recommendation,
+            preference_request=preference_request,
+        )
         if recommendation is None:
             logger.info(
                 "Shot %s stored type=%s local_optimization=%s; waiting for feedback before recommendation",
@@ -82,7 +100,10 @@ class AutoTuningRuntimeCoordinator:
             self._observe(result.shot, recommendation)
             self._publisher.publish_recommendation(recommendation)
 
-        if not result.replayed and recommendation is None and result.shot.recommendation_id:
+        if recommendation is None and (
+            preference_request is not None
+            or (not result.replayed and result.shot.recommendation_id)
+        ):
             self._publisher.clear_recommendation(event.machine_id)
 
         self._publisher.publish_status(

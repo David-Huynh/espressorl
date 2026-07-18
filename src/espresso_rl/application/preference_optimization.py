@@ -432,6 +432,43 @@ class ConsecutivePreferenceOptimizationService:
             suggestion_invalidated=invalidate_pending,
         )
 
+    def exclude_shot(self, shot_id: str) -> PreferenceShot:
+        stored_shot = self.get_shot(shot_id)
+        if stored_shot.status == PhysicalShotStatus.EXCLUDED:
+            return stored_shot
+        run = self._require_run(stored_shot.optimization_run_id)
+        state = self._require_state(run.run_id)
+        excluded_shot = replace(stored_shot, status=PhysicalShotStatus.EXCLUDED)
+        shots = [
+            excluded_shot if shot.shot_id == excluded_shot.shot_id else shot
+            for shot in self._repository.list_shots(run.run_id)
+        ]
+        recipes: dict[str, RecipePoint] = {}
+        for shot in shots:
+            recipe = self._repository.get_recipe(shot.recipe_id)
+            if recipe is None:
+                raise ValueError("CPBO shot exclusion found a missing recipe")
+            recipes[recipe.recipe_id] = recipe
+        comparisons = self._retained_comparison_history(
+            run,
+            shots,
+            self._repository.list_comparisons(run.run_id),
+        )
+        rebuilt_state = self._rebuild_state_from_history(
+            run,
+            state,
+            shots,
+            recipes,
+            preserve_pending=False,
+            comparisons=comparisons,
+        )
+        self._repository.replace_history_after_shot_exclusion(
+            excluded_shot,
+            comparisons,
+            rebuilt_state,
+        )
+        return excluded_shot
+
     def get_state(self, run_id: str) -> OptimizerState:
         return self._require_state(run_id)
 
@@ -753,6 +790,7 @@ class ConsecutivePreferenceOptimizationService:
         recipes: Mapping[str, RecipePoint],
         *,
         preserve_pending: bool,
+        comparisons: list[PreferenceComparison] | None = None,
     ) -> OptimizerState:
         valid_shots = sorted(
             (
@@ -778,11 +816,13 @@ class ConsecutivePreferenceOptimizationService:
                 center=self._bounded_center(recipe_for(baseline_shot).normalized_x),
                 length=self._initial_trust_region_length,
             )
-            comparisons = sorted(
-                self._repository.list_comparisons(run.run_id),
+            ordered_comparisons = sorted(
+                self._repository.list_comparisons(run.run_id)
+                if comparisons is None
+                else comparisons,
                 key=lambda comparison: (comparison.created_at, comparison.comparison_id),
             )
-            for comparison in comparisons:
+            for comparison in ordered_comparisons:
                 new_shot = shots_by_id.get(comparison.new_shot_id)
                 anchor_shot = shots_by_id.get(comparison.anchor_shot_id)
                 if new_shot is None or anchor_shot is None:
@@ -824,6 +864,53 @@ class ConsecutivePreferenceOptimizationService:
             pending_suggestion_json=state.pending_suggestion_json if awaiting_preference else None,
             updated_at=self._clock(),
         )
+
+    @staticmethod
+    def _retained_comparison_history(
+        run: OptimizationRun,
+        shots: list[PreferenceShot],
+        comparisons: list[PreferenceComparison],
+    ) -> list[PreferenceComparison]:
+        valid_shots = sorted(
+            (shot for shot in shots if shot.status == PhysicalShotStatus.VALID),
+            key=lambda shot: (shot.sequence_number, shot.shot_id),
+        )
+        if not valid_shots:
+            return []
+        shots_by_id = {shot.shot_id: shot for shot in valid_shots}
+        incumbent_id = valid_shots[0].shot_id
+        previous_id = valid_shots[0].shot_id
+        seen_new_shots: set[str] = set()
+        retained: list[PreferenceComparison] = []
+        for comparison in sorted(
+            comparisons,
+            key=lambda row: (row.created_at, row.comparison_id),
+        ):
+            new_shot = shots_by_id.get(comparison.new_shot_id)
+            anchor_shot = shots_by_id.get(comparison.anchor_shot_id)
+            if new_shot is None or anchor_shot is None:
+                continue
+            expected_anchor = (
+                previous_id
+                if comparison.comparison_mode == ComparisonMode.GLOBAL_PREVIOUS
+                else incumbent_id
+            )
+            if (
+                comparison.optimization_run_id != run.run_id
+                or comparison.new_shot_id in seen_new_shots
+                or comparison.anchor_shot_id != expected_anchor
+                or new_shot.sequence_number <= anchor_shot.sequence_number
+            ):
+                continue
+            retained.append(comparison)
+            seen_new_shots.add(comparison.new_shot_id)
+            previous_id = comparison.new_shot_id
+            if (
+                comparison.anchor_shot_id == incumbent_id
+                and comparison.label == PreferenceLabel.NEW_BETTER
+            ):
+                incumbent_id = comparison.new_shot_id
+        return retained
 
     @staticmethod
     def _observation_recipe(

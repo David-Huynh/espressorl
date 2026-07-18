@@ -761,6 +761,73 @@ class PostgresPreferentialOptimizationRepository:
                 )
             self._upsert_state(state)
 
+    def replace_history_after_shot_exclusion(
+        self,
+        shot: PreferenceShot,
+        comparisons: Sequence[PreferenceComparison],
+        state: OptimizerState,
+    ) -> None:
+        if (
+            shot.status != PhysicalShotStatus.EXCLUDED
+            or shot.optimization_run_id != state.optimization_run_id
+            or any(
+                comparison.optimization_run_id != shot.optimization_run_id
+                for comparison in comparisons
+            )
+        ):
+            raise ValueError("excluded shot history spans multiple runs")
+        with self._lock, self._store.conn.transaction():
+            existing = self._store.conn.execute(
+                "SELECT run_id FROM cpbo_shots WHERE shot_id=%s",
+                (shot.shot_id,),
+            ).fetchone()
+            if existing is None or existing["run_id"] != shot.optimization_run_id:
+                raise ValueError("CPBO exclusion references an unknown physical shot")
+            cursor = self._store.conn.execute(
+                """
+                UPDATE cpbo_shots
+                SET status=%s, payload_json=%s
+                WHERE shot_id=%s AND run_id=%s
+                """,
+                (
+                    shot.status.value,
+                    shot_to_json(shot),
+                    shot.shot_id,
+                    shot.optimization_run_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("CPBO physical shot exclusion was not applied")
+            self._store.conn.execute(
+                "DELETE FROM cpbo_comparisons WHERE run_id=%s",
+                (shot.optimization_run_id,),
+            )
+            for comparison in comparisons:
+                self._store.conn.execute(
+                    """
+                    INSERT INTO cpbo_comparisons (
+                        comparison_id, run_id, new_shot_id, anchor_shot_id,
+                        created_at, payload_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        comparison.comparison_id,
+                        comparison.optimization_run_id,
+                        comparison.new_shot_id,
+                        comparison.anchor_shot_id,
+                        comparison.created_at,
+                        comparison_to_json(comparison),
+                    ),
+                )
+            self._store.conn.execute(
+                """
+                UPDATE cpbo_suggestions SET status='superseded'
+                WHERE run_id=%s AND status IN ('pending', 'awaiting_preference')
+                """,
+                (shot.optimization_run_id,),
+            )
+            self._upsert_state(state)
+
     def reset_owner(self, install_id: str, machine_id: str) -> dict[str, int]:
         with self._lock, self._store.conn.transaction():
             run_rows = self._store.conn.execute(
