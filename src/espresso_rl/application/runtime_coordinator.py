@@ -80,6 +80,8 @@ class AutoTuningRuntimeCoordinator:
             recommendation=recommendation,
             preference_request=preference_request,
         )
+        if preference_request is not None:
+            self._service.supersede_recommendations_consumed_by_shot(result.shot)
         if recommendation is None:
             logger.info(
                 "Shot %s stored type=%s local_optimization=%s; waiting for feedback before recommendation",

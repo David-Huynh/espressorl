@@ -32,7 +32,7 @@ from espresso_rl.domain.cpbo import (
     SuggestionComputation,
     TrustRegionDiagnostics,
 )
-from espresso_rl.domain.models import Recipe, Recommendation
+from espresso_rl.domain.models import Recipe, Recommendation, RecommendationStatus
 from espresso_rl.optimizers.cpbo_config import TrustRegionConfig
 from espresso_rl.optimizers.cpbo_trust_region import update_trust_region
 
@@ -201,6 +201,19 @@ class GaggimateEndToEndTests(unittest.TestCase):
                 )
                 client._client = transport  # type: ignore[assignment]
 
+                candidate = _shot_payload(
+                    "shot_2",
+                    grind=3.0,
+                    community_upload_enabled=True,
+                )
+                candidate.pop("dose_in_g")
+                candidate["dose_observed"] = False
+                candidate["dose_target_confirmed"] = True
+                historical_candidate = service.ingest_shot_profile(
+                    client.translate_shot_payload(candidate, "AA_BB")
+                )
+                self.assertTrue(historical_candidate.stored)
+
                 baseline = _shot_payload("shot_1", grind=2.0, community_upload_enabled=True)
                 baseline.pop("dose_in_g")
                 baseline["dose_observed"] = False
@@ -221,18 +234,9 @@ class GaggimateEndToEndTests(unittest.TestCase):
                     1,
                 )
 
-                candidate = _shot_payload(
-                    "shot_2",
-                    grind=3.0,
-                    recommendation_id=first.recommendation_id,  # type: ignore[union-attr]
-                    community_upload_enabled=True,
-                )
-                candidate.pop("dose_in_g")
-                candidate["dose_observed"] = False
-                candidate["dose_target_confirmed"] = True
                 _send(client, transport, "gaggimate/AA_BB/shot/profile", candidate)
                 candidate_ack = json.loads(transport.published[-1][1])
-                self.assertEqual(candidate_ack["outcome"], "accepted")
+                self.assertEqual(candidate_ack["outcome"], "already_processed")
                 self.assertEqual(
                     candidate_ack["preference_request"]["new_shot_id"],
                     "shot_2",
@@ -241,11 +245,48 @@ class GaggimateEndToEndTests(unittest.TestCase):
                     candidate_ack["preference_request"]["anchor_shot_id"],
                     "shot_1",
                 )
+                self.assertEqual(
+                    recommendations.get(first.recommendation_id).status,  # type: ignore[union-attr]
+                    RecommendationStatus.SUPERSEDED,
+                )
                 self.assertTrue(
                     any(
                         topic.endswith("/rl/recommendation") and payload == "" and retained
                         for topic, payload, _, retained in transport.published
                     )
+                )
+                recommendation_publications_before_idle = sum(
+                    topic.endswith("/rl/recommendation") and bool(payload)
+                    for topic, payload, _, _ in transport.published
+                )
+                _send(
+                    client,
+                    transport,
+                    "gaggimate/AA_BB/machine/state",
+                    {
+                        "event_type": "machine_state",
+                        "schema_version": 1,
+                        "install_id": "install_1",
+                        "machine_id": "gaggimate:AA_BB",
+                        "timestamp": clock(),
+                        "state": "idle",
+                        "bean_context_id": "bean_1",
+                        "grinder_context_id": "grinder_1",
+                        "profile_id": "profile_1",
+                        "taste_goal": {
+                            "schema_version": 1,
+                            "mode": "balanced",
+                            "targets": {},
+                        },
+                    },
+                )
+                recommendation_publications_after_idle = sum(
+                    topic.endswith("/rl/recommendation") and bool(payload)
+                    for topic, payload, _, _ in transport.published
+                )
+                self.assertEqual(
+                    recommendation_publications_after_idle,
+                    recommendation_publications_before_idle,
                 )
                 clears_before_pending_replay = sum(
                     topic.endswith("/rl/recommendation") and payload == ""

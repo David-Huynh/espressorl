@@ -493,6 +493,20 @@ class EspressoRLService:
             taste_goal_fingerprint=taste_goal_fingerprint,
         )
 
+    def supersede_recommendations_consumed_by_shot(self, shot: ShotRecord) -> None:
+        """Retire recipe actions once CPBO is waiting to compare their physical shot."""
+        now = self._clock()
+        self._recommendations.supersede_active(
+            install_id=shot.install_id,
+            machine_id=shot.machine_id,
+            bean_context_id=shot.bean_context_id,
+            now=now,
+            grinder_context_id=shot.grinder_context_id,
+            profile_id=shot.profile_id,
+            raw_profile_hash=shot.raw_profile_hash if shot.profile_id is None else None,
+            taste_goal_fingerprint=shot.taste_goal.fingerprint,
+        )
+
     def handle_machine_state(self, event: MachineStateEvent) -> Recommendation | None:
         if event.community_upload_enabled is not None:
             self.set_community_upload_enabled(
