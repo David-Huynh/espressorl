@@ -15,9 +15,11 @@ from espresso_rl.domain.cpbo import (
     PreferenceLabel,
     RecipeDomain,
     Suggestion,
+    TrustRegionAction,
 )
 from espresso_rl.domain.events import (
     MachineStateEvent,
+    OptimizerControlEvent,
     OptimizerSettingsEvent,
     PreferenceFeedbackEvent,
 )
@@ -38,6 +40,16 @@ class CPBOShotOutcome:
     awaiting_preference: bool
     skipped_reason: str | None = None
     preference_request: PendingPreferenceRequest | None = None
+
+
+@dataclass(frozen=True)
+class CPBOLocalOptimizationStatus:
+    optimization_run_id: str
+    locally_converged: bool
+    trust_region_length: float
+    trust_region_success_count: int
+    trust_region_failure_count: int
+    last_transition_action: TrustRegionAction | None
 
 
 class CPBORuntimeBridge:
@@ -108,6 +120,13 @@ class CPBORuntimeBridge:
                     True,
                     "existing_preference_feedback_pending",
                 )
+            if state.trust_region_state.locally_converged:
+                return CPBOShotOutcome(
+                    run.run_id,
+                    None,
+                    False,
+                    "local_optimization_converged",
+                )
             if state.previous_valid_shot_id is None:
                 return CPBOShotOutcome(
                     run.run_id,
@@ -170,6 +189,16 @@ class CPBORuntimeBridge:
 
         state_before = self._optimizer.get_state(run_id)
         has_valid_baseline = state_before.previous_valid_shot_id is not None
+        if (
+            has_valid_baseline
+            and state_before.trust_region_state.locally_converged
+        ):
+            return CPBOShotOutcome(
+                run_id,
+                None,
+                False,
+                "local_optimization_converged",
+            )
         if has_valid_baseline and state_before.pending_shot_id is not None:
             return CPBOShotOutcome(
                 run_id,
@@ -237,7 +266,7 @@ class CPBORuntimeBridge:
             recommendation_id=recommendation_id,
         )
 
-    def handle_preference(self, event: PreferenceFeedbackEvent) -> Recommendation:
+    def handle_preference(self, event: PreferenceFeedbackEvent) -> Recommendation | None:
         run = self._optimizer.get_run(event.optimization_run_id)
         if run.context.install_id != event.install_id:
             raise ValueError("preference install_id does not own the CPBO run")
@@ -250,7 +279,7 @@ class CPBORuntimeBridge:
             raise ValueError("preference comparison_mode does not match the optimization run")
         if event.taste_goal.fingerprint != run.context.taste_goal.fingerprint:
             raise ValueError("preference taste goal does not match the optimization run")
-        self._optimizer.record_preference(
+        updated_state = self._optimizer.record_preference(
             event.optimization_run_id,
             event.new_shot_id,
             event.anchor_shot_id,
@@ -288,6 +317,8 @@ class CPBORuntimeBridge:
                     taste_goal=run.context.taste_goal,
                 )
             )
+        if updated_state.trust_region_state.locally_converged:
+            return None
         suggestion = self._optimizer.suggest_next(event.optimization_run_id)
         recommendation = self._machine_recommendation(suggestion, shot, current_recipe)
         self._recommendation_sink(recommendation)
@@ -325,6 +356,13 @@ class CPBORuntimeBridge:
             current_recipe = _known_recipe(current_shot)
             if current_recipe is None:
                 raise ValueError("canonical current shot no longer has complete recipe controls")
+            if state.trust_region_state.locally_converged:
+                return CPBOShotOutcome(
+                    preference_shot.optimization_run_id,
+                    None,
+                    False,
+                    "local_optimization_converged",
+                )
             suggestion = self._optimizer.suggest_next(
                 preference_shot.optimization_run_id
             )
@@ -375,6 +413,13 @@ class CPBORuntimeBridge:
         current_recipe = _known_recipe(current_shot)
         if current_recipe is None:
             raise ValueError("canonical current shot no longer has complete recipe controls")
+        if state.trust_region_state.locally_converged:
+            return CPBOShotOutcome(
+                preference_shot.optimization_run_id,
+                None,
+                False,
+                "local_optimization_converged",
+            )
         suggestion = self._optimizer.suggest_next(preference_shot.optimization_run_id)
         recommendation = self._machine_recommendation(
             suggestion,
@@ -391,6 +436,93 @@ class CPBORuntimeBridge:
 
     def reset_owner(self, install_id: str, machine_id: str) -> dict[str, int]:
         return self._optimizer.reset_owner(install_id, machine_id)
+
+    def resume_local_exploration(
+        self,
+        run_id: str,
+        *,
+        control_event_id: str | None = None,
+    ) -> CPBOLocalOptimizationStatus:
+        state = self._optimizer.resume_local_exploration(
+            run_id,
+            control_event_id=control_event_id,
+        )
+        return self._status_from_state(run_id, state)
+
+    def handle_optimizer_control(
+        self,
+        event: OptimizerControlEvent,
+        current_machine_state: MachineStateEvent | None = None,
+    ) -> CPBOShotOutcome:
+        if event.action.value != "resume_local_exploration":
+            raise ValueError("unsupported optimizer control action")
+        run = self._optimizer.get_run(event.optimization_run_id)
+        if run.context.install_id != event.install_id:
+            raise ValueError("optimizer control install_id does not own the CPBO run")
+        if not _same_machine_id(run.context.machine_id, event.machine_id):
+            raise ValueError("optimizer control machine_id does not own the CPBO run")
+        self.resume_local_exploration(
+            run.run_id,
+            control_event_id=event.request_id,
+        )
+        state = self._optimizer.get_state(run.run_id)
+        current_shot_id = state.previous_valid_shot_id
+        if current_shot_id is None:
+            raise ValueError("resumed CPBO run has no current physical shot")
+        shot = self._shots.get(current_shot_id)
+        if shot is None:
+            raise ValueError("canonical current shot for resumed CPBO run is missing")
+        current_recipe = _known_recipe(shot)
+        if current_recipe is None:
+            raise ValueError("resumed CPBO shot no longer has complete recipe controls")
+        suggestion = (
+            self._optimizer.get_pending_suggestion(run.run_id)
+            or self._optimizer.suggest_next(run.run_id)
+        )
+        recommendation = self._machine_recommendation(
+            suggestion,
+            shot,
+            current_recipe,
+            current_machine_state=current_machine_state,
+        )
+        self._recommendation_sink(recommendation)
+        return CPBOShotOutcome(run.run_id, recommendation, False)
+
+    def local_optimization_status(
+        self,
+        run_id: str,
+    ) -> CPBOLocalOptimizationStatus:
+        return self._status_from_state(run_id, self._optimizer.get_state(run_id))
+
+    def local_optimization_status_for_shot(
+        self,
+        shot: ShotRecord,
+    ) -> CPBOLocalOptimizationStatus | None:
+        try:
+            context = self._context_factory(shot)
+        except ValueError:
+            return None
+        run = self._optimizer.active_run(
+            context,
+            comparison_mode=self._comparison_mode,
+        )
+        if run is None:
+            return None
+        return self.local_optimization_status(run.run_id)
+
+    @staticmethod
+    def _status_from_state(run_id: str, state) -> CPBOLocalOptimizationStatus:
+        transitions = state.trust_region_state.transitions
+        return CPBOLocalOptimizationStatus(
+            optimization_run_id=run_id,
+            locally_converged=state.trust_region_state.locally_converged,
+            trust_region_length=state.trust_region_state.length,
+            trust_region_success_count=state.trust_region_state.success_count,
+            trust_region_failure_count=state.trust_region_state.failure_count,
+            last_transition_action=(
+                transitions[-1].action if transitions else None
+            ),
+        )
 
     def _machine_recommendation(
         self,

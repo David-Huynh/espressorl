@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-import math
-
 import torch
 from torch import Tensor
 
-from espresso_rl.domain.cpbo import PreferenceLabel, TrustRegionState, normalized_recipe
+from espresso_rl.domain.cpbo import (
+    PreferenceLabel,
+    TrustRegionAction,
+    TrustRegionState,
+    TrustRegionTransition,
+    normalized_recipe,
+)
 from espresso_rl.optimizers.cpbo_config import TrustRegionConfig
 
 
@@ -21,38 +25,100 @@ def update_trust_region(
     config: TrustRegionConfig,
 ) -> TrustRegionState:
     label = PreferenceLabel(label)
-    restart_was_pending = state.restart_pending
+    if state.locally_converged:
+        raise ValueError("a converged local trust region must be resumed before updating")
+
     if label == PreferenceLabel.NEW_BETTER:
         center = normalized_recipe(candidate_center)
         success_count = state.success_count + 1
         failure_count = 0
+        action = TrustRegionAction.IMPROVED
     else:
         center = state.center
         success_count = 0
         failure_count = state.failure_count + 1
+        action = TrustRegionAction.NON_IMPROVEMENT
 
     length = state.length
+    locally_converged = False
     if success_count >= config.success_tolerance:
         length = min(2.0 * length, config.maximum_length)
         success_count = 0
         failure_count = 0
+        action = TrustRegionAction.EXPANDED
     elif failure_count >= config.failure_tolerance:
-        length = length / 2.0
+        length = max(config.minimum_length, length / 2.0)
         success_count = 0
         failure_count = 0
-
-    restart_pending = False if restart_was_pending else state.restart_pending
-    if length < config.minimum_length:
-        length = config.initial_length
-        success_count = 0
-        failure_count = 0
-        restart_pending = True
+        locally_converged = length <= config.minimum_length
+        action = (
+            TrustRegionAction.CONVERGED
+            if locally_converged
+            else TrustRegionAction.CONTRACTED
+        )
+    transition = TrustRegionTransition(
+        action=action,
+        label=label,
+        center_before=state.center,
+        center_after=center,
+        length_before=state.length,
+        length_after=length,
+        success_count=success_count,
+        failure_count=failure_count,
+        success_tolerance=config.success_tolerance,
+        failure_tolerance=config.failure_tolerance,
+        minimum_length=config.minimum_length,
+        maximum_length=config.maximum_length,
+    )
     return TrustRegionState(
         center=center,
         length=length,
         success_count=success_count,
         failure_count=failure_count,
-        restart_pending=restart_pending,
+        restart_pending=False,
+        locally_converged=locally_converged,
+        transitions=(*state.transitions, transition),
+    )
+
+
+def resume_trust_region(
+    state: TrustRegionState,
+    *,
+    center: tuple[float, float, float],
+    config: TrustRegionConfig,
+    after_comparison_id: str | None,
+    incumbent_shot_id: str,
+    created_at: int,
+    control_event_id: str | None = None,
+) -> TrustRegionState:
+    if not state.locally_converged:
+        raise ValueError("only a converged local trust region can be resumed")
+    resumed_center = normalized_recipe(center)
+    transition = TrustRegionTransition(
+        action=TrustRegionAction.RESUMED,
+        center_before=state.center,
+        center_after=resumed_center,
+        length_before=state.length,
+        length_after=config.initial_length,
+        success_count=0,
+        failure_count=0,
+        success_tolerance=config.success_tolerance,
+        failure_tolerance=config.failure_tolerance,
+        minimum_length=config.minimum_length,
+        maximum_length=config.maximum_length,
+        incumbent_shot_id=incumbent_shot_id,
+        after_comparison_id=after_comparison_id,
+        control_event_id=control_event_id,
+        created_at=created_at,
+    )
+    return TrustRegionState(
+        center=resumed_center,
+        length=config.initial_length,
+        success_count=0,
+        failure_count=0,
+        restart_pending=False,
+        locally_converged=False,
+        transitions=(*state.transitions, transition),
     )
 
 
@@ -86,6 +152,3 @@ def trust_region_bounds(
 def validate_q_one() -> None:
     if CPBO_BATCH_SIZE != 1 or CPBO_DIMENSION != 3:
         raise AssertionError("espresso CPBO requires q=1 in a three-dimensional recipe space")
-    expected_failure = math.ceil(max(4 / CPBO_BATCH_SIZE, CPBO_DIMENSION / CPBO_BATCH_SIZE))
-    if expected_failure != 4:
-        raise AssertionError("unexpected TuRPBO failure tolerance")

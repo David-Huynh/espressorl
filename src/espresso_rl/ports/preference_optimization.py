@@ -50,6 +50,18 @@ class PreferentialOptimizerEngine(Protocol):
     ) -> TrustRegionState:
         ...
 
+    def resume_trust_region_state(
+        self,
+        state: TrustRegionState,
+        *,
+        center: tuple[float, float, float],
+        after_comparison_id: str | None,
+        incumbent_shot_id: str,
+        created_at: int,
+        control_event_id: str | None = None,
+    ) -> TrustRegionState:
+        ...
+
 
 class PreferentialOptimizationRepository(Protocol):
     def find_active_run(self, context: OptimizationRunContext) -> OptimizationRun | None:
@@ -101,6 +113,14 @@ class PreferentialOptimizationRepository(Protocol):
         ...
 
     def get_state(self, run_id: str) -> OptimizerState | None:
+        ...
+
+    def save_state(
+        self,
+        state: OptimizerState,
+        *,
+        expected_updated_at: int,
+    ) -> None:
         ...
 
     def get_pending_suggestion(self, run_id: str) -> Suggestion | None:

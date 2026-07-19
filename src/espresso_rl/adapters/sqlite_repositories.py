@@ -786,6 +786,33 @@ class SQLitePreferentialOptimizationRepository:
         ).fetchone()
         return state_from_json(row["payload_json"]) if row else None
 
+    def save_state(
+        self,
+        state: OptimizerState,
+        *,
+        expected_updated_at: int,
+    ) -> None:
+        with self._lock, self._store.conn:
+            cursor = self._store.conn.execute(
+                """
+                UPDATE cpbo_states
+                SET updated_at=?, payload_json=?
+                WHERE run_id=? AND updated_at=?
+                  AND EXISTS (
+                      SELECT 1 FROM cpbo_runs
+                      WHERE cpbo_runs.run_id=cpbo_states.run_id AND active=1
+                  )
+                """,
+                (
+                    state.updated_at,
+                    state_to_json(state),
+                    state.optimization_run_id,
+                    expected_updated_at,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("optimizer state changed before it could be saved")
+
     def get_pending_suggestion(self, run_id: str) -> Suggestion | None:
         row = self._store.conn.execute(
             """

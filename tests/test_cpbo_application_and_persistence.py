@@ -11,7 +11,11 @@ from espresso_rl.adapters.sqlite_repositories import (
     SQLitePreferentialOptimizationRepository,
     SQLiteStore,
 )
-from espresso_rl.adapters.cpbo_serialization import shot_from_json
+from espresso_rl.adapters.cpbo_serialization import (
+    shot_from_json,
+    state_from_json,
+    state_to_json,
+)
 from espresso_rl.application.preference_optimization import (
     ConsecutivePreferenceOptimizationService,
 )
@@ -33,12 +37,17 @@ from espresso_rl.domain.cpbo import (
 from espresso_rl.domain.models import GrinderStepDirection, Recipe
 from espresso_rl.domain.taste_goal import TasteGoal
 from espresso_rl.optimizers.cpbo_config import TrustRegionConfig
-from espresso_rl.optimizers.cpbo_trust_region import update_trust_region
+from espresso_rl.optimizers.cpbo_trust_region import resume_trust_region, update_trust_region
 
 
 class RecordingEngine:
-    def __init__(self, proposed_grinds: list[float] | None = None) -> None:
+    def __init__(
+        self,
+        proposed_grinds: list[float] | None = None,
+        trust_config: TrustRegionConfig | None = None,
+    ) -> None:
         self.proposed_grinds = list(proposed_grinds or [6.0, 7.0, 8.0])
+        self.trust_config = trust_config or TrustRegionConfig()
         self.anchors: list[str] = []
 
     def suggest(self, *, run, recipes, shots, comparisons, state, now):
@@ -105,7 +114,27 @@ class RecordingEngine:
             state,
             label,
             candidate_center=candidate_center,
-            config=TrustRegionConfig(),
+            config=self.trust_config,
+        )
+
+    def resume_trust_region_state(
+        self,
+        state,
+        *,
+        center,
+        after_comparison_id,
+        incumbent_shot_id,
+        created_at,
+        control_event_id=None,
+    ):
+        return resume_trust_region(
+            state,
+            center=center,
+            config=self.trust_config,
+            after_comparison_id=after_comparison_id,
+            incumbent_shot_id=incumbent_shot_id,
+            created_at=created_at,
+            control_event_id=control_event_id,
         )
 
 
@@ -127,6 +156,7 @@ class CPBOApplicationTests(unittest.TestCase):
             engine,
             recipe_space_factory,
             random_seed=11,
+            initial_trust_region_length=engine.trust_config.initial_length,
             clock=self.clock,
         )
         request = service.initialize(run_context(), baseline_recipe(), comparison_mode=mode)
@@ -150,6 +180,18 @@ class CPBOApplicationTests(unittest.TestCase):
         self.assertEqual(state.previous_valid_shot_id, "baseline")
         self.assertEqual(state.incumbent_shot_id, "baseline")
         self.assertEqual(self.repository.list_comparisons(run_id), [])
+
+    def test_legacy_trust_region_state_decodes_without_restart_semantics(self) -> None:
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)
+        payload = json.loads(state_to_json(service.get_state(run_id)))
+        trust = payload["trust_region_state"]
+        trust.pop("locally_converged")
+        trust.pop("transitions")
+
+        decoded = state_from_json(json.dumps(payload))
+
+        self.assertFalse(decoded.trust_region_state.locally_converged)
+        self.assertEqual(decoded.trust_region_state.transitions, ())
 
     def test_global_mode_loss_still_advances_previous_anchor(self) -> None:
         service, engine, run_id = self.service(ComparisonMode.GLOBAL_PREVIOUS)
@@ -188,7 +230,59 @@ class CPBOApplicationTests(unittest.TestCase):
             state = service.record_preference(run_id, shot_id, "baseline", label)
             self.assertEqual(state.incumbent_shot_id, "baseline")
         self.assertEqual(engine.anchors, ["baseline", "baseline"])
-        self.assertEqual(service.get_state(run_id).trust_region_state.failure_count, 2)
+        trust = service.get_state(run_id).trust_region_state
+        self.assertEqual(trust.failure_count, 0)
+        self.assertEqual(trust.length, 0.4)
+
+    def test_resume_preserves_evidence_incumbent_and_model_checkpoint(self) -> None:
+        trust_config = TrustRegionConfig(initial_length=0.5**6)
+        engine = RecordingEngine([6.0, 7.0, 8.0], trust_config)
+        service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT, engine)
+        for index in range(2):
+            suggestion = service.suggest_next(run_id)
+            shot_id = f"candidate_{index + 1}"
+            service.record_shot(
+                run_id,
+                suggestion.recipe,
+                PhysicalShotStatus.VALID,
+                shot_id=shot_id,
+                started_at=3 + index * 2,
+                completed_at=4 + index * 2,
+            )
+            state = service.record_preference(
+                run_id,
+                shot_id,
+                "baseline",
+                PreferenceLabel.ANCHOR_BETTER,
+            )
+
+        self.assertTrue(state.trust_region_state.locally_converged)
+        comparisons_before = self.repository.list_comparisons(run_id)
+        checkpoint_before = state.model_checkpoint
+        resumed = service.resume_local_exploration(
+            run_id,
+            control_event_id="resume_request_1",
+        )
+        self.assertFalse(resumed.trust_region_state.locally_converged)
+        self.assertEqual(resumed.incumbent_shot_id, "baseline")
+        self.assertEqual(resumed.model_checkpoint, checkpoint_before)
+        self.assertEqual(self.repository.list_comparisons(run_id), comparisons_before)
+        self.assertEqual(resumed.trust_region_state.length, trust_config.initial_length)
+        self.assertEqual(
+            resumed.trust_region_state.transitions[-1].after_comparison_id,
+            comparisons_before[-1].comparison_id,
+        )
+        duplicate = service.resume_local_exploration(
+            run_id,
+            control_event_id="resume_request_1",
+        )
+        self.assertEqual(duplicate, resumed)
+        with self.assertRaisesRegex(ValueError, "has not converged"):
+            service.resume_local_exploration(
+                run_id,
+                control_event_id="resume_request_2",
+            )
+        self.assertIsNotNone(service.suggest_next(run_id))
 
     def test_best_mode_only_new_better_replaces_incumbent(self) -> None:
         service, _, run_id = self.service(ComparisonMode.BEST_INCUMBENT)

@@ -15,7 +15,13 @@ from .models import (
     ShotType,
 )
 from .optimization import DEFAULT_OPTIMIZER_MODE, normalize_optimizer_mode
-from .cpbo import CPBOProfile, ComparisonMode, PreferenceLabel, RecipeDomain
+from .cpbo import (
+    CPBOProfile,
+    ComparisonMode,
+    OptimizerControlAction,
+    PreferenceLabel,
+    RecipeDomain,
+)
 from .recipe_limits import (
     RECIPE_DOMAIN_DOSE_MAX_G,
     RECIPE_DOMAIN_DOSE_MIN_G,
@@ -789,6 +795,45 @@ class OptimizerSettingsEvent:
         if self.recipe_domain is not None and not isinstance(self.recipe_domain, RecipeDomain):
             object.__setattr__(self, "recipe_domain", RecipeDomain.from_dict(self.recipe_domain))
         object.__setattr__(self, "source", _optional_string(self.source, "source", 80) or "unknown")
+
+
+@dataclass(frozen=True)
+class OptimizerControlEvent:
+    request_id: str
+    optimization_run_id: str
+    action: OptimizerControlAction
+    install_id: str
+    machine_id: str
+    timestamp: int
+    source: str = "unknown"
+    schema_version: int = 1
+
+    event_type: str = field(default="optimizer_control", init=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported optimizer control schema_version")
+        for field_name in (
+            "request_id",
+            "optimization_run_id",
+            "install_id",
+            "machine_id",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip() or len(value) > 256:
+                raise ValueError(f"optimizer control {field_name} is invalid")
+        if (
+            isinstance(self.timestamp, bool)
+            or not isinstance(self.timestamp, int)
+            or self.timestamp < 0
+        ):
+            raise ValueError("optimizer control timestamp must be a nonnegative integer")
+        object.__setattr__(self, "action", OptimizerControlAction(self.action))
+        object.__setattr__(
+            self,
+            "source",
+            _optional_string(self.source, "source", 80) or "unknown",
+        )
 
 
 def _optional_sha256(value: Any, field_name: str) -> str | None:

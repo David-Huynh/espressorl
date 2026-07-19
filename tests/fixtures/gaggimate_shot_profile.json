@@ -60,5 +60,12 @@
   "final_valve_open": true,
   "profile_temperature_c": 90.0,
   "final_phase_temperature_c": 89.8,
-  "shot_end_state": "finished"
+  "shot_end_state": "finished",
+  "delivery": {
+    "attempt_id": "a-00000001-00000001-000000006553f100-0123456789abcdef",
+    "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "artifact_revision": 1,
+    "encoding_version": 1,
+    "reprocess": false
+  }
 }

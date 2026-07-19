@@ -42,6 +42,19 @@ class ComparisonMode(str, Enum):
     BEST_INCUMBENT = "best_incumbent"
 
 
+class TrustRegionAction(str, Enum):
+    IMPROVED = "improved"
+    EXPANDED = "expanded"
+    NON_IMPROVEMENT = "non_improvement"
+    CONTRACTED = "contracted"
+    CONVERGED = "converged"
+    RESUMED = "resumed"
+
+
+class OptimizerControlAction(str, Enum):
+    RESUME_LOCAL_EXPLORATION = "resume_local_exploration"
+
+
 class CPBOProfile(str, Enum):
     APPLICATION = "application"
     PAPER_FIDELITY = "paper_fidelity"
@@ -729,12 +742,94 @@ class PendingPreferenceRequest:
 
 
 @dataclass(frozen=True)
+class TrustRegionTransition:
+    action: TrustRegionAction
+    center_before: tuple[float, float, float]
+    center_after: tuple[float, float, float]
+    length_before: float
+    length_after: float
+    success_count: int
+    failure_count: int
+    success_tolerance: int
+    failure_tolerance: int
+    minimum_length: float
+    maximum_length: float
+    label: PreferenceLabel | None = None
+    comparison_id: str | None = None
+    new_shot_id: str | None = None
+    anchor_shot_id: str | None = None
+    incumbent_shot_id: str | None = None
+    after_comparison_id: str | None = None
+    control_event_id: str | None = None
+    created_at: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "action", TrustRegionAction(self.action))
+        object.__setattr__(self, "center_before", normalized_recipe(self.center_before))
+        object.__setattr__(self, "center_after", normalized_recipe(self.center_after))
+        if self.label is not None:
+            object.__setattr__(self, "label", PreferenceLabel(self.label))
+        lengths = (
+            self.length_before,
+            self.length_after,
+            self.minimum_length,
+            self.maximum_length,
+        )
+        if any(not math.isfinite(value) or value <= 0 for value in lengths):
+            raise ValueError("trust-region transition lengths must be positive and finite")
+        if self.minimum_length > self.maximum_length:
+            raise ValueError("trust-region transition length bounds are invalid")
+        if not self.minimum_length <= self.length_after <= self.maximum_length:
+            raise ValueError("trust-region transition result is outside configured bounds")
+        counters = (
+            self.success_count,
+            self.failure_count,
+            self.success_tolerance,
+            self.failure_tolerance,
+        )
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in counters):
+            raise ValueError("trust-region transition counters must be integers")
+        if self.success_count < 0 or self.failure_count < 0:
+            raise ValueError("trust-region transition counters must be nonnegative")
+        if self.success_tolerance < 1 or self.failure_tolerance < 1:
+            raise ValueError("trust-region transition tolerances must be positive")
+        if self.success_count and self.failure_count:
+            raise ValueError("trust-region transition counters cannot both be nonzero")
+        if self.action == TrustRegionAction.RESUMED:
+            if self.label is not None or self.comparison_id is not None:
+                raise ValueError("trust-region resume transition cannot be a comparison")
+        elif self.label is None:
+            raise ValueError("trust-region comparison transition requires a label")
+        for field_name in (
+            "comparison_id",
+            "new_shot_id",
+            "anchor_shot_id",
+            "incumbent_shot_id",
+            "after_comparison_id",
+            "control_event_id",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and (
+                not isinstance(value, str) or not value.strip() or len(value) > 256
+            ):
+                raise ValueError(f"trust-region transition {field_name} is invalid")
+        if self.created_at is not None and (
+            isinstance(self.created_at, bool)
+            or not isinstance(self.created_at, int)
+            or self.created_at < 0
+        ):
+            raise ValueError("trust-region transition created_at is invalid")
+
+
+@dataclass(frozen=True)
 class TrustRegionState:
     center: tuple[float, float, float]
     length: float = 0.8
     success_count: int = 0
     failure_count: int = 0
     restart_pending: bool = False
+    locally_converged: bool = False
+    transitions: tuple[TrustRegionTransition, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "center", normalized_recipe(self.center))
@@ -744,6 +839,16 @@ class TrustRegionState:
             raise ValueError("trust-region counters must be nonnegative")
         if self.success_count and self.failure_count:
             raise ValueError("success and failure counters cannot both be nonzero")
+        if not isinstance(self.restart_pending, bool) or not isinstance(self.locally_converged, bool):
+            raise ValueError("trust-region flags must be boolean")
+        if self.locally_converged and (self.success_count or self.failure_count):
+            raise ValueError("a converged trust region cannot retain transition counters")
+        if self.locally_converged and self.restart_pending:
+            raise ValueError("a converged trust region cannot request a restart")
+        transitions = tuple(self.transitions)
+        if any(not isinstance(item, TrustRegionTransition) for item in transitions):
+            raise ValueError("trust-region transition history is invalid")
+        object.__setattr__(self, "transitions", transitions)
 
 
 @dataclass(frozen=True)
@@ -849,12 +954,24 @@ class TrustRegionDiagnostics:
     failure_count: int
     restart_pending: bool
     full_domain_proposal: bool
+    locally_converged: bool = False
+    last_transition_action: TrustRegionAction | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "lower_bounds", normalized_recipe(self.lower_bounds))
         object.__setattr__(self, "upper_bounds", normalized_recipe(self.upper_bounds))
         if any(low > high for low, high in zip(self.lower_bounds, self.upper_bounds)):
             raise ValueError("trust-region lower bounds exceed upper bounds")
+        if self.last_transition_action is not None:
+            object.__setattr__(
+                self,
+                "last_transition_action",
+                TrustRegionAction(self.last_transition_action),
+            )
+
+
+class LocalOptimizationConvergedError(ValueError):
+    """Raised when local CPBO has converged and requires an explicit resume."""
 
 
 @dataclass(frozen=True)

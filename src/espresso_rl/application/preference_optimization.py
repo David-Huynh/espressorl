@@ -7,6 +7,7 @@ from typing import Any, Callable, Mapping
 from espresso_rl.domain.cpbo import (
     CPBO_CONFIGURATION_VERSION,
     ComparisonMode,
+    LocalOptimizationConvergedError,
     ModelRecommendation,
     ObservedRecipe,
     OptimizationRun,
@@ -21,6 +22,7 @@ from espresso_rl.domain.cpbo import (
     RecipeSpace,
     ShotRequest,
     Suggestion,
+    TrustRegionAction,
     TrustRegionState,
     new_cpbo_id,
 )
@@ -179,6 +181,13 @@ class ConsecutivePreferenceOptimizationService:
             if pending is None:
                 raise ValueError("optimizer state references a missing pending suggestion")
             return pending
+        if (
+            run.comparison_mode == ComparisonMode.BEST_INCUMBENT
+            and state.trust_region_state.locally_converged
+        ):
+            raise LocalOptimizationConvergedError(
+                "local CPBO converged; resume exploration before requesting another suggestion"
+            )
         recipes = self._repository.list_recipes(run_id)
         shots = self._repository.list_shots(run_id)
         comparisons = self._repository.list_comparisons(run_id)
@@ -350,6 +359,12 @@ class ConsecutivePreferenceOptimizationService:
             )
         if label == PreferenceLabel.NEW_BETTER and anchor_shot_id == incumbent_shot_id:
             incumbent_shot_id = new_shot_id
+        if pending.comparison_mode == ComparisonMode.BEST_INCUMBENT:
+            trust_region_state = self._annotate_latest_trust_region_transition(
+                trust_region_state,
+                comparison=comparison,
+                incumbent_shot_id=incumbent_shot_id,
+            )
         updated_state = replace(
             state,
             previous_valid_shot_id=new_shot_id,
@@ -362,6 +377,70 @@ class ConsecutivePreferenceOptimizationService:
             updated_at=now,
         )
         self._repository.record_comparison(comparison, updated_state)
+        return updated_state
+
+    def resume_local_exploration(
+        self,
+        run_id: str,
+        *,
+        control_event_id: str | None = None,
+    ) -> OptimizerState:
+        run = self._require_run(run_id)
+        state = self._require_state(run_id)
+        if not run.active:
+            raise ValueError("cannot resume an inactive CPBO run")
+        if run.comparison_mode != ComparisonMode.BEST_INCUMBENT:
+            raise ValueError("only best-incumbent CPBO has local exploration to resume")
+        if not state.trust_region_state.locally_converged:
+            if (
+                control_event_id is not None
+                and state.trust_region_state.transitions
+                and state.trust_region_state.transitions[-1].action
+                == TrustRegionAction.RESUMED
+                and state.trust_region_state.transitions[-1].control_event_id
+                == control_event_id
+            ):
+                return state
+            raise ValueError("local CPBO has not converged")
+        if (
+            state.pending_recipe_id is not None
+            or state.pending_shot_id is not None
+            or self._repository.get_pending_suggestion(run_id) is not None
+        ):
+            raise ValueError("cannot resume local exploration while CPBO work is pending")
+        incumbent_id = state.incumbent_shot_id
+        if incumbent_id is None:
+            raise ValueError("cannot resume local exploration without an incumbent")
+        incumbent_shot = self._repository.get_shot(incumbent_id)
+        if incumbent_shot is None:
+            raise ValueError("local CPBO incumbent shot is missing")
+        incumbent_recipe = self._repository.get_recipe(incumbent_shot.recipe_id)
+        if incumbent_recipe is None:
+            raise ValueError("local CPBO incumbent recipe is missing")
+        comparisons = sorted(
+            self._repository.list_comparisons(run_id),
+            key=lambda row: (row.created_at, row.comparison_id),
+        )
+        now = self._clock()
+        resumed = self._optimizer.resume_trust_region_state(
+            state.trust_region_state,
+            center=self._bounded_center(incumbent_recipe.normalized_x),
+            after_comparison_id=(
+                comparisons[-1].comparison_id if comparisons else None
+            ),
+            incumbent_shot_id=incumbent_id,
+            created_at=now,
+            control_event_id=control_event_id,
+        )
+        updated_state = replace(
+            state,
+            trust_region_state=resumed,
+            updated_at=now,
+        )
+        self._repository.save_state(
+            updated_state,
+            expected_updated_at=state.updated_at,
+        )
         return updated_state
 
     def correct_shot_recipe(
@@ -808,6 +887,17 @@ class ConsecutivePreferenceOptimizationService:
             return stored_recipe
 
         shots_by_id = {shot.shot_id: shot for shot in valid_shots}
+        resume_transitions = tuple(
+            transition
+            for transition in state.trust_region_state.transitions
+            if transition.action == TrustRegionAction.RESUMED
+        )
+        resume_markers = {
+            transition.after_comparison_id: transition
+            for transition in resume_transitions
+        }
+        if len(resume_markers) != len(resume_transitions):
+            raise ValueError("trust-region state contains duplicate resume markers")
         if valid_shots:
             baseline_shot = valid_shots[0]
             incumbent_shot_id: str | None = baseline_shot.shot_id
@@ -838,7 +928,38 @@ class ConsecutivePreferenceOptimizationService:
                     and comparison.anchor_shot_id == incumbent_shot_id
                 ):
                     incumbent_shot_id = comparison.new_shot_id
+                if comparison.comparison_mode == ComparisonMode.BEST_INCUMBENT:
+                    trust_region_state = self._annotate_latest_trust_region_transition(
+                        trust_region_state,
+                        comparison=comparison,
+                        incumbent_shot_id=incumbent_shot_id,
+                    )
                 previous_valid_shot_id = comparison.new_shot_id
+                marker = resume_markers.get(comparison.comparison_id)
+                if marker is not None:
+                    if not trust_region_state.locally_converged:
+                        raise ValueError(
+                            "trust-region resume marker does not follow convergence"
+                        )
+                    if incumbent_shot_id is None:
+                        raise ValueError("trust-region resume marker has no incumbent")
+                    trust_region_state = self._optimizer.resume_trust_region_state(
+                        trust_region_state,
+                        center=self._bounded_center(
+                            recipe_for(shots_by_id[incumbent_shot_id]).normalized_x
+                        ),
+                        after_comparison_id=comparison.comparison_id,
+                        incumbent_shot_id=incumbent_shot_id,
+                        created_at=marker.created_at or comparison.created_at,
+                        control_event_id=marker.control_event_id,
+                    )
+            applied_resume_ids = {
+                transition.after_comparison_id
+                for transition in trust_region_state.transitions
+                if transition.action == TrustRegionAction.RESUMED
+            }
+            if applied_resume_ids != set(resume_markers):
+                raise ValueError("trust-region resume marker references missing comparison history")
         else:
             incumbent_shot_id = None
             previous_valid_shot_id = None
@@ -863,6 +984,28 @@ class ConsecutivePreferenceOptimizationService:
             pending_shot_id=state.pending_shot_id if awaiting_preference else None,
             pending_suggestion_json=state.pending_suggestion_json if awaiting_preference else None,
             updated_at=self._clock(),
+        )
+
+    @staticmethod
+    def _annotate_latest_trust_region_transition(
+        state: TrustRegionState,
+        *,
+        comparison: PreferenceComparison,
+        incumbent_shot_id: str | None,
+    ) -> TrustRegionState:
+        if not state.transitions:
+            raise ValueError("trust-region update did not produce an audit transition")
+        transition = replace(
+            state.transitions[-1],
+            comparison_id=comparison.comparison_id,
+            new_shot_id=comparison.new_shot_id,
+            anchor_shot_id=comparison.anchor_shot_id,
+            incumbent_shot_id=incumbent_shot_id,
+            created_at=comparison.created_at,
+        )
+        return replace(
+            state,
+            transitions=(*state.transitions[:-1], transition),
         )
 
     @staticmethod

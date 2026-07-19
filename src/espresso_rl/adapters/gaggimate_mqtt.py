@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+from dataclasses import dataclass
 from collections.abc import Callable
 from typing import Any
 
@@ -13,6 +14,7 @@ from espresso_rl.config import Config
 from espresso_rl.domain.events import (
     LocalResetEvent,
     MachineStateEvent,
+    OptimizerControlEvent,
     OptimizerSettingsEvent,
     PreferenceFeedbackEvent,
     RecommendationApplyEvent,
@@ -42,10 +44,22 @@ DECISION_TOPIC = "gaggimate/+/rl/recommendation/decision"
 APPLY_TOPIC = "gaggimate/+/rl/recommendation/apply"
 MACHINE_STATE_TOPIC = "gaggimate/+/machine/state"
 OPTIMIZER_SETTINGS_TOPIC = "gaggimate/+/rl/settings"
+OPTIMIZER_CONTROL_TOPIC = "gaggimate/+/rl/control"
 LOCAL_RESET_TOPIC = "gaggimate/+/rl/local/reset"
 LIVE_SHOT_TOPIC = "gaggimate/+/rl/shot/live"
 SHOT_ACK_EVENT_TYPE = "shot_delivery_ack"
 SHOT_ACK_TOPIC_SUFFIX = "rl/shot/ack"
+
+
+@dataclass(frozen=True)
+class _ShotDeliveryIdentity:
+    attempt_id: str
+    payload_hash: str
+    artifact_revision: int
+    encoding_version: int
+    reprocess: bool
+
+
 # Older Gaggimate firmware has an 8 KiB MQTT packet buffer. Leave room for
 # MQTT framing/topic bytes, and keep the UI's recent-shot JSON below its 4 KiB cap.
 STATUS_PAYLOAD_MAX_BYTES = 7_168
@@ -93,6 +107,19 @@ _CORRECTION_FIELDS = _CORRECTION_REQUIRED_FIELDS | {
     "target_yield_g",
     "beverage_out_g",
 }
+_OPTIMIZER_CONTROL_FIELDS = frozenset(
+    {
+        "event_type",
+        "schema_version",
+        "request_id",
+        "optimization_run_id",
+        "action",
+        "install_id",
+        "machine_id",
+        "timestamp",
+        "source",
+    }
+)
 
 
 def _encode_status_payload(machine_id: str, status: dict[str, Any]) -> tuple[str, int, bool]:
@@ -165,6 +192,7 @@ class GaggimateMQTTClient:
         on_optimizer_settings: Callable[[OptimizerSettingsEvent], None] | None = None,
         on_local_reset: Callable[[LocalResetEvent], None] | None = None,
         on_live_shot: Callable[[LiveShotEvent], None] | None = None,
+        on_optimizer_control: Callable[[OptimizerControlEvent], None] | None = None,
     ) -> None:
         self._config = config
         self._on_shot = on_shot
@@ -177,6 +205,7 @@ class GaggimateMQTTClient:
         self._on_optimizer_settings = on_optimizer_settings or (lambda event: None)
         self._on_local_reset = on_local_reset or (lambda event: None)
         self._on_live_shot = on_live_shot or (lambda event: None)
+        self._on_optimizer_control = on_optimizer_control or (lambda event: None)
         self._status_omitted_recent_counts: dict[str, int] = {}
         self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if config.mqtt_user:
@@ -276,10 +305,11 @@ class GaggimateMQTTClient:
             client.subscribe(APPLY_TOPIC)
             client.subscribe(MACHINE_STATE_TOPIC)
             client.subscribe(OPTIMIZER_SETTINGS_TOPIC)
+            client.subscribe(OPTIMIZER_CONTROL_TOPIC)
             client.subscribe(LOCAL_RESET_TOPIC)
             client.subscribe(LIVE_SHOT_TOPIC)
             logger.info(
-                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
+                "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
                 PREFERENCE_TOPIC,
                 CORRECTION_TOPIC,
@@ -288,6 +318,7 @@ class GaggimateMQTTClient:
                 APPLY_TOPIC,
                 MACHINE_STATE_TOPIC,
                 OPTIMIZER_SETTINGS_TOPIC,
+                OPTIMIZER_CONTROL_TOPIC,
                 LOCAL_RESET_TOPIC,
                 LIVE_SHOT_TOPIC,
             )
@@ -328,6 +359,8 @@ class GaggimateMQTTClient:
                 self._on_machine_state(self.translate_machine_state_payload(payload, mac))
             elif msg.topic.endswith("/rl/settings"):
                 self._on_optimizer_settings(self.translate_optimizer_settings_payload(payload, mac))
+            elif msg.topic.endswith("/rl/control"):
+                self._on_optimizer_control(self.translate_optimizer_control_payload(payload, mac))
             elif msg.topic.endswith("/rl/local/reset"):
                 self._on_local_reset(self.translate_local_reset_payload(payload, mac))
         except Exception:
@@ -335,17 +368,20 @@ class GaggimateMQTTClient:
 
     def _handle_shot_message(self, payload: Any, mac: str) -> None:
         shot_id = _acknowledgeable_shot_id(payload)
+        identity: _ShotDeliveryIdentity | None = None
         try:
             if not isinstance(payload, dict):
                 raise ValueError("shot profile must be an object")
+            identity = _shot_delivery_identity(payload)
             event = self.translate_shot_payload(payload, mac)
             shot_id = event.shot_id
         except (TypeError, ValueError):
-            if shot_id is not None:
+            if shot_id is not None and identity is not None:
                 self._publish_shot_ack(
                     mac,
                     shot_id,
                     f"gaggimate:{mac}",
+                    identity,
                     outcome="permanent_rejection",
                     reason="invalid_shot",
                 )
@@ -361,6 +397,7 @@ class GaggimateMQTTClient:
                 mac,
                 shot_id,
                 event.machine_id,
+                identity,
                 outcome="permanent_rejection",
                 reason="invalid_shot",
             )
@@ -371,6 +408,7 @@ class GaggimateMQTTClient:
                 mac,
                 shot_id,
                 event.machine_id,
+                identity,
                 outcome="transient_failure",
                 reason="ingest_unavailable",
             )
@@ -381,6 +419,7 @@ class GaggimateMQTTClient:
             mac,
             shot_id,
             event.machine_id,
+            identity,
             outcome=outcome,
             reason=reason,
             preference_request=preference_request,
@@ -391,6 +430,7 @@ class GaggimateMQTTClient:
         mac: str,
         shot_id: str,
         machine_id: str,
+        identity: _ShotDeliveryIdentity,
         *,
         outcome: str,
         reason: str,
@@ -402,9 +442,13 @@ class GaggimateMQTTClient:
         retryable = outcome == "transient_failure"
         payload = {
             "event_type": SHOT_ACK_EVENT_TYPE,
-            "schema_version": 1,
+            "schema_version": 2,
             "shot_id": shot_id,
             "machine_id": machine_id,
+            "attempt_id": identity.attempt_id,
+            "payload_hash": identity.payload_hash,
+            "artifact_revision": identity.artifact_revision,
+            "encoding_version": identity.encoding_version,
             "outcome": outcome,
             "retryable": retryable,
             "reason": reason,
@@ -431,6 +475,7 @@ class GaggimateMQTTClient:
         if not _same_gaggimate_machine_id(topic_machine_id, machine_id):
             raise ValueError("shot profile machine_id does not match topic")
         payload = dict(payload)
+        payload.pop("delivery", None)
         shot_time_s = payload.get("shot_time_s")
         time_ms, trimmed_to_shot_time = _trim_profile_payload_to_shot_time(
             payload,
@@ -795,6 +840,45 @@ class GaggimateMQTTClient:
             source=payload.get("source", "gaggimate_mqtt"),
         )
 
+    def translate_optimizer_control_payload(
+        self,
+        payload: dict[str, Any],
+        mac: str,
+    ) -> OptimizerControlEvent:
+        unknown = set(payload) - _OPTIMIZER_CONTROL_FIELDS
+        required = {
+            "event_type",
+            "schema_version",
+            "request_id",
+            "optimization_run_id",
+            "action",
+            "machine_id",
+            "timestamp",
+            "source",
+        }
+        missing = required - set(payload)
+        if unknown or missing:
+            raise ValueError(
+                "optimizer control fields are invalid "
+                f"(missing={sorted(missing)}, unknown={sorted(unknown)})"
+            )
+        if payload["event_type"] != "optimizer_control":
+            raise ValueError("optimizer control event_type is invalid")
+        topic_machine_id = f"gaggimate:{mac}"
+        machine_id = str(payload.get("machine_id") or topic_machine_id)
+        if not _same_gaggimate_machine_id(topic_machine_id, machine_id):
+            raise ValueError("optimizer control machine_id does not match topic")
+        return OptimizerControlEvent(
+            request_id=str(payload["request_id"]),
+            optimization_run_id=str(payload["optimization_run_id"]),
+            action=str(payload["action"]),
+            install_id=str(payload.get("install_id") or self._config.install_id),
+            machine_id=machine_id,
+            timestamp=int(payload["timestamp"]),
+            schema_version=int(payload["schema_version"]),
+            source=str(payload["source"]),
+        )
+
     def translate_local_reset_payload(self, payload: dict[str, Any], mac: str) -> LocalResetEvent:
         return LocalResetEvent(
             install_id=str(payload.get("install_id") or self._config.install_id),
@@ -1021,6 +1105,48 @@ def _acknowledgeable_shot_id(payload: Any) -> str | None:
         return None
     value = value.strip()
     return value if 0 < len(value) <= 256 else None
+
+
+def _shot_delivery_identity(payload: dict[str, Any]) -> _ShotDeliveryIdentity:
+    delivery = _require_exact_object_fields(
+        payload.get("delivery"),
+        frozenset(
+            {
+                "attempt_id",
+                "payload_hash",
+                "artifact_revision",
+                "encoding_version",
+                "reprocess",
+            }
+        ),
+        "shot delivery",
+    )
+    attempt_id = delivery["attempt_id"]
+    payload_hash = delivery["payload_hash"]
+    revision = delivery["artifact_revision"]
+    encoding_version = delivery["encoding_version"]
+    reprocess = delivery["reprocess"]
+    if (
+        not isinstance(attempt_id, str)
+        or not 0 < len(attempt_id.strip()) <= 96
+        or not isinstance(payload_hash, str)
+        or re.fullmatch(r"[0-9a-fA-F]{64}", payload_hash) is None
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+        or isinstance(encoding_version, bool)
+        or not isinstance(encoding_version, int)
+        or encoding_version != 1
+        or not isinstance(reprocess, bool)
+    ):
+        raise ValueError("shot delivery identity is invalid")
+    return _ShotDeliveryIdentity(
+        attempt_id=attempt_id.strip(),
+        payload_hash=payload_hash.lower(),
+        artifact_revision=revision,
+        encoding_version=encoding_version,
+        reprocess=reprocess,
+    )
 
 
 def _shot_delivery_outcome(result: object | None) -> tuple[str, str]:

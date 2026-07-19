@@ -71,6 +71,7 @@ from espresso_rl.domain.cpbo import (
 from espresso_rl.domain.events import (
     LocalResetEvent,
     MachineStateEvent,
+    OptimizerControlEvent,
     OptimizerSettingsEvent,
     PreferenceFeedbackEvent,
     RecommendationApplyEvent,
@@ -241,6 +242,7 @@ def run_public(config: Config) -> None:
             build_status_payload(
                 config=config,
                 service=service,
+                cpbo_runtime=cpbo_runtime,
                 upload_maintenance=upload_maintenance,
                 shot_repo=shot_repo,
                 upload_queue_repo=upload_queue_repo,
@@ -307,6 +309,26 @@ def run_public(config: Config) -> None:
 
     def on_preference(event: PreferenceFeedbackEvent) -> None:
         recommendation = cpbo_runtime.handle_preference(event)
+        if recommendation is None:
+            logger.info(
+                "CPBO preference stored run=%s new=%s anchor=%s label=%s; local optimum converged",
+                event.optimization_run_id,
+                event.new_shot_id,
+                event.anchor_shot_id,
+                event.label.value,
+            )
+            mqtt_client.clear_recommendation(event.machine_id)
+            shot = shot_repo.get(event.new_shot_id)
+            publish_status(
+                event.machine_id,
+                shot.bean_context_id if shot is not None else None,
+                shot.grinder_context_id if shot is not None else None,
+                profile_id=shot.profile_id if shot is not None else None,
+                profile_label=shot.profile_label if shot is not None else None,
+                last_shot_id=event.new_shot_id,
+                taste_goal=event.taste_goal,
+            )
+            return
         logger.info(
             "CPBO preference stored run=%s new=%s anchor=%s label=%s next=%s",
             event.optimization_run_id,
@@ -511,6 +533,35 @@ def run_public(config: Config) -> None:
             mqtt_client.clear_recommendation(event.machine_id)
         publish_status(event.machine_id, None, None, taste_goal=TasteGoal.balanced())
 
+    def on_optimizer_control(event: OptimizerControlEvent) -> None:
+        if event.install_id != config.install_id or not _same_machine_id(
+            event.machine_id,
+            config.machine_id,
+        ):
+            logger.warning("Ignoring optimizer control for unexpected owner")
+            return
+        outcome = cpbo_runtime.handle_optimizer_control(event)
+        recommendation = outcome.recommendation
+        if recommendation is None:
+            raise ValueError("resumed local exploration did not produce a recommendation")
+        mqtt_client.publish_recommendation(recommendation)
+        publish_status(
+            recommendation.machine_id,
+            recommendation.bean_context_id,
+            recommendation.grinder_context_id,
+            profile_id=recommendation.profile_id,
+            last_recommendation_id=recommendation.recommendation_id,
+            last_recommendation_at=recommendation.updated_at,
+            mode=recommendation.mode.value,
+            taste_goal=recommendation.taste_goal,
+        )
+        logger.info(
+            "Resumed local CPBO exploration run=%s request=%s recommendation=%s",
+            event.optimization_run_id,
+            event.request_id,
+            recommendation.recommendation_id,
+        )
+
     def on_machine_state(event: MachineStateEvent) -> None:
         runtime_coordinator.handle_machine_state(event)
 
@@ -524,6 +575,7 @@ def run_public(config: Config) -> None:
         on_apply=on_apply,
         on_machine_state=on_machine_state,
         on_optimizer_settings=on_optimizer_settings,
+        on_optimizer_control=on_optimizer_control,
         on_local_reset=on_local_reset,
         on_live_shot=live_telemetry.handle,
     )
@@ -553,6 +605,7 @@ def run_public(config: Config) -> None:
         upload_maintenance=upload_maintenance,
         shot_repo=shot_repo,
         upload_queue_repo=upload_queue_repo,
+        cpbo_runtime=cpbo_runtime,
     )
     logger.info("Listening for canonical CPBO events via Gaggimate MQTT adapter")
     signal.pause()
@@ -595,6 +648,7 @@ def maybe_publish_startup_recommendation(
     upload_maintenance: UploadQueueMaintenanceService | None = None,
     shot_repo: ShotRepository | None = None,
     upload_queue_repo: UploadQueueRepository | None = None,
+    cpbo_runtime: CPBORuntimeBridge | None = None,
     **_ignored: object,
 ) -> None:
     if config.machine_id == "gaggimate:local":
@@ -616,6 +670,7 @@ def maybe_publish_startup_recommendation(
         build_status_payload(
             config=config,
             service=service,
+            cpbo_runtime=cpbo_runtime,
             upload_maintenance=upload_maintenance,
             shot_repo=shot_repo,
             upload_queue_repo=upload_queue_repo,
@@ -633,6 +688,7 @@ def maybe_publish_startup_recommendation(
 def build_status_payload(
     config: Config,
     service: EspressoRLService,
+    cpbo_runtime: CPBORuntimeBridge,
     upload_maintenance: UploadQueueMaintenanceService | None,
     shot_repo: ShotRepository | None,
     upload_queue_repo: UploadQueueRepository | None,
@@ -741,6 +797,11 @@ def build_status_payload(
         upload_queue_available=upload_queue_repo is not None,
         community_upload_requested=community_upload_enabled,
     )
+    cpbo_status = (
+        cpbo_runtime.local_optimization_status_for_shot(last_shot_record)
+        if cpbo_runtime is not None and last_shot_record is not None
+        else None
+    )
     return {
         "addon_online": True,
         "install_id": config.install_id,
@@ -778,6 +839,27 @@ def build_status_payload(
         "optimizer_fallback_reason": None,
         "cpbo_profile_name": config.cpbo.profile_name,
         "cpbo_comparison_mode": config.cpbo.comparison_mode.value,
+        "cpbo_optimization_run_id": (
+            cpbo_status.optimization_run_id if cpbo_status is not None else None
+        ),
+        "cpbo_locally_converged": (
+            cpbo_status.locally_converged if cpbo_status is not None else False
+        ),
+        "cpbo_trust_region_length": (
+            cpbo_status.trust_region_length if cpbo_status is not None else None
+        ),
+        "cpbo_trust_region_success_count": (
+            cpbo_status.trust_region_success_count if cpbo_status is not None else 0
+        ),
+        "cpbo_trust_region_failure_count": (
+            cpbo_status.trust_region_failure_count if cpbo_status is not None else 0
+        ),
+        "cpbo_last_transition_action": (
+            cpbo_status.last_transition_action.value
+            if cpbo_status is not None
+            and cpbo_status.last_transition_action is not None
+            else None
+        ),
         "local_shot_count": len(optimizer_shots),
         "best_known_recipe": None,
         "upload_queue_count": upload_queue_count,

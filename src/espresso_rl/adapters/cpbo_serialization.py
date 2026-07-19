@@ -17,8 +17,10 @@ from espresso_rl.domain.cpbo import (
     RecipePoint,
     RecipeSpace,
     Suggestion,
+    TrustRegionAction,
     TrustRegionDiagnostics,
     TrustRegionState,
+    TrustRegionTransition,
 )
 from espresso_rl.domain.taste_goal import TasteGoal
 
@@ -278,6 +280,11 @@ def state_to_json(state: OptimizerState) -> str:
                 "success_count": trust.success_count,
                 "failure_count": trust.failure_count,
                 "restart_pending": trust.restart_pending,
+                "locally_converged": trust.locally_converged,
+                "transitions": [
+                    _trust_region_transition_to_dict(transition)
+                    for transition in trust.transitions
+                ],
             },
             "model_checkpoint": state.model_checkpoint,
             "trace_model_checkpoint": state.trace_model_checkpoint,
@@ -314,11 +321,15 @@ def state_from_json(value: Any) -> OptimizerState:
     trust = row["trust_region_state"]
     if not isinstance(trust, Mapping):
         raise ValueError("trust_region_state must be an object")
-    _require_keys(
+    _require_keys_allowing_optional(
         trust,
         {"center", "length", "success_count", "failure_count", "restart_pending"},
+        {"locally_converged", "transitions"},
         "trust-region state",
     )
+    transitions = trust.get("transitions", [])
+    if not isinstance(transitions, list):
+        raise ValueError("trust-region transitions must be an array")
     return OptimizerState(
         optimization_run_id=str(row["optimization_run_id"]),
         previous_valid_shot_id=_optional_string(row["previous_valid_shot_id"]),
@@ -330,6 +341,14 @@ def state_from_json(value: Any) -> OptimizerState:
             success_count=int(trust["success_count"]),
             failure_count=int(trust["failure_count"]),
             restart_pending=_strict_bool(trust["restart_pending"], "restart_pending"),
+            locally_converged=_strict_bool(
+                trust.get("locally_converged", False),
+                "locally_converged",
+            ),
+            transitions=tuple(
+                _trust_region_transition_from_dict(item)
+                for item in transitions
+            ),
         ),
         model_checkpoint=_optional_string(row["model_checkpoint"]),
         trace_model_checkpoint=_optional_string(row["trace_model_checkpoint"]),
@@ -376,6 +395,12 @@ def suggestion_to_json(suggestion: Suggestion) -> str:
                 "failure_count": trust.failure_count,
                 "restart_pending": trust.restart_pending,
                 "full_domain_proposal": trust.full_domain_proposal,
+                "locally_converged": trust.locally_converged,
+                "last_transition_action": (
+                    trust.last_transition_action.value
+                    if trust.last_transition_action is not None
+                    else None
+                ),
             },
             "model_version": suggestion.model_version,
             "iteration": suggestion.iteration,
@@ -425,7 +450,7 @@ def suggestion_from_json(value: Any) -> Suggestion:
         },
         "acquisition diagnostics",
     )
-    _require_keys(
+    _require_keys_allowing_optional(
         trust,
         {
             "length",
@@ -436,6 +461,7 @@ def suggestion_from_json(value: Any) -> Suggestion:
             "restart_pending",
             "full_domain_proposal",
         },
+        {"locally_converged", "last_transition_action"},
         "trust-region diagnostics",
     )
     return Suggestion(
@@ -467,10 +493,104 @@ def suggestion_from_json(value: Any) -> Suggestion:
             failure_count=int(trust["failure_count"]),
             restart_pending=_strict_bool(trust["restart_pending"], "restart_pending"),
             full_domain_proposal=_strict_bool(trust["full_domain_proposal"], "full_domain_proposal"),
+            locally_converged=_strict_bool(
+                trust.get("locally_converged", False),
+                "locally_converged",
+            ),
+            last_transition_action=(
+                TrustRegionAction(trust["last_transition_action"])
+                if trust.get("last_transition_action") is not None
+                else None
+            ),
         ),
         model_version=str(row["model_version"]),
         iteration=int(row["iteration"]),
         created_at=int(row["created_at"]),
+    )
+
+
+def _trust_region_transition_to_dict(
+    transition: TrustRegionTransition,
+) -> dict[str, Any]:
+    return {
+        "action": transition.action.value,
+        "label": transition.label.value if transition.label is not None else None,
+        "center_before": list(transition.center_before),
+        "center_after": list(transition.center_after),
+        "length_before": transition.length_before,
+        "length_after": transition.length_after,
+        "success_count": transition.success_count,
+        "failure_count": transition.failure_count,
+        "success_tolerance": transition.success_tolerance,
+        "failure_tolerance": transition.failure_tolerance,
+        "minimum_length": transition.minimum_length,
+        "maximum_length": transition.maximum_length,
+        "comparison_id": transition.comparison_id,
+        "new_shot_id": transition.new_shot_id,
+        "anchor_shot_id": transition.anchor_shot_id,
+        "incumbent_shot_id": transition.incumbent_shot_id,
+        "after_comparison_id": transition.after_comparison_id,
+        "control_event_id": transition.control_event_id,
+        "created_at": transition.created_at,
+    }
+
+
+def _trust_region_transition_from_dict(value: Any) -> TrustRegionTransition:
+    if not isinstance(value, Mapping):
+        raise ValueError("trust-region transition must be an object")
+    _require_keys_allowing_optional(
+        value,
+        {
+            "action",
+            "label",
+            "center_before",
+            "center_after",
+            "length_before",
+            "length_after",
+            "success_count",
+            "failure_count",
+            "success_tolerance",
+            "failure_tolerance",
+            "minimum_length",
+            "maximum_length",
+            "comparison_id",
+            "new_shot_id",
+            "anchor_shot_id",
+            "incumbent_shot_id",
+            "after_comparison_id",
+            "created_at",
+        },
+        {"control_event_id"},
+        "trust-region transition",
+    )
+    return TrustRegionTransition(
+        action=TrustRegionAction(value["action"]),
+        label=(
+            PreferenceLabel(value["label"])
+            if value["label"] is not None
+            else None
+        ),
+        center_before=tuple(value["center_before"]),
+        center_after=tuple(value["center_after"]),
+        length_before=float(value["length_before"]),
+        length_after=float(value["length_after"]),
+        success_count=int(value["success_count"]),
+        failure_count=int(value["failure_count"]),
+        success_tolerance=int(value["success_tolerance"]),
+        failure_tolerance=int(value["failure_tolerance"]),
+        minimum_length=float(value["minimum_length"]),
+        maximum_length=float(value["maximum_length"]),
+        comparison_id=_optional_string(value["comparison_id"]),
+        new_shot_id=_optional_string(value["new_shot_id"]),
+        anchor_shot_id=_optional_string(value["anchor_shot_id"]),
+        incumbent_shot_id=_optional_string(value["incumbent_shot_id"]),
+        after_comparison_id=_optional_string(value["after_comparison_id"]),
+        control_event_id=_optional_string(value.get("control_event_id")),
+        created_at=(
+            int(value["created_at"])
+            if value["created_at"] is not None
+            else None
+        ),
     )
 
 

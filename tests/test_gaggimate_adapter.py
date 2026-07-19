@@ -13,6 +13,7 @@ from espresso_rl.adapters.gaggimate_mqtt import (
     LOCAL_RESET_TOPIC,
     LIVE_SHOT_TOPIC,
     MACHINE_STATE_TOPIC,
+    OPTIMIZER_CONTROL_TOPIC,
     OPTIMIZER_SETTINGS_TOPIC,
     PREFERENCE_TOPIC,
     SHOT_TOPIC,
@@ -27,6 +28,7 @@ from espresso_rl.config import Config
 from espresso_rl.domain.cpbo import (
     CPBOProfile,
     ComparisonMode,
+    OptimizerControlAction,
     PendingPreferenceRequest,
     PreferenceLabel,
 )
@@ -288,6 +290,39 @@ class GaggimateAdapterTests(unittest.TestCase):
                     "AA_BB",
                 )
 
+    def test_optimizer_control_is_strict_and_canonical(self) -> None:
+        payload = {
+            "event_type": "optimizer_control",
+            "schema_version": 1,
+            "request_id": "resume_123",
+            "optimization_run_id": "run_1",
+            "action": "resume_local_exploration",
+            "machine_id": "gaggimate:AA_BB",
+            "timestamp": 123,
+            "source": "gaggimate_mqtt",
+        }
+        event = self.client.translate_optimizer_control_payload(payload, "AA_BB")
+        self.assertEqual(
+            event.action,
+            OptimizerControlAction.RESUME_LOCAL_EXPLORATION,
+        )
+        self.assertEqual(event.optimization_run_id, "run_1")
+        with self.assertRaises(ValueError):
+            self.client.translate_optimizer_control_payload(
+                {**payload, "unexpected": True},
+                "AA_BB",
+            )
+        with self.assertRaises(ValueError):
+            self.client.translate_optimizer_control_payload(
+                {**payload, "action": "restart_global"},
+                "AA_BB",
+            )
+        with self.assertRaisesRegex(ValueError, "does not match topic"):
+            self.client.translate_optimizer_control_payload(
+                {**payload, "machine_id": "gaggimate:CC_DD"},
+                "AA_BB",
+            )
+
     def test_connect_subscribes_to_preference_contract_without_rating_or_model_topics(self) -> None:
         mqtt = FakeMQTT()
         self.client._on_connect(mqtt, None, None, 0, None)  # type: ignore[arg-type]
@@ -302,6 +337,7 @@ class GaggimateAdapterTests(unittest.TestCase):
                 APPLY_TOPIC,
                 MACHINE_STATE_TOPIC,
                 OPTIMIZER_SETTINGS_TOPIC,
+                OPTIMIZER_CONTROL_TOPIC,
                 LOCAL_RESET_TOPIC,
                 LIVE_SHOT_TOPIC,
             },

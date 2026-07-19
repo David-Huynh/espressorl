@@ -218,11 +218,29 @@ A tie remains a JND observation but counts as a trust-region failure.
 | Minimum length | 0.5^7 |
 | Maximum length | 1.6 |
 | Successes before expansion | 3 |
-| Non-wins before contraction | 4 |
+| Non-wins before contraction | 2 |
 
-When the region falls below its minimum, one full-domain CPBO-MES proposal is
-made against the unchanged incumbent. An untested restart candidate is never
-declared best.
+`new_better` moves the center to the new incumbent, resets the failure counter,
+and increments the success counter. `anchor_better` and `tie` reset successes
+and increment failures. Reaching three successes doubles the length once and
+resets both counters. Reaching two non-wins halves the length once and resets
+both counters.
+
+A contraction that reaches the minimum length marks a best-incumbent run as
+locally converged. It does not emit a full-domain restart candidate. Explicit
+Resume Exploration restores the configured initial length around the current
+incumbent, clipped to the recipe space. It preserves physical shots,
+comparisons, the incumbent, model checkpoints, and all prior transition
+history. Global-previous mode has no trust region and continues to search the
+full configured domain.
+
+Every trust-region update is persisted as an audit transition containing the
+action, label, before/after center and length, counters and tolerances,
+comparison and shot identities, incumbent, and timestamp. Resume is an
+idempotent canonical control event with its own ID and records the comparison
+after which it occurred. Corrected-shot reconstruction replays immutable
+comparisons and resume markers deterministically instead of editing historical
+transitions in place.
 
 ## Persistence Migration
 
@@ -409,7 +427,8 @@ remain bounded to the new search space.
 5. A valid shot asks which result is closer to the run's snapshotted taste goal
    using exactly one three-outcome preference.
 6. The oriented comparison updates the GP and, in best mode, trust-region state.
-7. CPBO emits the next candidate.
+7. CPBO emits the next candidate unless the local trust region converged.
+8. A converged run resumes only after an explicit idempotent control event.
 
 The API shape is:
 

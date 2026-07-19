@@ -9,6 +9,7 @@ from espresso_rl.domain.cpbo import (
     CPBO_MODEL_VERSION,
     AcquisitionDiagnostics,
     ComparisonMode,
+    LocalOptimizationConvergedError,
     ModelRecommendation,
     OptimizationRun,
     OptimizerState,
@@ -37,6 +38,7 @@ from espresso_rl.optimizers.cpbo_trace import (
     IndependentTraceSurrogate,
 )
 from espresso_rl.optimizers.cpbo_trust_region import (
+    resume_trust_region,
     trust_region_bounds,
     update_trust_region,
     validate_q_one,
@@ -61,6 +63,13 @@ class ConsecutivePreferentialBayesianOptimizer:
         now: int,
     ) -> SuggestionComputation:
         self._validate_configuration_version(run, state)
+        if (
+            run.comparison_mode == ComparisonMode.BEST_INCUMBENT
+            and state.trust_region_state.locally_converged
+        ):
+            raise LocalOptimizationConvergedError(
+                "local CPBO converged; resume exploration before requesting another suggestion"
+            )
         valid_shots, recipe_by_id, shot_by_id = _validate_run_data(
             run,
             recipes,
@@ -123,10 +132,7 @@ class ConsecutivePreferentialBayesianOptimizer:
         raw_lengthscales = (
             fit.model.covar_module.raw_kernel.lengthscale.detach().reshape(-1).to(torch.float64)
         )
-        full_domain = (
-            run.comparison_mode == ComparisonMode.GLOBAL_PREVIOUS
-            or state.trust_region_state.restart_pending
-        )
+        full_domain = run.comparison_mode == ComparisonMode.GLOBAL_PREVIOUS
         if full_domain:
             lower_bounds = (0.0, 0.0, 0.0)
             upper_bounds = (1.0, 1.0, 1.0)
@@ -198,6 +204,12 @@ class ConsecutivePreferentialBayesianOptimizer:
             failure_count=state.trust_region_state.failure_count,
             restart_pending=state.trust_region_state.restart_pending,
             full_domain_proposal=full_domain,
+            locally_converged=state.trust_region_state.locally_converged,
+            last_transition_action=(
+                state.trust_region_state.transitions[-1].action
+                if state.trust_region_state.transitions
+                else None
+            ),
         )
         suggestion = Suggestion(
             suggestion_id=new_cpbo_id("suggestion"),
@@ -316,6 +328,26 @@ class ConsecutivePreferentialBayesianOptimizer:
             label,
             candidate_center=candidate_center,
             config=self.config.trust_region,
+        )
+
+    def resume_trust_region_state(
+        self,
+        state,
+        *,
+        center,
+        after_comparison_id,
+        incumbent_shot_id,
+        created_at,
+        control_event_id=None,
+    ):
+        return resume_trust_region(
+            state,
+            center=center,
+            config=self.config.trust_region,
+            after_comparison_id=after_comparison_id,
+            incumbent_shot_id=incumbent_shot_id,
+            created_at=created_at,
+            control_event_id=control_event_id,
         )
 
     def _validate_configuration_version(

@@ -22,7 +22,11 @@ from espresso_rl.optimizers.cpbo_mes import (
     predictive_outcome_probabilities,
 )
 from espresso_rl.optimizers.cpbo_truncation import sample_upper_truncated_bivariate_gaussian
-from espresso_rl.optimizers.cpbo_trust_region import trust_region_bounds, update_trust_region
+from espresso_rl.optimizers.cpbo_trust_region import (
+    resume_trust_region,
+    trust_region_bounds,
+    update_trust_region,
+)
 import espresso_rl.optimizers.cpbo_mes as cpbo_mes_module
 
 
@@ -229,7 +233,7 @@ class TrustRegionTests(unittest.TestCase):
                 config=self.config,
             )
         self.assertEqual(state.length, 1.6)
-        for _ in range(4):
+        for _ in range(2):
             state = update_trust_region(
                 state,
                 PreferenceLabel.ANCHOR_BETTER,
@@ -248,29 +252,50 @@ class TrustRegionTests(unittest.TestCase):
         self.assertTrue(all(low <= high for low, high in zip(lower, upper)))
         self.assertNotAlmostEqual(upper[0] - lower[0], upper[2] - lower[2])
 
-    def test_restart_requests_one_full_domain_iteration_without_moving_incumbent(self) -> None:
+    def test_minimum_contraction_converges_without_full_domain_restart(self) -> None:
         tiny = TrustRegionState(
             center=(0.4, 0.5, 0.6),
             length=self.config.minimum_length * 1.1,
-            failure_count=3,
+            failure_count=1,
         )
-        restarted = update_trust_region(
+        converged = update_trust_region(
             tiny,
             PreferenceLabel.TIE,
             candidate_center=(0.9, 0.9, 0.9),
             config=self.config,
         )
-        self.assertTrue(restarted.restart_pending)
-        self.assertEqual(restarted.center, tiny.center)
-        self.assertEqual(restarted.length, self.config.initial_length)
-        after_restart_loss = update_trust_region(
-            restarted,
-            PreferenceLabel.ANCHOR_BETTER,
-            candidate_center=(0.9, 0.9, 0.9),
-            config=self.config,
+        self.assertTrue(converged.locally_converged)
+        self.assertFalse(converged.restart_pending)
+        self.assertEqual(converged.center, tiny.center)
+        self.assertEqual(converged.length, self.config.minimum_length)
+        self.assertEqual(converged.transitions[-1].action.value, "converged")
+        with self.assertRaisesRegex(ValueError, "must be resumed"):
+            update_trust_region(
+                converged,
+                PreferenceLabel.ANCHOR_BETTER,
+                candidate_center=(0.9, 0.9, 0.9),
+                config=self.config,
+            )
+
+    def test_resume_restores_initial_radius_around_incumbent(self) -> None:
+        converged = TrustRegionState(
+            center=(0.4, 0.5, 0.6),
+            length=self.config.minimum_length,
+            locally_converged=True,
         )
-        self.assertFalse(after_restart_loss.restart_pending)
-        self.assertEqual(after_restart_loss.center, tiny.center)
+        resumed = resume_trust_region(
+            converged,
+            center=(0.3, 0.4, 0.5),
+            config=self.config,
+            after_comparison_id="comparison_7",
+            incumbent_shot_id="shot_3",
+            created_at=123,
+        )
+        self.assertFalse(resumed.locally_converged)
+        self.assertEqual(resumed.length, self.config.initial_length)
+        self.assertEqual(resumed.center, (0.3, 0.4, 0.5))
+        self.assertEqual(resumed.transitions[-1].action.value, "resumed")
+        self.assertEqual(resumed.transitions[-1].after_comparison_id, "comparison_7")
 
 
 def fast_mes_config() -> MESConfig:

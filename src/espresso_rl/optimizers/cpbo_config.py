@@ -180,15 +180,15 @@ class TrustRegionConfig:
     minimum_length: float = 0.5**7
     maximum_length: float = 1.6
     success_tolerance: int = 3
-    failure_tolerance: int = 4
+    failure_tolerance: int = 2
     shape_factor_min: float = 0.20
     shape_factor_max: float = 5.0
 
     def __post_init__(self) -> None:
         if not 0 < self.minimum_length < self.initial_length <= self.maximum_length:
             raise ValueError("trust-region length bounds are invalid")
-        if self.success_tolerance != 3 or self.failure_tolerance != 4:
-            raise ValueError("q=1 three-dimensional CPBO requires success=3 and failure=4")
+        if self.success_tolerance < 1 or self.failure_tolerance < 1:
+            raise ValueError("trust-region transition tolerances must be positive")
         if not 0 < self.shape_factor_min <= 1 <= self.shape_factor_max:
             raise ValueError("trust-region shape factor bounds are invalid")
 
