@@ -52,11 +52,8 @@ SHOT_ACK_TOPIC_SUFFIX = "rl/shot/ack"
 
 
 @dataclass(frozen=True)
-class _ShotDeliveryIdentity:
-    attempt_id: str
-    payload_hash: str
-    artifact_revision: int
-    encoding_version: int
+class _ShotDeliveryContext:
+    record_revision: int
     reprocess: bool
 
 
@@ -368,20 +365,20 @@ class GaggimateMQTTClient:
 
     def _handle_shot_message(self, payload: Any, mac: str) -> None:
         shot_id = _acknowledgeable_shot_id(payload)
-        identity: _ShotDeliveryIdentity | None = None
+        delivery: _ShotDeliveryContext | None = None
         try:
             if not isinstance(payload, dict):
                 raise ValueError("shot profile must be an object")
-            identity = _shot_delivery_identity(payload)
+            delivery = _shot_delivery_context(payload)
             event = self.translate_shot_payload(payload, mac)
             shot_id = event.shot_id
         except (TypeError, ValueError):
-            if shot_id is not None and identity is not None:
+            if shot_id is not None and delivery is not None:
                 self._publish_shot_ack(
                     mac,
                     shot_id,
                     f"gaggimate:{mac}",
-                    identity,
+                    delivery,
                     outcome="permanent_rejection",
                     reason="invalid_shot",
                 )
@@ -397,7 +394,7 @@ class GaggimateMQTTClient:
                 mac,
                 shot_id,
                 event.machine_id,
-                identity,
+                delivery,
                 outcome="permanent_rejection",
                 reason="invalid_shot",
             )
@@ -408,7 +405,7 @@ class GaggimateMQTTClient:
                 mac,
                 shot_id,
                 event.machine_id,
-                identity,
+                delivery,
                 outcome="transient_failure",
                 reason="ingest_unavailable",
             )
@@ -419,7 +416,7 @@ class GaggimateMQTTClient:
             mac,
             shot_id,
             event.machine_id,
-            identity,
+            delivery,
             outcome=outcome,
             reason=reason,
             preference_request=preference_request,
@@ -430,7 +427,7 @@ class GaggimateMQTTClient:
         mac: str,
         shot_id: str,
         machine_id: str,
-        identity: _ShotDeliveryIdentity,
+        delivery: _ShotDeliveryContext,
         *,
         outcome: str,
         reason: str,
@@ -442,13 +439,10 @@ class GaggimateMQTTClient:
         retryable = outcome == "transient_failure"
         payload = {
             "event_type": SHOT_ACK_EVENT_TYPE,
-            "schema_version": 2,
+            "schema_version": 3,
             "shot_id": shot_id,
             "machine_id": machine_id,
-            "attempt_id": identity.attempt_id,
-            "payload_hash": identity.payload_hash,
-            "artifact_revision": identity.artifact_revision,
-            "encoding_version": identity.encoding_version,
+            "record_revision": delivery.record_revision,
             "outcome": outcome,
             "retryable": retryable,
             "reason": reason,
@@ -1107,44 +1101,23 @@ def _acknowledgeable_shot_id(payload: Any) -> str | None:
     return value if 0 < len(value) <= 256 else None
 
 
-def _shot_delivery_identity(payload: dict[str, Any]) -> _ShotDeliveryIdentity:
+def _shot_delivery_context(payload: dict[str, Any]) -> _ShotDeliveryContext:
     delivery = _require_exact_object_fields(
         payload.get("delivery"),
-        frozenset(
-            {
-                "attempt_id",
-                "payload_hash",
-                "artifact_revision",
-                "encoding_version",
-                "reprocess",
-            }
-        ),
+        frozenset({"record_revision", "reprocess"}),
         "shot delivery",
     )
-    attempt_id = delivery["attempt_id"]
-    payload_hash = delivery["payload_hash"]
-    revision = delivery["artifact_revision"]
-    encoding_version = delivery["encoding_version"]
+    revision = delivery["record_revision"]
     reprocess = delivery["reprocess"]
     if (
-        not isinstance(attempt_id, str)
-        or not 0 < len(attempt_id.strip()) <= 96
-        or not isinstance(payload_hash, str)
-        or re.fullmatch(r"[0-9a-fA-F]{64}", payload_hash) is None
-        or isinstance(revision, bool)
+        isinstance(revision, bool)
         or not isinstance(revision, int)
         or revision < 1
-        or isinstance(encoding_version, bool)
-        or not isinstance(encoding_version, int)
-        or encoding_version != 1
         or not isinstance(reprocess, bool)
     ):
-        raise ValueError("shot delivery identity is invalid")
-    return _ShotDeliveryIdentity(
-        attempt_id=attempt_id.strip(),
-        payload_hash=payload_hash.lower(),
-        artifact_revision=revision,
-        encoding_version=encoding_version,
+        raise ValueError("shot delivery context is invalid")
+    return _ShotDeliveryContext(
+        record_revision=revision,
         reprocess=reprocess,
     )
 

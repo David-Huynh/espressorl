@@ -473,10 +473,34 @@ class GaggimateAdapterTests(unittest.TestCase):
         self.assertEqual(mqtt.published[-1][0], f"gaggimate/AA_BB/{SHOT_ACK_TOPIC_SUFFIX}")
         self.assertEqual((mqtt.published[-1][2], mqtt.published[-1][3]), (1, False))
         self.assertEqual(first["event_type"], SHOT_ACK_EVENT_TYPE)
+        self.assertEqual(first["schema_version"], 3)
+        self.assertEqual(first["record_revision"], 1)
         self.assertEqual(first["outcome"], "accepted")
         self.assertFalse(first["retryable"])
         self.assertEqual(second["outcome"], "already_processed")
         self.assertFalse(second["retryable"])
+
+    def test_shot_delivery_rejects_invalid_delivery_context_without_ingesting(self) -> None:
+        invalid_deliveries = (
+            {"record_revision": 0, "reprocess": False},
+            {"record_revision": True, "reprocess": False},
+            {"record_revision": 1, "reprocess": 1},
+            {"record_revision": 1},
+            {"record_revision": 1, "reprocess": False, "extra": "field"},
+        )
+        for delivery in invalid_deliveries:
+            with self.subTest(delivery=delivery):
+                payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+                payload["delivery"] = delivery
+                mqtt = FakeMQTT()
+                ingested: list[object] = []
+                self.client._client = mqtt  # type: ignore[assignment]
+                self.client._on_shot = ingested.append
+
+                self.client._handle_shot_message(payload, "AA_BB")
+
+                self.assertEqual(ingested, [])
+                self.assertEqual(mqtt.published, [])
 
     def test_shot_delivery_ack_includes_canonical_pending_preference(self) -> None:
         payload = json.loads(FIXTURE.read_text(encoding="utf-8"))

@@ -100,6 +100,10 @@ gaggimate/{topic_id}/rl/shot/ack
 Gaggimate retains the immutable shot locally until EspressoRL responds with
 `accepted` or `already_processed`. Missing or explicitly transient receipts
 retry with backoff; permanent validation failures do not retry.
+The shot carries a positive `record_revision` and a `reprocess` flag. Receipt
+schema 3 echoes that revision, allowing firmware to ignore an acknowledgement
+for a locally corrected older revision without maintaining per-attempt IDs or
+payload hashes.
 
 During an eligible shot, Gaggimate also publishes non-retained QoS 0 live
 telemetry at 4 Hz. EspressoRL validates and persists the live session for
