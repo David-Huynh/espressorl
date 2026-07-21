@@ -43,7 +43,28 @@ class ApplicationServiceTests(unittest.TestCase):
                 self.assertFalse(hasattr(stored, "human_rating"))
                 self.assertFalse(hasattr(stored, "reward"))
 
-    def test_local_optimization_disabled_drops_before_storage_or_upload(self) -> None:
+    def test_local_optimization_disabled_drops_without_upload_consent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with SQLiteStore(Path(tmp) / "espresso.db") as store:
+                shots = SQLiteShotRepository(store)
+                queue = SQLiteUploadQueueRepository(store)
+                service = EspressoRLService(
+                    shots,
+                    SQLiteRecommendationRepository(store),
+                    upload_queue=queue,
+                    clock=lambda: 200,
+                )
+
+                result = service.ingest_shot_profile(
+                    _shot_event(local_optimization_enabled=False)
+                )
+
+                self.assertFalse(result.stored)
+                self.assertEqual(result.dropped_reason, "local_optimization_disabled")
+                self.assertIsNone(shots.get("shot_1"))
+                self.assertEqual(queue.count_by_status(), {})
+
+    def test_local_optimization_disabled_can_still_queue_community_upload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with SQLiteStore(Path(tmp) / "espresso.db") as store:
                 shots = SQLiteShotRepository(store)
@@ -60,10 +81,11 @@ class ApplicationServiceTests(unittest.TestCase):
                     _shot_event(local_optimization_enabled=False)
                 )
 
-                self.assertFalse(result.stored)
-                self.assertEqual(result.dropped_reason, "local_optimization_disabled")
-                self.assertIsNone(shots.get("shot_1"))
-                self.assertEqual(queue.count_by_status(), {})
+                self.assertTrue(result.stored)
+                stored = shots.get("shot_1")
+                self.assertIsNotNone(stored)
+                self.assertTrue(stored.exclude_from_local_optimization)  # type: ignore[union-attr]
+                self.assertEqual(queue.count_by_status().get(UploadQueueStatus.PENDING), 1)
 
     def test_community_upload_is_independent_and_requires_explicit_consent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

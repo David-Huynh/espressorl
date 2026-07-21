@@ -142,13 +142,19 @@ class EspressoRLService:
     def ingest_shot_profile(self, event: ShotProfileEvent) -> IngestResult:
         now = self._clock()
         classification = classify_shot_profile_event(event)
+        community_upload_requested = (
+            event.community_upload_enabled
+            if event.community_upload_enabled is not None
+            else self.community_upload_enabled_for(event.install_id, event.machine_id)
+        )
         if not classification.locally_optimizable:
             reason = (
                 "local_optimization_disabled"
                 if not event.local_optimization_enabled or event.exclude_from_local_optimization
                 else f"not_locally_optimizable:{classification.shot_type.value}"
             )
-            return IngestResult(shot=None, recommendation=None, dropped_reason=reason)
+            if not community_upload_requested:
+                return IngestResult(shot=None, recommendation=None, dropped_reason=reason)
 
         profile_quality = resample_profile_with_quality(event)
         shot_metadata = resample_shot_metadata(event)
@@ -159,10 +165,14 @@ class EspressoRLService:
             if not _same_immutable_shot_event(existing, event, effective_profile_hash):
                 raise ValueError(f"shot_id {event.shot_id} conflicts with an existing immutable shot")
             return IngestResult(shot=existing, recommendation=None, replayed=True)
-        recommendation = self._recommendation_for_event(
-            event,
-            now,
-            raw_profile_hash=effective_profile_hash,
+        recommendation = (
+            self._recommendation_for_event(
+                event,
+                now,
+                raw_profile_hash=effective_profile_hash,
+            )
+            if classification.locally_optimizable
+            else None
         )
         shot = ShotRecord(
             shot_id=event.shot_id,
@@ -788,11 +798,7 @@ class EspressoRLService:
 
 
 def _shot_is_community_uploadable(shot: ShotRecord) -> bool:
-    return (
-        shot.shot_type == ShotType.ESPRESSO
-        and not shot.exclude_from_local_optimization
-        and shot.optimization_weight > 0.0
-    )
+    return shot.shot_type == ShotType.ESPRESSO
 
 
 def _same_immutable_shot_event(
