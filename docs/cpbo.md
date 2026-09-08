@@ -82,6 +82,16 @@ stable configuration hash rather than an observed shot-trajectory hash.
 Missing identifiers are not fabricated. Materially different contexts are not
 mixed.
 
+The retired `basket_size_ml` field never identified a physical basket and was
+not a dose bound. It has been removed, together with unused `grinder_model` and
+`machine_pressure_bar` options. Old option files may still contain these keys;
+they are ignored. The exact synthetic `basket_ml:18` run identity migrates to a
+missing basket identity when read, retaining its run, shots and comparisons.
+Real basket identifiers remain distinct. The optional physics-model basket
+diameter is a separate measurement; missing diameter uses the dose proxy.
+Users set the search space with minimum and maximum dose, not basket volume.
+Changing temperature within the same identified profile does not create a run.
+
 ### Taste goal context
 
 A taste goal is either `balanced` or a versioned `custom` set of categorical
@@ -161,6 +171,35 @@ each standardized trace feature from recipe controls. Candidate and observed
 recipes both use surrogate predictions in the trace kernel. The trace component
 stays disabled, with exactly zero weight, until enough complete finite traces
 exist and validation passes.
+
+Validation uses a deterministic holdout of every fourth distinct recipe group,
+keeping repeated shots of a recipe together. At least four distinct recipes and
+the configured minimum number of telemetry shots (eight by default) are required.
+The validation fit starts cold, and its median/IQR scaling is computed only from
+training rows. Held-out standardized RMSE must satisfy the configured per-feature
+limit, and aggregate squared error must beat the training-median baseline by at
+least 10%. Only then is the surrogate refitted on all available traces. A failed
+gate leaves raw-recipe and physics BO available. This is a small-data predictive
+gate, not an estimate of taste-model quality or a claim of external validation.
+
+### Comparison evidence and abstention
+
+Pending comparison requests include the selected taste goal and, when the stored
+canonical shot is available, the reference's timestamp, grind setting, dose,
+target yield, actual output and profile label. Both machine and browser ask
+which shot is closer to that goal and show the reference shot ID. Missing
+details are displayed as unavailable rather than guessed.
+
+"Can't compare / don't remember" is an abstention action, not a fourth preference
+label. The MQTT adapter maps `label: "abstain"` to a canonical event with
+`abstained=True` and `label=None`. The application atomically records the
+resolution in physical-shot metadata and clears the pending comparison through
+the existing repository port. It creates no comparison or community taste label,
+and does not change the incumbent or trust region. The physical shot and trace
+remain usable. Both comparison policies retain the last comparable reference
+after abstention. Replays are idempotent and can retry candidate generation after
+a model-fit failure. The browser waits for firmware's durable local confirmation
+before clearing the prompt; this does not constitute container acknowledgement.
 
 ## CPBO-MES
 

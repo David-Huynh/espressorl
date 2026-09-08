@@ -298,6 +298,39 @@ class ConsecutivePreferenceOptimizationService:
         self._repository.record_shot(recipe_point, shot, updated_state)
         return shot
 
+    def record_abstention(self, run_id: str, new_shot_id: str, anchor_shot_id: str) -> OptimizerState:
+        """Resolve a comparison without a label or any incumbent/TR update.
+
+        The physical attempt stays available, including its trace. The last
+        compared shot remains the anchor until an actual preference arrives.
+        """
+        self._require_run(run_id)
+        state = self._require_state(run_id)
+        shot = self.get_shot(new_shot_id)
+        if shot.optimization_run_id != run_id or shot.status != PhysicalShotStatus.VALID:
+            raise ValueError("abstention requires a valid shot in this run")
+        previous = shot.metadata.get("preference_abstention")
+        if previous is not None:
+            if not isinstance(previous, dict) or previous.get("anchor_shot_id") != anchor_shot_id:
+                raise ValueError("abstention replay changes the anchor")
+            return state
+        if state.pending_shot_id != new_shot_id or state.pending_anchor_shot_id != anchor_shot_id:
+            raise ValueError("abstention does not match the pending comparison")
+        anchor = self.get_shot(anchor_shot_id)
+        if anchor.optimization_run_id != run_id or anchor.status != PhysicalShotStatus.VALID:
+            raise ValueError("abstention anchor is invalid")
+        recipe = self._repository.get_recipe(shot.recipe_id)
+        if recipe is None:
+            raise ValueError("abstention shot recipe is missing")
+        now = self._clock()
+        updated = replace(state, pending_recipe_id=None, pending_anchor_shot_id=None,
+                          pending_shot_id=None, pending_suggestion_json=None, updated_at=now)
+        recorded = replace(shot, metadata={**shot.metadata, "preference_abstention": {
+            "anchor_shot_id": anchor_shot_id, "created_at": now,
+        }})
+        self._repository.replace_shot_observation(recipe, recorded, updated, invalidate_pending_suggestion=True)
+        return updated
+
     def record_preference(
         self,
         run_id: str,

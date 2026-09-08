@@ -23,14 +23,10 @@ class Config:
     mqtt_password: str = ""
     # Grinder geometry Ã¢â‚¬â€ user registers once
     microns_per_step: float = 10.0  # ÃŽÂ¼m per click/step
-    grinder_model: str = ""
     install_id: str = "local_install"
     machine_id: str = "gaggimate:local"
     bean_context_id: str | None = None
     grinder_context_id: str | None = None
-    # Machine geometry
-    machine_pressure_bar: float = 9.0
-    basket_size_ml: float = 18.0
     # Initial state Ã¢â‚¬â€ user sets these before first run
     initial_relative_grind_steps_from_reference: float | None = None
     initial_relative_grind_um_from_reference: float = 0.0
@@ -127,15 +123,12 @@ class Config:
             mqtt_user=opts.get("mqtt_user", os.getenv("MQTT_USER", "")),
             mqtt_password=opts.get("mqtt_password", os.getenv("MQTT_PASSWORD", "")),
             microns_per_step=microns_per_step,
-            grinder_model=opts.get("grinder_model", ""),
             install_id=opts.get("install_id", os.getenv("ESPRESSORL_INSTALL_ID", "local_install")),
             machine_id=opts.get("machine_id", "gaggimate:local"),
             bean_context_id=_optional_string(opts.get("bean_context_id")),
             grinder_context_id=_optional_string(
                 opts.get("grinder_context_id", os.getenv("ESPRESSORL_GRINDER_CONTEXT_ID"))
             ),
-            machine_pressure_bar=float(opts.get("machine_pressure_bar", 9.0)),
-            basket_size_ml=float(opts.get("basket_size_ml", 18.0)),
             initial_relative_grind_steps_from_reference=initial_relative_grind_steps_from_reference,
             initial_relative_grind_um_from_reference=initial_relative_grind_um_from_reference,
             initial_dose_g=float(opts.get("initial_dose_g", 18.0)),

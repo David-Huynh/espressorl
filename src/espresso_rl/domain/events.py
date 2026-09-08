@@ -419,7 +419,7 @@ class PreferenceFeedbackEvent:
     optimization_run_id: str
     new_shot_id: str
     anchor_shot_id: str
-    label: PreferenceLabel
+    label: PreferenceLabel | None
     install_id: str
     machine_id: str
     timestamp: int
@@ -427,6 +427,7 @@ class PreferenceFeedbackEvent:
     comparison_mode: ComparisonMode | None = None
     source: str = "unknown"
     schema_version: int = 1
+    abstained: bool = False
 
     event_type: str = field(default="preference_feedback", init=False)
 
@@ -449,7 +450,10 @@ class PreferenceFeedbackEvent:
             raise ValueError("preference feedback timestamp must be nonnegative")
         if not isinstance(self.source, str) or not self.source.strip() or len(self.source) > 80:
             raise ValueError("preference feedback source is invalid")
-        object.__setattr__(self, "label", PreferenceLabel(self.label))
+        if not isinstance(self.abstained, bool) or self.abstained != (self.label is None):
+            raise ValueError("abstention must have no preference label")
+        if self.label is not None:
+            object.__setattr__(self, "label", PreferenceLabel(self.label))
         if not isinstance(self.taste_goal, TasteGoal):
             object.__setattr__(self, "taste_goal", TasteGoal.from_dict(self.taste_goal))
         if self.comparison_mode is not None:

@@ -534,7 +534,6 @@ class ShotRecord:
     created_at: int = field(default_factory=now_ts)
     updated_at: int = field(default_factory=now_ts)
 
-    basket_size_ml: float = 18.0
     user_id: str = ""
 
     def __post_init__(self) -> None:

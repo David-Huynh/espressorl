@@ -11,6 +11,7 @@ from espresso_rl.domain.cpbo import (
     ComparisonMode,
     OptimizationRunContext,
     PendingPreferenceRequest,
+    PreferenceAnchorSummary,
     PhysicalShotStatus,
     PreferenceLabel,
     RecipeDomain,
@@ -255,6 +256,18 @@ class CPBORuntimeBridge:
         state = self._optimizer.get_state(run_id)
         if state.pending_shot_id != shot_id or state.pending_anchor_shot_id is None:
             return None
+        anchor_shot = self._shots.get(state.pending_anchor_shot_id)
+        anchor = None
+        if anchor_shot is not None and _known_recipe(anchor_shot) is not None:
+            anchor = PreferenceAnchorSummary(
+                timestamp=anchor_shot.timestamp,
+                relative_grind_steps_from_reference=anchor_shot.relative_grind_steps_from_reference,
+                dose_g=anchor_shot.dose_in_g if anchor_shot.dose_observed else anchor_shot.dose_target_g,
+                target_yield_g=anchor_shot.target_yield_g,
+                beverage_out_g=anchor_shot.beverage_out_g,
+                current_absolute_step=anchor_shot.current_absolute_step,
+                profile_label=anchor_shot.profile_label,
+            )
         return PendingPreferenceRequest(
             install_id=run.context.install_id,
             machine_id=run.context.machine_id,
@@ -264,6 +277,7 @@ class CPBORuntimeBridge:
             comparison_mode=run.comparison_mode,
             taste_goal=run.context.taste_goal,
             recommendation_id=recommendation_id,
+            anchor=anchor,
         )
 
     def handle_preference(self, event: PreferenceFeedbackEvent) -> Recommendation | None:
@@ -272,20 +286,19 @@ class CPBORuntimeBridge:
             raise ValueError("preference install_id does not own the CPBO run")
         if not _same_machine_id(run.context.machine_id, event.machine_id):
             raise ValueError("preference machine_id does not own the CPBO run")
-        pending = self._optimizer.get_pending_suggestion(event.optimization_run_id)
-        if pending is None:
-            raise ValueError("preference optimization run has no pending comparison")
-        if event.comparison_mode is not None and event.comparison_mode != pending.comparison_mode:
+        if event.comparison_mode is not None and event.comparison_mode != run.comparison_mode:
             raise ValueError("preference comparison_mode does not match the optimization run")
         if event.taste_goal.fingerprint != run.context.taste_goal.fingerprint:
             raise ValueError("preference taste goal does not match the optimization run")
-        updated_state = self._optimizer.record_preference(
-            event.optimization_run_id,
-            event.new_shot_id,
-            event.anchor_shot_id,
-            event.label,
-        )
-        comparison = self._optimizer.get_comparison(
+        if event.abstained:
+            updated_state = self._optimizer.record_abstention(
+                event.optimization_run_id, event.new_shot_id, event.anchor_shot_id,
+            )
+        else:
+            updated_state = self._optimizer.record_preference(
+                event.optimization_run_id, event.new_shot_id, event.anchor_shot_id, event.label,
+            )
+        comparison = None if event.abstained else self._optimizer.get_comparison(
             event.optimization_run_id,
             event.new_shot_id,
             event.anchor_shot_id,
@@ -296,7 +309,7 @@ class CPBORuntimeBridge:
         current_recipe = _known_recipe(shot)
         if current_recipe is None:
             raise ValueError("CPBO preference shot no longer has complete recipe controls")
-        if self._comparison_sink is not None:
+        if self._comparison_sink is not None and comparison is not None:
             self._comparison_sink(
                 PairwiseShotComparison(
                     comparison_id=comparison.comparison_id,
@@ -318,6 +331,8 @@ class CPBORuntimeBridge:
                 )
             )
         if updated_state.trust_region_state.locally_converged:
+            return None
+        if updated_state.pending_shot_id is not None:
             return None
         suggestion = self._optimizer.suggest_next(event.optimization_run_id)
         recommendation = self._machine_recommendation(suggestion, shot, current_recipe)
@@ -577,7 +592,6 @@ def strict_context_from_shot(shot: ShotRecord) -> OptimizationRunContext:
         grinder_context_id=shot.grinder_context_id,
         profile_id=profile_id,
         raw_profile_hash=raw_profile_hash,
-        basket_id=f"basket_ml:{shot.basket_size_ml:.6g}",
         user_id=shot.user_id or None,
         taste_goal=shot.taste_goal,
     )

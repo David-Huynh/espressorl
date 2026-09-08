@@ -205,7 +205,7 @@ class RealCPBOEngineIntegrationTests(unittest.TestCase):
                         synthetic_utility(request.recipe.normalized_x),
                     )
 
-    def test_telemetry_can_activate_after_run_start_without_schema_change(self) -> None:
+    def test_insufficient_validation_recipes_keep_raw_physics_fallback_without_schema_change(self) -> None:
         config = fast_cpbo_config(trace_minimum=2)
         clock = CounterClock()
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,8 +261,8 @@ class RealCPBOEngineIntegrationTests(unittest.TestCase):
                     )
 
                 with_trace = service.suggest_next(request.optimization_run_id)
-                self.assertTrue(with_trace.acquisition.trace_kernel_enabled)
-                self.assertGreater(with_trace.acquisition.kernel_weights["trace"], 0.0)
+                self.assertFalse(with_trace.acquisition.trace_kernel_enabled)
+                self.assertEqual(with_trace.acquisition.kernel_weights["trace"], 0.0)
                 shots = repository.list_shots(request.optimization_run_id)
                 self.assertEqual(
                     [shot.telemetry_available for shot in shots],

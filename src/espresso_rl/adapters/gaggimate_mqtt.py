@@ -4,7 +4,7 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from collections.abc import Callable
 from typing import Any
 
@@ -458,6 +458,8 @@ class GaggimateMQTTClient:
                 "taste_goal": preference_request.taste_goal.to_dict(),
                 "recommendation_id": preference_request.recommendation_id,
             }
+            if preference_request.anchor is not None:
+                payload["preference_request"]["anchor"] = asdict(preference_request.anchor)
         topic = f"gaggimate/{mac}/{SHOT_ACK_TOPIC_SUFFIX}"
         self._client.publish(topic, json.dumps(payload), qos=1, retain=False)
         logger.info("Acknowledged shot %s outcome=%s on %s", shot_id, outcome, topic)
@@ -683,7 +685,8 @@ class GaggimateMQTTClient:
                 "anchor_shot_id",
                 maximum=256,
             ),
-            label=_required_bounded_string(payload.get("label"), "label", maximum=32),
+            label=None if payload.get("label") == "abstain" else _required_bounded_string(payload.get("label"), "label", maximum=32),
+            abstained=payload.get("label") == "abstain",
             comparison_mode=_required_bounded_string(
                 payload.get("comparison_mode"),
                 "comparison_mode",
@@ -1112,7 +1115,7 @@ def _shot_delivery_context(payload: dict[str, Any]) -> _ShotDeliveryContext:
     if (
         isinstance(revision, bool)
         or not isinstance(revision, int)
-        or revision < 1
+        or not 1 <= revision <= 0xFFFFFFFF
         or not isinstance(reprocess, bool)
     ):
         raise ValueError("shot delivery context is invalid")

@@ -705,6 +705,34 @@ class PreferenceComparison:
 
 
 @dataclass(frozen=True)
+class PreferenceAnchorSummary:
+    timestamp: int
+    relative_grind_steps_from_reference: float
+    dose_g: float
+    target_yield_g: float
+    beverage_out_g: float | None = None
+    current_absolute_step: float | None = None
+    profile_label: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.timestamp, bool) or not isinstance(self.timestamp, int) or self.timestamp < 0:
+            raise ValueError("anchor timestamp must be a nonnegative integer")
+        for name in ("relative_grind_steps_from_reference", "dose_g", "target_yield_g", "beverage_out_g", "current_absolute_step"):
+            value = getattr(self, name)
+            if value is None and name in {"beverage_out_g", "current_absolute_step"}:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"anchor {name} must be finite")
+            if name in {"dose_g", "target_yield_g", "beverage_out_g"} and value <= 0:
+                raise ValueError(f"anchor {name} must be positive")
+            maximum = 100 if name == "dose_g" else (1000 if name in {"target_yield_g", "beverage_out_g"} else 10000)
+            if abs(value) > maximum:
+                raise ValueError(f"anchor {name} exceeds the integrity envelope")
+        if self.profile_label is not None and (not isinstance(self.profile_label, str) or len(self.profile_label) > 160):
+            raise ValueError("anchor profile label is invalid")
+
+
+@dataclass(frozen=True)
 class PendingPreferenceRequest:
     """Canonical request to compare one observed shot with its CPBO anchor."""
 
@@ -716,8 +744,11 @@ class PendingPreferenceRequest:
     comparison_mode: ComparisonMode
     taste_goal: TasteGoal = field(default_factory=TasteGoal.balanced)
     recommendation_id: str | None = None
+    anchor: PreferenceAnchorSummary | None = None
 
     def __post_init__(self) -> None:
+        if self.anchor is not None and not isinstance(self.anchor, PreferenceAnchorSummary):
+            raise ValueError("pending preference anchor must be canonical")
         identifiers = {
             "install_id": (self.install_id, 160),
             "machine_id": (self.machine_id, 160),

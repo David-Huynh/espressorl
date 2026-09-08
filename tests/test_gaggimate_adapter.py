@@ -484,6 +484,7 @@ class GaggimateAdapterTests(unittest.TestCase):
         invalid_deliveries = (
             {"record_revision": 0, "reprocess": False},
             {"record_revision": True, "reprocess": False},
+            {"record_revision": 2**32, "reprocess": False},
             {"record_revision": 1, "reprocess": 1},
             {"record_revision": 1},
             {"record_revision": 1, "reprocess": False, "extra": "field"},

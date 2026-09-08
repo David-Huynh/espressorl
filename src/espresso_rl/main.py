@@ -311,11 +311,11 @@ def run_public(config: Config) -> None:
         recommendation = cpbo_runtime.handle_preference(event)
         if recommendation is None:
             logger.info(
-                "CPBO preference stored run=%s new=%s anchor=%s label=%s; local optimum converged",
+                "CPBO preference stored run=%s new=%s anchor=%s label=%s; no new candidate ready",
                 event.optimization_run_id,
                 event.new_shot_id,
                 event.anchor_shot_id,
-                event.label.value,
+                "abstained" if event.abstained else event.label.value,
             )
             mqtt_client.clear_recommendation(event.machine_id)
             shot = shot_repo.get(event.new_shot_id)
@@ -334,7 +334,7 @@ def run_public(config: Config) -> None:
             event.optimization_run_id,
             event.new_shot_id,
             event.anchor_shot_id,
-            event.label.value,
+            "abstained" if event.abstained else event.label.value,
             recommendation.recommendation_id,
         )
         mqtt_client.publish_recommendation(recommendation)

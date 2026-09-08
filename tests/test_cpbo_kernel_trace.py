@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -111,25 +112,65 @@ class TraceSurrogateTests(unittest.TestCase):
 
     def test_activation_threshold_and_candidate_features_come_from_predictions(self) -> None:
         config = TraceSurrogateConfig(
-            minimum_valid_telemetry_shots=3,
-            fit_steps=3,
+            minimum_valid_telemetry_shots=8,
+            fit_steps=20,
             early_stopping_patience=2,
-            validation_max_standardized_rmse=100.0,
+            validation_max_standardized_rmse=1.5,
         )
         surrogate = IndependentTraceSurrogate(config)
-        x = torch.tensor(
-            [[0.0, 0.2, 0.3], [0.4, 0.5, 0.6], [1.0, 0.8, 0.7]],
-            dtype=torch.float64,
-        )
-        rows = torch.stack(
-            [torch.linspace(index, index + 1.0, len(TRACE_FEATURE_NAMES)) for index in range(3)]
-        ).to(torch.float64)
-        self.assertTrue(surrogate.fit(x, rows))
+        x, rows = predictive_trace_data()
+        # Repeated pulls must not leak into the held-out recipe groups.
+        x, rows = x.repeat_interleave(2, dim=0), rows.repeat_interleave(2, dim=0)
+        calls = []
+        fit_training = IndependentTraceSurrogate._fit_training
+
+        def observe_training(instance, inputs, targets, **kwargs):
+            calls.append((inputs.clone(), kwargs.get("warm_start_checkpoint")))
+            return fit_training(instance, inputs, targets, **kwargs)
+
+        with patch.object(IndependentTraceSurrogate, "_fit_training", observe_training):
+            self.assertTrue(surrogate.fit(x, rows, warm_start_checkpoint="invalid checkpoint"))
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(calls[0][1])  # Validation never loads full-data weights.
+        self.assertEqual(calls[1][1], "invalid checkpoint")
+        unique = torch.unique(x, dim=0)
+        training_groups = {tuple(point) for point in calls[0][0].tolist()}
+        self.assertEqual(len(training_groups), 9)
+        self.assertTrue(all(tuple(point) not in training_groups for point in unique[3::4].tolist()))
         candidate = surrogate.predict(torch.tensor([[0.25, 0.4, 0.5]], dtype=torch.float64))
         self.assertTrue(candidate.enabled)
         self.assertEqual(candidate.mean.shape, (1, len(TRACE_FEATURE_NAMES)))
         self.assertEqual(candidate.variance.shape, candidate.mean.shape)
         self.assertTrue(torch.all(candidate.variance > 0.0))
+
+    def test_repeated_recipe_cannot_validate_itself(self) -> None:
+        surrogate = IndependentTraceSurrogate(TraceSurrogateConfig(fit_steps=3))
+        x = torch.zeros((8, 3), dtype=torch.float64)
+        rows = torch.randn((8, len(TRACE_FEATURE_NAMES)), dtype=torch.float64)
+        self.assertFalse(surrogate.fit(x, rows))
+        self.assertIn("trace_kernel_waiting_for_distinct_validation_recipes", surrogate.warnings)
+
+    def test_holdout_must_beat_constant_baseline_even_with_permissive_rmse(self) -> None:
+        surrogate = IndependentTraceSurrogate(TraceSurrogateConfig(
+            fit_steps=3, validation_max_standardized_rmse=100.0))
+        x, rows = predictive_trace_data()
+        # Training rows are constant; only held-out recipes contain a signal.
+        rows[:] = 0
+        rows[3::4] = 1
+        self.assertFalse(surrogate.fit(x, rows))
+        self.assertIn("trace_kernel_held_out_validation_failed", surrogate.warnings)
+        self.assertFalse(surrogate.predict(x).enabled)
+
+    def test_invalid_or_insufficient_data_disables_previous_fit(self) -> None:
+        surrogate = IndependentTraceSurrogate(TraceSurrogateConfig(fit_steps=3))
+        x, rows = predictive_trace_data()
+        surrogate.enabled = True
+        rows[0, 0] = float("nan")
+        self.assertFalse(surrogate.fit(x, rows))
+        self.assertFalse(surrogate.enabled)
+        with self.assertRaises(ValueError):
+            surrogate.fit(x[:, :2], rows)
+        self.assertFalse(surrogate.fit(x[:2], rows[:2]))
 
     def test_expected_uncertain_rbf_is_symmetric_psd(self) -> None:
         mean = torch.tensor([[0.0, 0.0], [0.5, -0.2], [1.0, 0.4]], dtype=torch.float64)
@@ -155,6 +196,13 @@ class TraceSurrogateTests(unittest.TestCase):
         )
         self.assertLess(float(uncertain_similarity), 1.0)
         self.assertTrue(torch.isfinite(uncertain_similarity).all())
+
+
+def predictive_trace_data():
+    t = torch.linspace(0, 1, 12, dtype=torch.float64)
+    x = torch.stack((t, t * 0.5, t * 0.8), dim=-1)
+    rows = t[:, None] * torch.linspace(1, 2, len(TRACE_FEATURE_NAMES), dtype=torch.float64)[None, :]
+    return x, rows
 
 
 def recipe_space() -> RecipeSpace:

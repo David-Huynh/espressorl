@@ -104,6 +104,9 @@ The shot carries a positive `record_revision` and a `reprocess` flag. Receipt
 schema 3 echoes that revision, allowing firmware to ignore an acknowledgement
 for a locally corrected older revision without maintaining per-attempt IDs or
 payload hashes.
+Update firmware and container together: the obsolete firmware schema-2 receipt
+and attempt/hash delivery envelope are no longer used. Integrity hashes remain
+part of the firmware's local artifact storage.
 
 During an eligible shot, Gaggimate also publishes non-retained QoS 0 live
 telemetry at 4 Hz. EspressoRL validates and persists the live session for
@@ -113,8 +116,9 @@ live samples.
 
 The first valid shot establishes a baseline. CPBO then proposes exactly one
 quantized recipe and identifies its comparison anchor. After the candidate is
-pulled, the user supplies one of the three preference outcomes and CPBO emits
-the next candidate. `best_incumbent` and `global_previous` comparison modes are
+pulled, the user compares it against the displayed reference and taste goal, or
+chooses "Can't compare / don't remember" to continue without supplying a label.
+CPBO emits the next candidate. `best_incumbent` and `global_previous` comparison modes are
 configured under `cpbo.comparison_mode`.
 
 Taste goals are selected on Gaggimate as balanced or categorical custom

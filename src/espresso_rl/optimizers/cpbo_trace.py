@@ -86,6 +86,62 @@ class IndependentTraceSurrogate:
         *,
         warm_start_checkpoint: str | None = None,
     ) -> bool:
+        """Gate the trace kernel on unseen recipes, then refit all observations.
+
+        Repeated pulls of a recipe always stay in the same split. Validation
+        fits are cold: a checkpoint trained on held-out rows would leak labels.
+        Scaling and the constant baseline use only the training partition.
+        """
+        x = torch.as_tensor(train_x, dtype=torch.float64)
+        rows = torch.as_tensor(trace_rows, dtype=torch.float64)
+        self.enabled = False
+        self.models = []
+        self.likelihoods = []
+        self.feature_median = self.feature_scale = None
+        if x.ndim != 2 or x.shape[-1] != 3:
+            raise ValueError("trace surrogate inputs must have shape [n, 3]")
+        if rows.ndim != 2 or rows.shape != (x.shape[0], len(TRACE_FEATURE_NAMES)):
+            raise ValueError("trace feature matrix has an unexpected shape")
+        if x.shape[0] < self.config.minimum_valid_telemetry_shots:
+            self.warnings = ("trace_kernel_waiting_for_minimum_telemetry_shots",)
+            return False
+        if torch.any(~torch.isfinite(x)) or torch.any(~torch.isfinite(rows)):
+            self.warnings = ("trace_kernel_non_finite_training_data",)
+            return False
+        unique, inverse = torch.unique(x, dim=0, return_inverse=True)
+        if len(unique) < 4:
+            self.warnings = ("trace_kernel_waiting_for_distinct_validation_recipes",)
+            return False
+        # Deterministic recipe-group holdout; no repeated recipe can straddle it.
+        held_out = inverse.remainder(4) == 3
+        validation = IndependentTraceSurrogate(self.config)
+        if not validation._fit_training(x[~held_out], rows[~held_out]):
+            self.warnings = ("trace_kernel_validation_fit_failed",)
+            return False
+        prediction = validation.predict(x[held_out]).mean
+        target = (rows[held_out] - validation.feature_median) / validation.feature_scale
+        errors = torch.mean((prediction - target).square(), dim=0)
+        baseline_errors = torch.mean(target.square(), dim=0)
+        # Require useful predictive skill, not just a permissive absolute bound.
+        baseline_mse = float(baseline_errors.mean())
+        mse = float(errors.mean())
+        if (
+            torch.any(~torch.isfinite(errors))
+            or torch.any(errors.sqrt() > self.config.validation_max_standardized_rmse)
+            or baseline_mse <= self.config.feature_epsilon
+            or mse > 0.9 * baseline_mse
+        ):
+            self.warnings = ("trace_kernel_held_out_validation_failed",)
+            return False
+        return self._fit_training(x, rows, warm_start_checkpoint=warm_start_checkpoint)
+
+    def _fit_training(
+        self,
+        train_x: Tensor,
+        trace_rows: Tensor,
+        *,
+        warm_start_checkpoint: str | None = None,
+    ) -> bool:
         train_x = torch.as_tensor(train_x, dtype=torch.float64)
         trace_rows = torch.as_tensor(trace_rows, dtype=torch.float64)
         self.models = []
@@ -95,10 +151,6 @@ class IndependentTraceSurrogate:
             raise ValueError("trace surrogate inputs must have shape [n, 3]")
         if trace_rows.ndim != 2 or trace_rows.shape != (train_x.shape[0], len(TRACE_FEATURE_NAMES)):
             raise ValueError("trace surrogate feature matrix has an unexpected shape")
-        if train_x.shape[0] < self.config.minimum_valid_telemetry_shots:
-            self.enabled = False
-            self.warnings = ("trace_kernel_waiting_for_minimum_telemetry_shots",)
-            return False
         if torch.any(~torch.isfinite(train_x)) or torch.any(~torch.isfinite(trace_rows)):
             self.enabled = False
             self.warnings = ("trace_kernel_non_finite_training_data",)
@@ -169,16 +221,6 @@ class IndependentTraceSurrogate:
             likelihood.load_state_dict(best_likelihood)
             model.eval()
             likelihood.eval()
-            with torch.no_grad(), gpytorch.settings.fast_pred_var(), gpytorch.settings.cholesky_jitter(
-                self.config.jitter
-            ):
-                training_prediction = likelihood(model(train_x)).mean
-            rmse = torch.sqrt(torch.mean((training_prediction - target) ** 2))
-            if not torch.isfinite(rmse) or float(rmse) > self.config.validation_max_standardized_rmse:
-                warnings.append(f"trace_feature_{feature_index}_validation_failed")
-                self.enabled = False
-                self.warnings = tuple(sorted(set(warnings)))
-                return False
             self.models.append(model)
             self.likelihoods.append(likelihood)
 

@@ -81,9 +81,14 @@ def run_from_json(value: Any) -> OptimizationRun:
         },
         "optimization run",
     )
+    context = dict(row["context"])
+    # Data migration only: this exact identifier was manufactured from a
+    # constant, never measured. Preserve real basket identities and run history.
+    if context.get("basket_id") == "basket_ml:18":
+        context["basket_id"] = None
     return OptimizationRun(
         run_id=str(row["run_id"]),
-        context=OptimizationRunContext.from_dict(row["context"]),
+        context=OptimizationRunContext.from_dict(context),
         comparison_mode=ComparisonMode(row["comparison_mode"]),
         recipe_space=RecipeSpace.from_dict(row["recipe_space"]),
         created_at=int(row["created_at"]),
