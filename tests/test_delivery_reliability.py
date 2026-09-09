@@ -169,7 +169,34 @@ class DeliveryReliabilityTests(unittest.TestCase):
             self.assertEqual(_physical_status(runtime._shot("shot", grind=5, shot_end_state=outcome)), PhysicalShotStatus.VALID)
         self.assertEqual(_physical_status(runtime._shot("shot", grind=5, shot_end_state="machine_failure")), PhysicalShotStatus.MACHINE_FAILURE)
 
+    def test_apply_success_does_not_prove_manual_grinder_was_moved(self):
+        import test_application_service as application
+        from espresso_rl.domain.follow_through import infer_follow_through
+        from espresso_rl.domain.models import RecommendationApplyStatus, RecommendationDecision, FollowThroughState
+        recommendation = application._recommendation()
+        recommendation.apply_status = RecommendationApplyStatus.APPLIED
+        actual = runtime._shot("actual", grind=2)
+        result = infer_follow_through(actual, recommendation, RecommendationDecision.ACCEPTED)
+        self.assertEqual(result.state, FollowThroughState.PARTIALLY_FOLLOWED)
+        self.assertLess(result.attribution_weight, 1)
+        self.assertEqual(actual.relative_grind_steps_from_reference, 2)
 
+    def test_unknown_grind_never_becomes_followed_even_when_targets_match(self):
+        import test_application_service as application
+        from espresso_rl.domain.follow_through import infer_follow_through
+        from espresso_rl.domain.models import RecommendationDecision, FollowThroughState
+        recommendation = application._recommendation()
+        shot = runtime._shot("unknown", grind=3)
+        shot.grind_observed = False
+        result = infer_follow_through(shot, recommendation, RecommendationDecision.ACCEPTED)
+        self.assertEqual(result.state, FollowThroughState.UNKNOWN)
+        fixture = runtime.CPBORuntimeBridgeTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        fixture.shots.rows[shot.shot_id] = shot
+        outcome = fixture.bridge([4]).handle_shot(shot)
+        self.assertEqual(outcome.skipped_reason, "recipe_controls_not_fully_known")
+        self.assertFalse(outcome.awaiting_preference)
 
     def test_interrupted_candidate_does_not_request_a_comparison(self):
         fixture = runtime.CPBORuntimeBridgeTests()

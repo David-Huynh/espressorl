@@ -59,6 +59,22 @@ are eligible completion states. Ordinary deactivation, `manual_or_interrupted`,
 missing states and unknown strings are aborted, never silently valid.
 `manual_finished` is reserved for an explicit finish operation.
 
+## Post-shot recipe confirmation
+
+"Use" displays the intended manual grinder setting. The firmware snapshots it at
+brew start with `grind_observed=false` until the user confirms the combined grind
+and dose prompt. Both interfaces offer Yes, Change values (editable grind/dose),
+and Not sure. Editing reports the actual recipe for the completed shot without
+changing machine targets. User-reported dose uses `dose_target_confirmed`; measured
+dose remains measured when unchanged. `grind_observed` includes explicit user
+reports and does not imply a grinder position sensor.
+
+Not sure preserves the physical shot while its recipe stays unknown. Existing
+CPBO recipe gating excludes it, and follow-through also requires known grind and
+dose rather than assuming matching target numbers prove compliance. The prompt
+uses existing durable artifact revisions and needs no additional MQTT round trip
+to save an answer while the container is offline.
+
 ## Local Dashboard
 
 ```json

@@ -23,6 +23,30 @@ BINARY = Path(__file__).resolve().parents[2] / "gaggiuino-gaggimate/.pio/host-ar
 
 @unittest.skipUnless(BINARY.exists(), "build the firmware host codec test first")
 class FirmwareContractTests(unittest.TestCase):
+    def test_confirmed_and_unknown_recipes_cross_the_wire_without_assumptions(self):
+        from espresso_rl.adapters.sqlite_repositories import SQLiteStore, SQLiteShotRepository, SQLiteRecommendationRepository
+        from espresso_rl.application.services import EspressoRLService
+        from espresso_rl.application.cpbo_runtime import _known_recipe
+        fixture = fixtures.GaggimateAdapterTests()
+        fixture.setUp()
+        for confirmed in (True, False):
+            with self.subTest(confirmed=confirmed), tempfile.TemporaryDirectory() as folder:
+                command = "--export-confirmed-recipe" if confirmed else "--export-unknown-recipe"
+                payload = json.loads(subprocess.check_output([str(BINARY), command], text=True, timeout=30))
+                event = fixture.client.translate_shot_payload(payload, "AA_BB")
+                with SQLiteStore(Path(folder) / "recipe.db") as store:
+                    shots = SQLiteShotRepository(store)
+                    result = EspressoRLService(shots, SQLiteRecommendationRepository(store), clock=lambda: 1720000100).ingest_shot_profile(event)
+                    self.assertTrue(result.stored)
+                    shot = shots.get(event.shot_id)
+                    self.assertEqual(shot.grind_observed, confirmed)
+                    self.assertEqual(shot.dose_target_confirmed, confirmed)
+                    self.assertEqual(_known_recipe(shot) is not None, confirmed)
+                    if confirmed:
+                        self.assertEqual(shot.current_absolute_step, 14)
+                        self.assertEqual(shot.relative_grind_steps_from_reference, 4)
+                        self.assertEqual(shot.dose_target_g, 19)
+
     def test_cpp_shot_to_python_ingest_to_cpp_receipt(self):
         payload = json.loads(subprocess.check_output([str(BINARY), "--export-shot"], text=True, timeout=30))
         self.assertEqual(payload["delivery"], {"record_revision": 7, "reprocess": False})
