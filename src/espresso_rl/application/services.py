@@ -63,31 +63,6 @@ class IngestResult:
         return self.shot is not None
 
 
-def _recommendation_signature(recommendation: Recommendation) -> tuple:
-    return (
-        recommendation.status.value,
-        recommendation.apply_status.value,
-        recommendation.shown_count > 0,
-        tuple(sorted(recommendation.applied_fields.items())),
-        tuple(sorted(recommendation.manual_fields)),
-        recommendation.apply_error,
-        recommendation.grind_delta_steps_from_current,
-        round(recommendation.grind_delta_um_from_current, 4),
-        round(recommendation.projected_relative_step_from_reference, 4),
-        round(recommendation.projected_relative_grind_um_from_reference, 4),
-        round(recommendation.next_dose_g, 4),
-        round(recommendation.target_yield_g, 4),
-        round(recommendation.target_ratio, 4),
-        recommendation.mode.value,
-        recommendation.grinder_context_id,
-        recommendation.optimization_run_id,
-        recommendation.comparison_anchor_shot_id,
-        recommendation.comparison_mode,
-        recommendation.preference_feedback_required,
-        round(recommendation.confidence, 4),
-        recommendation.reason,
-    )
-
 
 def _normal_context_key(value: str | None) -> str:
     return "" if value is None else " ".join(value.casefold().split())
@@ -164,6 +139,8 @@ class EspressoRLService:
         if existing is not None:
             if not _same_immutable_shot_event(existing, event, effective_profile_hash):
                 raise ValueError(f"shot_id {event.shot_id} conflicts with an existing immutable shot")
+            # A prior attempt may have saved the shot before upload enqueue failed.
+            self._store_shot(existing, now, community_upload_enabled=event.community_upload_enabled)
             return IngestResult(shot=existing, recommendation=None, replayed=True)
         recommendation = (
             self._recommendation_for_event(
@@ -623,6 +600,7 @@ class EspressoRLService:
                 comparison.comparison_id,
                 exc,
             )
+            raise
 
     def _recommendation_for_event(
         self,
@@ -766,15 +744,13 @@ class EspressoRLService:
                     shot.shot_id,
                     exc,
                 )
+                raise
 
     def _store_recommendation(self, recommendation: Recommendation, now: int) -> None:
-        prior = self._recommendations.get(recommendation.recommendation_id)
         self._recommendations.upsert(recommendation)
         if self._upload_queue is None:
             return
         if not self.community_upload_enabled_for(recommendation.install_id, recommendation.machine_id):
-            return
-        if prior is not None and _recommendation_signature(prior) == _recommendation_signature(recommendation):
             return
         try:
             self._upload_queue.enqueue(make_recommendation_upload_item(recommendation, now))
@@ -784,6 +760,7 @@ class EspressoRLService:
                 recommendation.recommendation_id,
                 exc,
             )
+            raise
 
     @staticmethod
     def _require_recommendation_owner(

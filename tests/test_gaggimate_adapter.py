@@ -72,12 +72,14 @@ class FakeMQTT:
     def __init__(self) -> None:
         self.published: list[tuple[str, str, int, bool]] = []
         self.subscriptions: list[str] = []
+        self.subscription_qos = {}
 
     def publish(self, topic: str, payload: str, qos: int, retain: bool) -> None:
         self.published.append((topic, payload, qos, retain))
 
-    def subscribe(self, topic: str) -> None:
+    def subscribe(self, topic: str, qos=0) -> None:
         self.subscriptions.append(topic)
+        self.subscription_qos[topic] = qos
 
 
 class GaggimateAdapterTests(unittest.TestCase):
@@ -340,8 +342,12 @@ class GaggimateAdapterTests(unittest.TestCase):
                 OPTIMIZER_CONTROL_TOPIC,
                 LOCAL_RESET_TOPIC,
                 LIVE_SHOT_TOPIC,
+                "gaggimate/+/rl/community/handoff",
             },
         )
+        self.assertEqual(mqtt.subscription_qos[PREFERENCE_TOPIC], 1)
+        self.assertEqual(mqtt.subscription_qos[CORRECTION_TOPIC], 1)
+        self.assertEqual(mqtt.subscription_qos[LIVE_SHOT_TOPIC], 0)
         self.assertFalse(any("rating" in topic or "dreamer" in topic for topic in mqtt.subscriptions))
 
     def test_live_shot_payload_translates_to_canonical_events(self) -> None:

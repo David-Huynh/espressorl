@@ -9,6 +9,8 @@ from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from espresso_rl.adapters.gaggimate_mqtt import GaggimateMQTTClient
+from espresso_rl.adapters.delivery_receipts import DatabaseDeliveryReceipts
+from espresso_rl.application.community_handoff import CommunityHandoffService
 from espresso_rl.adapters.postgres_repositories import (
     PostgresCommunityWarehouse,
     PostgresLocalDataRepository,
@@ -568,6 +570,11 @@ def run_public(config: Config) -> None:
     mqtt_client = GaggimateMQTTClient(
         config=config,
         on_shot=runtime_coordinator.handle_shot,
+        delivery_receipts=DatabaseDeliveryReceipts(shot_repo._store),
+        on_community_handoff=CommunityHandoffService(
+            upload_queue_repo, enabled=config.should_enqueue_community_uploads(),
+            install_id=config.install_id, clock=config.now, shots=shot_repo, recommendations=recommendation_repo,
+        ).accept,
         on_preference=on_preference,
         on_correction=on_correction,
         on_upload_maintenance=on_upload_maintenance,

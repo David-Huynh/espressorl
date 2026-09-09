@@ -16,6 +16,8 @@ gaggimate/{topic_id}/rl/recommendation
 gaggimate/{topic_id}/rl/status
 gaggimate/{topic_id}/rl/shot/ack
 gaggimate/{topic_id}/rl/shot/live
+gaggimate/{topic_id}/rl/lifecycle/ack
+gaggimate/{topic_id}/rl/community/handoff
 ```
 
 Shot profiles and acknowledgements use QoS 1. The acknowledgement is an
@@ -97,8 +99,36 @@ withholds a useful physical trajectory. Transient failures retry; permanent
 schema or credential failures discard only the upload snapshot and preserve
 local data.
 
-Community upload has its own signed HTTP queue. Local MQTT retries never enqueue
-another community copy; the two delivery lifecycles are independent.
+The container owns all new cloud uploads, HMAC credentials, HTTPS connections,
+and retry scheduling. Enable community upload both on the machine (consent) and
+in the container, and configure the URLs above. The ESP32 sends completed records
+over local MQTT; its web UI no longer asks for Supabase credentials or URLs.
+Live 4 Hz samples are stored locally by the container and do not cause individual
+Supabase requests. Completed-shot artifacts still need bounded device storage
+for recovery while the container is offline.
+
+Firmware with an old cloud backlog transfers one record at a time using
+`rl/community/handoff`. It retains each record until the MQTT outbox has saved it;
+the outbox retains it until the container has committed it to its upload queue.
+Newer container records override old backlog snapshots. Cloud handoffs have lower
+priority and reserved queue capacity prevents them consuming every feedback slot.
+Invalid records are quarantined for diagnosis.
+
+The MQTT adapter uses a stable client ID, persistent session and QoS 1 lifecycle
+subscriptions. Each lifecycle receipt identifies the SHA-256 of the exact topic,
+a newline, and payload bytes. Broker acknowledgement alone never deletes the
+firmware record. `DeliveryReceiptRepository` is a port; its database adapter
+journals completed processing before publishing a non-retained application
+receipt. Storage/model failures remain retryable. A retry after saved feedback
+resumes suggestion generation without adding another comparison. This is
+at-least-once delivery: handlers must remain replay-safe because a process can
+stop between application persistence and journaling its receipt.
+
+The application uses the existing upload queue port; MQTT, SQLite/Postgres and
+Supabase remain adapters. Source-event replay repairs an upload enqueue that
+failed after local persistence. Identical uploads remain idempotent.
+Deploy the matching firmware and container together: older containers do not
+emit lifecycle receipts and cannot drain the new durable outbox.
 
 Deploy current Supabase resources with:
 

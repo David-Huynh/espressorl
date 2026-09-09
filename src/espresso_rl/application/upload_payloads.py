@@ -15,7 +15,7 @@ from espresso_rl.domain.models import (
 
 def make_shot_upload_item(shot: ShotRecord, now: int) -> UploadQueueItem:
     payload = shot_upload_payload(shot)
-    return _make_item("shot", shot.shot_id, payload, now)
+    return make_upload_item("shot", shot.shot_id, payload, now)
 
 
 def make_recommendation_upload_item(
@@ -24,7 +24,7 @@ def make_recommendation_upload_item(
 ) -> UploadQueueItem:
     payload = recommendation_upload_payload(recommendation)
     upload_id = f"recommendation_{recommendation.recommendation_id}"
-    return _make_item("recommendation", recommendation.recommendation_id, payload, now, upload_id=upload_id)
+    return make_upload_item("recommendation", recommendation.recommendation_id, payload, now, upload_id=upload_id)
 
 
 def make_comparison_upload_item(
@@ -32,7 +32,7 @@ def make_comparison_upload_item(
     now: int,
 ) -> UploadQueueItem:
     payload = comparison_upload_payload(comparison)
-    return _make_item("comparison", comparison.comparison_id, payload, now)
+    return make_upload_item("comparison", comparison.comparison_id, payload, now)
 
 
 def shot_upload_payload(shot: ShotRecord) -> dict[str, Any]:
@@ -230,7 +230,7 @@ def _optional_int_array(value: Any) -> list[int] | None:
     return [int(item) for item in value]
 
 
-def _make_item(
+def make_upload_item(
     record_type: str,
     record_id: str,
     payload: dict[str, Any],

@@ -79,7 +79,7 @@ class RecommendationRepository(Protocol):
 
 
 class UploadQueueRepository(Protocol):
-    def enqueue(self, item: UploadQueueItem) -> None:
+    def enqueue(self, item: UploadQueueItem, *, only_if_new: bool = False) -> None:
         ...
 
     def list_ready(self, now: int, limit: int = 100) -> list[UploadQueueItem]:

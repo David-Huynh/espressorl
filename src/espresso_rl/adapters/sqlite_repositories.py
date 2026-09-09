@@ -1816,8 +1816,14 @@ class SQLiteUploadQueueRepository:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
 
-    def enqueue(self, item: UploadQueueItem) -> None:
+    def enqueue(self, item: UploadQueueItem, *, only_if_new: bool = False) -> None:
         conn = self._store.conn
+        # Device backlog must never supersede a record already owned by the container.
+        if only_if_new and conn.execute(
+            "SELECT 1 FROM upload_queue WHERE local_record_type=? AND local_record_id=? LIMIT 1",
+            (item.local_record_type, item.local_record_id),
+        ).fetchone():
+            return
         # Idempotency: this exact content was already uploaded; nothing to do.
         if conn.execute(
             """

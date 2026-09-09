@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -10,6 +11,7 @@ from typing import Any
 
 import paho.mqtt.client as mqtt
 
+from espresso_rl.ports.delivery_receipts import DeliveryReceiptRepository
 from espresso_rl.config import Config
 from espresso_rl.domain.events import (
     LocalResetEvent,
@@ -190,7 +192,11 @@ class GaggimateMQTTClient:
         on_local_reset: Callable[[LocalResetEvent], None] | None = None,
         on_live_shot: Callable[[LiveShotEvent], None] | None = None,
         on_optimizer_control: Callable[[OptimizerControlEvent], None] | None = None,
+        delivery_receipts: DeliveryReceiptRepository | None = None,
+        on_community_handoff=None,
     ) -> None:
+        self._delivery_receipts = delivery_receipts
+        self._on_community_handoff = on_community_handoff
         self._config = config
         self._on_shot = on_shot
         self._on_correction = on_correction
@@ -204,7 +210,11 @@ class GaggimateMQTTClient:
         self._on_live_shot = on_live_shot or (lambda event: None)
         self._on_optimizer_control = on_optimizer_control or (lambda event: None)
         self._status_omitted_recent_counts: dict[str, int] = {}
-        self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        self._client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id="espressorl-" + hashlib.sha256(config.install_id.encode()).hexdigest()[:24],
+            clean_session=False,
+        )
         if config.mqtt_user:
             self._client.username_pw_set(config.mqtt_user, config.mqtt_password)
         self._client.on_connect = self._on_connect
@@ -294,17 +304,18 @@ class GaggimateMQTTClient:
         properties: mqtt.Properties | None,
     ) -> None:
         if reason_code == 0:
-            client.subscribe(SHOT_TOPIC)
-            client.subscribe(PREFERENCE_TOPIC)
-            client.subscribe(CORRECTION_TOPIC)
-            client.subscribe(UPLOAD_REQUEUE_TOPIC)
-            client.subscribe(DECISION_TOPIC)
-            client.subscribe(APPLY_TOPIC)
-            client.subscribe(MACHINE_STATE_TOPIC)
-            client.subscribe(OPTIMIZER_SETTINGS_TOPIC)
-            client.subscribe(OPTIMIZER_CONTROL_TOPIC)
-            client.subscribe(LOCAL_RESET_TOPIC)
-            client.subscribe(LIVE_SHOT_TOPIC)
+            client.subscribe(SHOT_TOPIC, qos=1)
+            client.subscribe(PREFERENCE_TOPIC, qos=1)
+            client.subscribe(CORRECTION_TOPIC, qos=1)
+            client.subscribe(UPLOAD_REQUEUE_TOPIC, qos=1)
+            client.subscribe(DECISION_TOPIC, qos=1)
+            client.subscribe(APPLY_TOPIC, qos=1)
+            client.subscribe(MACHINE_STATE_TOPIC, qos=1)
+            client.subscribe(OPTIMIZER_SETTINGS_TOPIC, qos=1)
+            client.subscribe(OPTIMIZER_CONTROL_TOPIC, qos=1)
+            client.subscribe(LOCAL_RESET_TOPIC, qos=1)
+            client.subscribe("gaggimate/+/rl/community/handoff", qos=1)
+            client.subscribe(LIVE_SHOT_TOPIC, qos=0)
             logger.info(
                 "Subscribed to %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
                 SHOT_TOPIC,
@@ -331,37 +342,74 @@ class GaggimateMQTTClient:
         try:
             parts = msg.topic.split("/")
             mac = parts[1] if len(parts) > 1 else "unknown"
-            payload_text = msg.payload.decode().strip()
-            if not payload_text:
+            payload_text = msg.payload.decode()
+            if not payload_text.strip():
                 logger.debug("Ignoring empty MQTT payload on %s", msg.topic)
                 return
             if msg.topic.endswith("/rl/shot/live") and len(msg.payload) > 4096:
                 raise ValueError("live-shot payload exceeds 4096 bytes")
+            if len(msg.payload) > 262144:
+                raise ValueError("MQTT payload exceeds intake budget")
             payload = json.loads(payload_text)
             if msg.topic.endswith("/shot/profile"):
                 self._handle_shot_message(payload, mac)
             elif msg.topic.endswith("/rl/shot/live"):
                 self._on_live_shot(self.translate_live_shot_payload(payload, mac))
-            elif msg.topic.endswith("/rl/preference"):
-                self._on_preference(self.translate_preference_payload(payload, mac))
-            elif msg.topic.endswith("/rl/shot/correction"):
-                self._on_correction(self.translate_correction_payload(payload, mac))
-            elif msg.topic.endswith("/rl/upload/requeue"):
-                self._on_upload_maintenance(self.translate_upload_maintenance_payload(payload, mac))
-            elif msg.topic.endswith("/rl/recommendation/decision"):
-                self._on_decision(self.translate_decision_payload(payload, mac))
-            elif msg.topic.endswith("/rl/recommendation/apply"):
-                self._on_apply(self.translate_apply_payload(payload, mac))
-            elif msg.topic.endswith("/machine/state"):
-                self._on_machine_state(self.translate_machine_state_payload(payload, mac))
-            elif msg.topic.endswith("/rl/settings"):
-                self._on_optimizer_settings(self.translate_optimizer_settings_payload(payload, mac))
-            elif msg.topic.endswith("/rl/control"):
-                self._on_optimizer_control(self.translate_optimizer_control_payload(payload, mac))
-            elif msg.topic.endswith("/rl/local/reset"):
-                self._on_local_reset(self.translate_local_reset_payload(payload, mac))
+            else:
+                routes = {
+                    "rl/preference": (self.translate_preference_payload, self._on_preference),
+                    "rl/shot/correction": (self.translate_correction_payload, self._on_correction),
+                    "rl/upload/requeue": (self.translate_upload_maintenance_payload, self._on_upload_maintenance),
+                    "rl/recommendation/decision": (self.translate_decision_payload, self._on_decision),
+                    "rl/recommendation/apply": (self.translate_apply_payload, self._on_apply),
+                    "machine/state": (self.translate_machine_state_payload, self._on_machine_state),
+                    "rl/settings": (self.translate_optimizer_settings_payload, self._on_optimizer_settings),
+                    "rl/control": (self.translate_optimizer_control_payload, self._on_optimizer_control),
+                    "rl/local/reset": (self.translate_local_reset_payload, self._on_local_reset),
+                    "rl/community/handoff": (self.translate_community_handoff, self._on_community_handoff),
+                }
+                suffix = "/".join(parts[2:])
+                if suffix in routes and _MACHINE_TOPIC_ID.fullmatch(mac):
+                    translate, handle = routes[suffix]
+                    if suffix in {"machine/state", "rl/settings"}:
+                        handle(translate(payload, mac))
+                    else:
+                        self._handle_lifecycle(msg.topic, payload_text, payload, mac, translate, handle)
         except Exception:
             logger.exception("Error handling message on %s", msg.topic)
+
+    def translate_community_handoff(self, payload, mac):
+        if not isinstance(payload, dict) or not _same_gaggimate_machine_id(
+            str(payload.get("machine_id", "")), f"gaggimate:{mac}"
+        ):
+            raise ValueError("community handoff machine does not match topic")
+        from espresso_rl.application.upload_validation import validate_upload_payload
+        result = validate_upload_payload(payload)
+        if not result.ok:
+            raise ValueError("invalid community record")
+        return payload
+
+    def _handle_lifecycle(self, topic, text, payload, mac, translate, handle):
+        delivery_id = hashlib.sha256((topic + "\n" + text).encode()).hexdigest()
+        outcome = self._delivery_receipts.get(delivery_id) if self._delivery_receipts else None
+        if outcome is None:
+            try:
+                event = translate(payload, mac)
+            except (ValueError, TypeError, KeyError):
+                outcome = "permanent_rejection"
+            else:
+                if handle is None:
+                    raise RuntimeError("delivery handler unavailable")
+                # All application failures remain retryable, including model-fit
+                # failures after feedback was committed. Do not journal success.
+                handle(event)
+                outcome = "accepted"
+            if self._delivery_receipts is not None:
+                self._delivery_receipts.record(delivery_id, outcome)
+        self._client.publish(f"gaggimate/{mac}/rl/lifecycle/ack", json.dumps({
+            "event_type": "lifecycle_ack", "schema_version": 1,
+            "machine_id": f"gaggimate:{mac}", "delivery_id": delivery_id, "outcome": outcome,
+        }), qos=1, retain=False)
 
     def _handle_shot_message(self, payload: Any, mac: str) -> None:
         shot_id = _acknowledgeable_shot_id(payload)
