@@ -648,12 +648,13 @@ def _known_recipe(shot: ShotRecord) -> Recipe | None:
 
 
 def _physical_status(shot: ShotRecord) -> PhysicalShotStatus:
-    state = (shot.shot_end_state or "finished").strip().lower()
-    if state in {"aborted", "abort", "cancelled", "canceled"}:
-        return PhysicalShotStatus.ABORTED
+    state = (shot.shot_end_state or "unknown").strip().lower()
+    if state in {"finished", "manual_finished"}:
+        return PhysicalShotStatus.VALID
     if state in {"failed", "failure", "machine_failure", "error"}:
         return PhysicalShotStatus.MACHINE_FAILURE
-    return PhysicalShotStatus.VALID
+    # Missing, unfamiliar and legacy ambiguous outcomes are not taste evidence.
+    return PhysicalShotStatus.ABORTED
 
 
 def _shot_started_at(shot: ShotRecord) -> int:

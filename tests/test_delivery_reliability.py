@@ -160,3 +160,28 @@ class DeliveryReliabilityTests(unittest.TestCase):
         payload.update(machine_id="gaggimate:AA_BB", timestamp=1720000000, profile_temperature_c=93, final_phase_temperature_c=93)
         self.deliver(payload)
         self.assertEqual(self.broker.published, [])
+
+    def test_completion_allowlist_never_promotes_ambiguous_or_unknown_outcomes(self):
+        for outcome in (None, "", "manual_or_interrupted", "interrupted", "typo", "aborted"):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(_physical_status(runtime._shot("shot", grind=5, shot_end_state=outcome)), PhysicalShotStatus.ABORTED)
+        for outcome in ("finished", "manual_finished"):
+            self.assertEqual(_physical_status(runtime._shot("shot", grind=5, shot_end_state=outcome)), PhysicalShotStatus.VALID)
+        self.assertEqual(_physical_status(runtime._shot("shot", grind=5, shot_end_state="machine_failure")), PhysicalShotStatus.MACHINE_FAILURE)
+
+
+
+    def test_interrupted_candidate_does_not_request_a_comparison(self):
+        fixture = runtime.CPBORuntimeBridgeTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        bridge = fixture.bridge([6, 7])
+        baseline = runtime._shot("baseline", grind=5)
+        fixture.shots.rows[baseline.shot_id] = baseline
+        bridge.handle_shot(baseline)
+        interrupted = runtime._shot("interrupted", grind=6, shot_end_state="manual_or_interrupted")
+        fixture.shots.rows[interrupted.shot_id] = interrupted
+        result = bridge.handle_shot(interrupted)
+        self.assertFalse(result.awaiting_preference)
+        self.assertIsNone(result.preference_request)
+        self.assertEqual(fixture.repository.get_shot(interrupted.shot_id).status, PhysicalShotStatus.ABORTED)

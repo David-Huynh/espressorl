@@ -54,7 +54,10 @@ duplicate live samples are removed. Stale sessions expire after 24 hours.
 
 Corrections may exclude bad puck preparation, utility brews, or unobserved
 recipe controls. Failed and aborted physical shots remain operational records
-but never become preference observations.
+but never become preference observations. Only `finished` and `manual_finished`
+are eligible completion states. Ordinary deactivation, `manual_or_interrupted`,
+missing states and unknown strings are aborted, never silently valid.
+`manual_finished` is reserved for an explicit finish operation.
 
 ## Local Dashboard
 
